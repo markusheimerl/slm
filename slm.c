@@ -35,17 +35,82 @@ char* read_text_file(const char* filename, size_t* text_length) {
     return buffer;
 }
 
+// Split text into separate training examples (conversations)
+char** split_into_examples(const char* text, int* num_examples) {
+    // Count the number of examples (separated by single newlines)
+    int count = 0;
+    const char* pos = text;
+    while ((pos = strstr(pos, "\n")) != NULL) {
+        count++;
+        pos++;
+    }
+    
+    // Allocate array for example pointers
+    char** examples = (char**)malloc((count + 1) * sizeof(char*));
+    if (!examples) {
+        fprintf(stderr, "Memory allocation failed\n");
+        exit(EXIT_FAILURE);
+    }
+    
+    // Split text into examples
+    const char* start = text;
+    const char* end;
+    int idx = 0;
+    
+    while ((end = strchr(start, '\n')) != NULL) {
+        size_t len = end - start;
+        examples[idx] = (char*)malloc(len + 1);
+        if (!examples[idx]) {
+            fprintf(stderr, "Memory allocation failed\n");
+            exit(EXIT_FAILURE);
+        }
+        
+        strncpy(examples[idx], start, len);
+        examples[idx][len] = '\0';
+        
+        start = end + 1;  // Skip the newline
+        idx++;
+    }
+    
+    // Get the last example if it doesn't end with a newline
+    if (*start != '\0') {
+        size_t len = strlen(start);
+        examples[idx] = (char*)malloc(len + 1);
+        if (!examples[idx]) {
+            fprintf(stderr, "Memory allocation failed\n");
+            exit(EXIT_FAILURE);
+        }
+        
+        strcpy(examples[idx], start);
+        idx++;
+    }
+    
+    *num_examples = idx;
+    return examples;
+}
+
+// Find the length of the shortest example
+int find_min_length(char** examples, int num_examples) {
+    if (num_examples == 0) return 0;
+    
+    int min_len = strlen(examples[0]);
+    for (int i = 1; i < num_examples; i++) {
+        int len = strlen(examples[i]);
+        if (len < min_len) min_len = len;
+    }
+    
+    return min_len;
+}
+
 // Prepare character-level prediction data directly in GPU-friendly layout
-void prepare_training_data(const char* text, size_t text_length, 
-                          int seq_length, int* num_sequences,
-                          float** h_X, float** h_y) {
-    // Calculate number of complete sequences we can extract
-    *num_sequences = (int)((text_length - 1) / seq_length);
-    printf("Creating %d sequences of length %d\n", *num_sequences, seq_length);
+void prepare_training_data(char** examples, int num_examples, int seq_length,
+                           float** h_X, float** h_y) {
+    printf("Preparing training data: %d examples, sequence length: %d\n", 
+           num_examples, seq_length);
     
     // Allocate memory for input and target sequences in GPU-friendly batch format
-    // Each timestep contains all sequences in parallel
-    size_t data_size = (*num_sequences) * seq_length;
+    // Each timestep contains all examples in parallel
+    size_t data_size = num_examples * seq_length;
     *h_X = (float*)malloc(data_size * sizeof(float));
     *h_y = (float*)malloc(data_size * sizeof(float));
     
@@ -55,68 +120,159 @@ void prepare_training_data(const char* text, size_t text_length,
     }
     
     // Fill data arrays in batch-oriented layout:
-    // [seq0_t0, seq1_t0, ..., seqN_t0, seq0_t1, seq1_t1, ...]
-    for (int step = 0; step < seq_length; step++) {
-        for (int seq = 0; seq < *num_sequences; seq++) {
-            size_t text_idx = seq * seq_length + step;
-            int data_idx = step * (*num_sequences) + seq;
+    // [ex0_t0, ex1_t0, ..., exN_t0, ex0_t1, ex1_t1, ...]
+    for (int step = 0; step < seq_length - 1; step++) {
+        for (int ex = 0; ex < num_examples; ex++) {
+            int data_idx = step * num_examples + ex;
             
-            // Ensure we don't exceed text bounds
-            if (text_idx < text_length && text_idx + 1 < text_length) {
-                // Input: current character (normalized)
-                (*h_X)[data_idx] = (unsigned char)text[text_idx] / 255.0f;
-                
-                // Target: next character (normalized)
-                (*h_y)[data_idx] = (unsigned char)text[text_idx + 1] / 255.0f;
-            }
+            // Input: current character (normalized)
+            (*h_X)[data_idx] = (unsigned char)examples[ex][step] / 255.0f;
+            
+            // Target: next character (normalized)
+            (*h_y)[data_idx] = (unsigned char)examples[ex][step + 1] / 255.0f;
         }
+    }
+    
+    // Handle the last character of each sequence
+    int last_step = seq_length - 1;
+    for (int ex = 0; ex < num_examples; ex++) {
+        int data_idx = last_step * num_examples + ex;
+        
+        // Input: last character
+        (*h_X)[data_idx] = (unsigned char)examples[ex][last_step] / 255.0f;
+        
+        // Target: we'll use a zero value for simplicity (end of sequence marker)
+        (*h_y)[data_idx] = 0.0f;
     }
 }
 
-// Verify prepared data for debugging
-void verify_data(const char* text, int seq_length, float* X, float* y, int num_sequences) {
-    printf("\n=== DATA VERIFICATION ===\n");
+// Detailed verification of the prepared data
+void verify_data(char** examples, int seq_length, float* X, float* y, int num_examples) {
+    printf("\n=== DETAILED DATA VERIFICATION ===\n");
     
-    // Show original text snippet
-    printf("Original text first 30 chars: \"");
-    for (int i = 0; i < 30 && text[i] != '\0'; i++) {
-        putchar(text[i]);
-    }
-    printf("...\"\n\n");
+    // Print basic info
+    printf("Number of examples: %d\n", num_examples);
+    printf("Sequence length: %d\n", seq_length);
+    printf("Total data points: %d\n\n", num_examples * seq_length);
     
-    // Check sequence 0 preparation
-    printf("Sequence 0 (first 10 steps):\n");
-    printf("Step\tOrig Char\tX (Input)\tY (Target)\n");
-    printf("----------------------------------------\n");
-    for (int step = 0; step < 10 && step < seq_length; step++) {
-        int data_idx = step * num_sequences + 0;  // First sequence at each step
-        size_t text_idx = step;
-        char orig_char = text[text_idx];
-        char next_char = text[text_idx + 1];
+    // Show first few characters of each example
+    printf("Sample of training examples:\n");
+    printf("----------------------------\n");
+    for (int ex = 0; ex < num_examples && ex < 5; ex++) {
+        int preview_len = 50;
+        char preview[51];  // +1 for null terminator
         
-        printf("%d\t'%c' (%d)\t%.3f\t\t%.3f ('%c')\n", 
-               step, orig_char, (unsigned char)orig_char,
-               X[data_idx], y[data_idx], next_char);
+        strncpy(preview, examples[ex], 50);
+        preview[50] = '\0';
+        
+        printf("Example %2d: \"%s%s\"\n", 
+               ex, preview, strlen(examples[ex]) > 50 ? "..." : "");
     }
+    printf("----------------------------\n\n");
     
-    // Check sequence 1 preparation if available
-    if (num_sequences > 1) {
-        printf("\nSequence 1 (first 10 steps):\n");
-        printf("Step\tOrig Char\tX (Input)\tY (Target)\n");
-        printf("----------------------------------------\n");
-        for (int step = 0; step < 10 && step < seq_length; step++) {
-            int data_idx = step * num_sequences + 1;  // Second sequence at each step
-            size_t text_idx = seq_length + step;  // Start of second sequence
-            char orig_char = text[text_idx];
-            char next_char = text[text_idx + 1];
+    // Visualize the batching structure
+    printf("Batching structure verification:\n");
+    printf("-------------------------------\n");
+    printf("Each timestep processes one character from each example in parallel.\n");
+    printf("Data layout: [ex0_t0, ex1_t0, ..., exN_t0, ex0_t1, ex1_t1, ...]\n\n");
+    
+    // Show detailed timestep data for verification
+    int rows_to_show = 5;  // Show first 5 examples
+    int cols_to_show = 10; // Show first 10 timesteps
+    
+    printf("Input Data (X) - First %d timesteps x %d examples:\n", cols_to_show, rows_to_show);
+    printf("Step\t");
+    for (int ex = 0; ex < rows_to_show && ex < num_examples; ex++) {
+        printf("Ex%d\t\t", ex);
+    }
+    printf("\n");
+    
+    for (int step = 0; step < cols_to_show && step < seq_length; step++) {
+        printf("%d\t", step);
+        for (int ex = 0; ex < rows_to_show && ex < num_examples; ex++) {
+            int data_idx = step * num_examples + ex;
+            char c = (int)(X[data_idx] * 255.0f);
+            printf("'%c'(%.3f)\t", c, X[data_idx]);
+        }
+        printf("\n");
+    }
+    printf("\n");
+    
+    // Show target data
+    printf("Target Data (y) - First %d timesteps x %d examples:\n", cols_to_show, rows_to_show);
+    printf("Step\t");
+    for (int ex = 0; ex < rows_to_show && ex < num_examples; ex++) {
+        printf("Ex%d\t\t", ex);
+    }
+    printf("\n");
+    
+    for (int step = 0; step < cols_to_show && step < seq_length; step++) {
+        printf("%d\t", step);
+        for (int ex = 0; ex < rows_to_show && ex < num_examples; ex++) {
+            int data_idx = step * num_examples + ex;
+            char c = (int)(y[data_idx] * 255.0f);
+            printf("'%c'(%.3f)\t", c, y[data_idx]);
+        }
+        printf("\n");
+    }
+    printf("\n");
+    
+    // Verify a specific sequence
+    if (num_examples >= 2) {
+        int ex_to_verify = 1;  // Verify the second example
+        printf("Sequence verification for Example %d:\n", ex_to_verify);
+        printf("Original text: \"%.*s...\"\n", 30, examples[ex_to_verify]);
+        printf("Step\tX (Input)\t\tY (Target)\t\tOriginal\tExpected Next\n");
+        printf("---------------------------------------------------------------------------\n");
+        
+        for (int step = 0; step < 20 && step < seq_length - 1; step++) {
+            int data_idx = step * num_examples + ex_to_verify;
+            char orig_char = examples[ex_to_verify][step];
+            char next_char = examples[ex_to_verify][step + 1];
             
-            printf("%d\t'%c' (%d)\t%.3f\t\t%.3f ('%c')\n", 
-                   step, orig_char, (unsigned char)orig_char,
-                   X[data_idx], y[data_idx], next_char);
+            float x_val = X[data_idx];
+            float y_val = y[data_idx];
+            
+            char x_char = (char)(x_val * 255.0f + 0.5f);
+            char y_char = (char)(y_val * 255.0f + 0.5f);
+            
+            printf("%d\t'%c'(%.3f)\t\t'%c'(%.3f)\t\t'%c'(%d)\t\t'%c'(%d)\n", 
+                   step, x_char, x_val, y_char, y_val, 
+                   orig_char, (unsigned char)orig_char, 
+                   next_char, (unsigned char)next_char);
         }
     }
     
-    printf("\n=== END DATA VERIFICATION ===\n\n");
+    // Verify batch consistency - check if characters line up with original text
+    printf("\nBatch consistency verification:\n");
+    printf("Checking if batch data matches original text at different positions...\n");
+    
+    int positions_to_check[] = {0, 5, 10, 20, 50, 100};
+    int num_positions = sizeof(positions_to_check) / sizeof(positions_to_check[0]);
+    
+    for (int i = 0; i < num_positions; i++) {
+        int pos = positions_to_check[i];
+        if (pos >= seq_length) continue;
+        
+        printf("Position %d across examples:\n", pos);
+        for (int ex = 0; ex < 5 && ex < num_examples; ex++) {
+            int data_idx = pos * num_examples + ex;
+            char original = examples[ex][pos];
+            float x_val = X[data_idx];
+            char x_char = (char)(x_val * 255.0f + 0.5f);
+            
+            if (original == x_char) {
+                printf("Example %d: Original '%c' matches data '%c' ✓\n", 
+                       ex, original, x_char);
+            } else {
+                printf("Example %d: Original '%c' (%d) DOES NOT MATCH data '%c' (%d) ✗\n", 
+                       ex, original, (unsigned char)original, x_char, (unsigned char)x_char);
+            }
+        }
+        printf("\n");
+    }
+    
+    printf("=== END DATA VERIFICATION ===\n\n");
 }
 
 int main() {
@@ -124,18 +280,15 @@ int main() {
     srand(time(NULL) ^ getpid());
     
     // Model parameters
-    int input_dim = 1;           // Single byte input
-    int output_dim = 1;          // Single byte output
-    int state_dim = 2048;        // Increased from 512 to 2048
-    int seq_length = 128;        // Sequence length for training
-    float learning_rate = 0.0002; // Initial learning rate
-    float lr_decay = 0.99;       // Learning rate decay per epoch
-    int num_epochs = 300;        // Number of training epochs
+    int input_dim = 1;            // Single byte input
+    int output_dim = 1;           // Single byte output
+    int state_dim = 2048;         // State dimension
+    float learning_rate = 0.0002; // Fixed learning rate without decay
+    int num_epochs = 300;         // Number of training epochs
     
     printf("=== SLM Training Configuration ===\n");
     printf("State dimension: %d\n", state_dim);
-    printf("Sequence length: %d\n", seq_length);
-    printf("Learning rate: %.6f (decay: %.3f per epoch)\n", learning_rate, lr_decay);
+    printf("Learning rate: %.6f (fixed, no decay)\n", learning_rate);
     printf("Training epochs: %d\n\n", num_epochs);
     
     // Read training data
@@ -151,41 +304,48 @@ int main() {
     }
     printf("\n------------------\n\n");
     
+    // Split text into separate training examples
+    int num_examples;
+    char** examples = split_into_examples(text, &num_examples);
+    printf("Split data into %d separate examples\n", num_examples);
+    
+    // Find the minimum length for sequence processing
+    int min_length = find_min_length(examples, num_examples);
+    int seq_length = min_length > 512 ? 512 : min_length; // Cap at 512 chars if needed
+    printf("Minimum example length: %d, Using sequence length: %d\n", min_length, seq_length);
+    
     // Prepare training data in batch-friendly format
-    int num_sequences;
     float *h_X, *h_y;
-    prepare_training_data(text, text_length, seq_length, &num_sequences, &h_X, &h_y);
+    prepare_training_data(examples, num_examples, seq_length, &h_X, &h_y);
     
-    // Verify prepared data
-    verify_data(text, seq_length, h_X, h_y, num_sequences);
+    // Verify prepared data with detailed output
+    verify_data(examples, seq_length, h_X, h_y, num_examples);
     
-    // Transfer data to GPU directly - already in the right format
+    // Transfer data to GPU
     float *d_X, *d_y;
-    size_t data_size = num_sequences * seq_length * sizeof(float);
+    size_t data_size = num_examples * seq_length * sizeof(float);
     CHECK_CUDA(cudaMalloc(&d_X, data_size));
     CHECK_CUDA(cudaMalloc(&d_y, data_size));
     CHECK_CUDA(cudaMemcpy(d_X, h_X, data_size, cudaMemcpyHostToDevice));
     CHECK_CUDA(cudaMemcpy(d_y, h_y, data_size, cudaMemcpyHostToDevice));
     
-    // Initialize model (each sequence is processed in parallel)
-    int batch_size = num_sequences;
+    // Initialize model (each example is processed in parallel)
+    int batch_size = num_examples;
     SSM* ssm = init_ssm(input_dim, state_dim, output_dim, batch_size);
     
-    printf("Starting training for %d epochs (batch size: %d sequences)\n", 
+    printf("Starting training for %d epochs (batch size: %d examples)\n", 
            num_epochs, batch_size);
     
     // Training loop
     for (int epoch = 0; epoch < num_epochs; epoch++) {
         float epoch_loss = 0.0f;
-        float current_lr = learning_rate * powf(lr_decay, epoch);
         
         // Reset states at the beginning of each epoch
         CHECK_CUDA(cudaMemset(ssm->d_state, 0, batch_size * state_dim * sizeof(float)));
         
-        // Process each timestep across all sequences
+        // Process each timestep across all examples
         for (int step = 0; step < seq_length; step++) {
-            // Get step data (one character from each sequence at this timestep)
-            // Data is already organized in batch format
+            // Get step data (one character from each example at this timestep)
             float* step_X_ptr = &d_X[step * batch_size];
             float* step_y_ptr = &d_y[step * batch_size];
             
@@ -199,12 +359,12 @@ int main() {
             // Backward pass and update
             zero_gradients(ssm);
             backward_pass(ssm, step_X_ptr);
-            update_weights(ssm, current_lr);
+            update_weights(ssm, learning_rate);
             
-            // Print progress periodically
-            if (step % 20 == 0) {
-                printf("\rEpoch %d/%d, Step %d/%d, Loss: %.6f, LR: %.6f", 
-                       epoch + 1, num_epochs, step + 1, seq_length, step_loss, current_lr);
+            // Print progress periodically 
+            if (step % 20 == 0 || step == seq_length - 1) {
+                printf("\rEpoch %d/%d, Step %d/%d, Loss: %.6f", 
+                       epoch + 1, num_epochs, step + 1, seq_length, step_loss);
                 fflush(stdout);
             }
         }
@@ -214,15 +374,15 @@ int main() {
         printf("\nEpoch %d/%d completed, Average Loss: %.6f\n", 
                epoch + 1, num_epochs, epoch_loss);
         
-        // Save model checkpoint at the end
-        if (epoch == num_epochs - 1) {
-            // Save final model
+        // Save model checkpoint periodically or at the end
+        if ((epoch + 1) % 50 == 0 || epoch == num_epochs - 1) {
             char model_fname[64];
             time_t now = time(NULL);
             struct tm *timeinfo = localtime(&now);
-            sprintf(model_fname, "%04d%02d%02d_%02d%02d%02d_slm_final.bin", 
+            sprintf(model_fname, "%04d%02d%02d_%02d%02d%02d_slm_epoch%d.bin", 
                    timeinfo->tm_year + 1900, timeinfo->tm_mon + 1, timeinfo->tm_mday,
-                   timeinfo->tm_hour, timeinfo->tm_min, timeinfo->tm_sec);
+                   timeinfo->tm_hour, timeinfo->tm_min, timeinfo->tm_sec, 
+                   epoch + 1);
             
             // Create inference model with batch_size=1 for saving
             SSM* inference_model = init_ssm(input_dim, state_dim, output_dim, 1);
@@ -249,6 +409,10 @@ int main() {
     printf("\nTraining completed!\n");
     
     // Clean up
+    for (int i = 0; i < num_examples; i++) {
+        free(examples[i]);
+    }
+    free(examples);
     free(text);
     free(h_X);
     free(h_y);
