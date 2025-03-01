@@ -15,11 +15,11 @@ data.out: data.c
 slm.out: slm.c
 	$(CC) $(CFLAGS) $(CUDAFLAGS) $< $(CUDALIBS) $(LDFLAGS) -o $@
 
-run: data.out
+data: data.out
 	@time ./data.out | tee -a data.txt
 
-train: slm.out
+run: slm.out
 	@time ./slm.out
 
 clean:
-	rm -f *.out *.txt *.bin
+	rm -f *.out *.bin
