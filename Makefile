@@ -12,7 +12,7 @@ slm.out: slm.c
 	$(CC) $(CFLAGS) $(CUDAFLAGS) $< $(CUDALIBS) $(LDFLAGS) -o $@
 
 data: data.out
-	@time ./data.out | tr -s '\n' | tee -a data.txt
+	@time ./data.out | tr -s '\n' | sed '$$a\' | tee -a data.txt
 
 run: slm.out
 	@time ./slm.out
