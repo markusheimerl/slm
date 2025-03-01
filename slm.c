@@ -35,15 +35,16 @@ char* read_text_file(const char* filename, size_t* text_length) {
     return buffer;
 }
 
-// Split text into sequences of specified length
+// Prepare character-level prediction data directly in GPU-friendly layout
 void prepare_training_data(const char* text, size_t text_length, 
                           int seq_length, int* num_sequences,
                           float** h_X, float** h_y) {
     // Calculate number of complete sequences we can extract
-    *num_sequences = (text_length - 1) / seq_length;
+    *num_sequences = (int)((text_length - 1) / seq_length);
     printf("Creating %d sequences of length %d\n", *num_sequences, seq_length);
     
-    // Allocate memory for input and target sequences
+    // Allocate memory for input and target sequences in GPU-friendly batch format
+    // Each timestep contains all sequences in parallel
     size_t data_size = (*num_sequences) * seq_length;
     *h_X = (float*)malloc(data_size * sizeof(float));
     *h_y = (float*)malloc(data_size * sizeof(float));
@@ -53,77 +54,69 @@ void prepare_training_data(const char* text, size_t text_length,
         exit(EXIT_FAILURE);
     }
     
-    // Fill data arrays
-    // For each sequence
-    for (int seq = 0; seq < *num_sequences; seq++) {
-        // For each position in the sequence
-        for (int pos = 0; pos < seq_length; pos++) {
-            int text_idx = seq * seq_length + pos;
-            int data_idx = seq + pos * (*num_sequences); // Transpose for batch processing
+    // Fill data arrays in batch-oriented layout:
+    // [seq0_t0, seq1_t0, ..., seqN_t0, seq0_t1, seq1_t1, ...]
+    for (int step = 0; step < seq_length; step++) {
+        for (int seq = 0; seq < *num_sequences; seq++) {
+            size_t text_idx = seq * seq_length + step;
+            int data_idx = step * (*num_sequences) + seq;
             
-            // Input: current character (normalized)
-            (*h_X)[data_idx] = (unsigned char)text[text_idx] / 255.0f;
-            
-            // Target: next character (normalized)
-            (*h_y)[data_idx] = (unsigned char)text[text_idx + 1] / 255.0f;
+            // Ensure we don't exceed text bounds
+            if (text_idx < text_length && text_idx + 1 < text_length) {
+                // Input: current character (normalized)
+                (*h_X)[data_idx] = (unsigned char)text[text_idx] / 255.0f;
+                
+                // Target: next character (normalized)
+                (*h_y)[data_idx] = (unsigned char)text[text_idx + 1] / 255.0f;
+            }
         }
     }
 }
 
-// Generate text using the trained model
-void generate_text(SSM* ssm, const char* seed, int gen_length) {
-    int seed_length = strlen(seed);
-    char* generated = (char*)malloc(seed_length + gen_length + 1);
-    if (!generated) {
-        fprintf(stderr, "Memory allocation failed for text generation\n");
-        return;
+// Verify prepared data for debugging
+void verify_data(const char* text, int seq_length, float* X, float* y, int num_sequences) {
+    printf("\n=== DATA VERIFICATION ===\n");
+    
+    // Show original text snippet
+    printf("Original text first 30 chars: \"");
+    for (int i = 0; i < 30 && text[i] != '\0'; i++) {
+        putchar(text[i]);
+    }
+    printf("...\"\n\n");
+    
+    // Check sequence 0 preparation
+    printf("Sequence 0 (first 10 steps):\n");
+    printf("Step\tOrig Char\tX (Input)\tY (Target)\n");
+    printf("----------------------------------------\n");
+    for (int step = 0; step < 10 && step < seq_length; step++) {
+        int data_idx = step * num_sequences + 0;  // First sequence at each step
+        size_t text_idx = step;
+        char orig_char = text[text_idx];
+        char next_char = text[text_idx + 1];
+        
+        printf("%d\t'%c' (%d)\t%.3f\t\t%.3f ('%c')\n", 
+               step, orig_char, (unsigned char)orig_char,
+               X[data_idx], y[data_idx], next_char);
     }
     
-    // Copy seed text
-    strcpy(generated, seed);
-    
-    // Reset model state
-    CHECK_CUDA(cudaMemset(ssm->d_state, 0, ssm->batch_size * ssm->state_dim * sizeof(float)));
-    
-    // Prepare input
-    float* h_input = (float*)malloc(sizeof(float));
-    float* d_input;
-    CHECK_CUDA(cudaMalloc(&d_input, sizeof(float)));
-    
-    // Process seed text through the model
-    for (int i = 0; i < seed_length; i++) {
-        h_input[0] = (unsigned char)seed[i] / 255.0f;
-        CHECK_CUDA(cudaMemcpy(d_input, h_input, sizeof(float), cudaMemcpyHostToDevice));
-        forward_pass(ssm, d_input);
+    // Check sequence 1 preparation if available
+    if (num_sequences > 1) {
+        printf("\nSequence 1 (first 10 steps):\n");
+        printf("Step\tOrig Char\tX (Input)\tY (Target)\n");
+        printf("----------------------------------------\n");
+        for (int step = 0; step < 10 && step < seq_length; step++) {
+            int data_idx = step * num_sequences + 1;  // Second sequence at each step
+            size_t text_idx = seq_length + step;  // Start of second sequence
+            char orig_char = text[text_idx];
+            char next_char = text[text_idx + 1];
+            
+            printf("%d\t'%c' (%d)\t%.3f\t\t%.3f ('%c')\n", 
+                   step, orig_char, (unsigned char)orig_char,
+                   X[data_idx], y[data_idx], next_char);
+        }
     }
     
-    // Generate new text
-    for (int i = 0; i < gen_length; i++) {
-        // Get prediction
-        float h_prediction;
-        CHECK_CUDA(cudaMemcpy(&h_prediction, ssm->d_predictions, sizeof(float), cudaMemcpyDeviceToHost));
-        
-        // Convert prediction to character
-        h_prediction = fmaxf(0.0f, fminf(1.0f, h_prediction)) * 255.0f;
-        unsigned char next_char = (unsigned char)roundf(h_prediction);
-        
-        // Add to generated text
-        generated[seed_length + i] = next_char;
-        
-        // Feed back into model
-        h_input[0] = next_char / 255.0f;
-        CHECK_CUDA(cudaMemcpy(d_input, h_input, sizeof(float), cudaMemcpyHostToDevice));
-        forward_pass(ssm, d_input);
-    }
-    
-    // Null-terminate
-    generated[seed_length + gen_length] = '\0';
-    
-    printf("\nGenerated text:\n%s\n", generated);
-    
-    free(generated);
-    free(h_input);
-    cudaFree(d_input);
+    printf("\n=== END DATA VERIFICATION ===\n\n");
 }
 
 int main() {
@@ -131,24 +124,42 @@ int main() {
     srand(time(NULL) ^ getpid());
     
     // Model parameters
-    int input_dim = 1;      // Single byte input
-    int output_dim = 1;     // Single byte output
-    int state_dim = 512;    // Hidden state dimension
-    int seq_length = 128;   // Sequence length for training
-    float learning_rate = 0.0001f;
-    int num_epochs = 50;
+    int input_dim = 1;           // Single byte input
+    int output_dim = 1;          // Single byte output
+    int state_dim = 2048;        // Increased from 512 to 2048
+    int seq_length = 128;        // Sequence length for training
+    float learning_rate = 0.0002; // Initial learning rate
+    float lr_decay = 0.99;       // Learning rate decay per epoch
+    int num_epochs = 300;        // Number of training epochs
+    
+    printf("=== SLM Training Configuration ===\n");
+    printf("State dimension: %d\n", state_dim);
+    printf("Sequence length: %d\n", seq_length);
+    printf("Learning rate: %.6f (decay: %.3f per epoch)\n", learning_rate, lr_decay);
+    printf("Training epochs: %d\n\n", num_epochs);
     
     // Read training data
     size_t text_length;
     char* text = read_text_file("data.txt", &text_length);
     printf("Loaded %zu characters of text data\n", text_length);
     
-    // Prepare training data
+    // Print a small sample of the text
+    printf("\nText sample:\n------------------\n");
+    size_t sample_size = text_length < 100 ? text_length : 100;
+    for (size_t i = 0; i < sample_size; i++) {
+        putchar(text[i]);
+    }
+    printf("\n------------------\n\n");
+    
+    // Prepare training data in batch-friendly format
     int num_sequences;
     float *h_X, *h_y;
     prepare_training_data(text, text_length, seq_length, &num_sequences, &h_X, &h_y);
     
-    // Transfer data to GPU
+    // Verify prepared data
+    verify_data(text, seq_length, h_X, h_y, num_sequences);
+    
+    // Transfer data to GPU directly - already in the right format
     float *d_X, *d_y;
     size_t data_size = num_sequences * seq_length * sizeof(float);
     CHECK_CUDA(cudaMalloc(&d_X, data_size));
@@ -160,49 +171,40 @@ int main() {
     int batch_size = num_sequences;
     SSM* ssm = init_ssm(input_dim, state_dim, output_dim, batch_size);
     
-    // Allocate memory for step data (one timestep across all sequences)
-    float *d_step_X, *d_step_y;
-    CHECK_CUDA(cudaMalloc(&d_step_X, batch_size * sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&d_step_y, batch_size * sizeof(float)));
-    
     printf("Starting training for %d epochs (batch size: %d sequences)\n", 
            num_epochs, batch_size);
     
     // Training loop
     for (int epoch = 0; epoch < num_epochs; epoch++) {
         float epoch_loss = 0.0f;
+        float current_lr = learning_rate * powf(lr_decay, epoch);
         
         // Reset states at the beginning of each epoch
         CHECK_CUDA(cudaMemset(ssm->d_state, 0, batch_size * state_dim * sizeof(float)));
         
         // Process each timestep across all sequences
         for (int step = 0; step < seq_length; step++) {
-            // Get step data (one character from each sequence)
+            // Get step data (one character from each sequence at this timestep)
+            // Data is already organized in batch format
             float* step_X_ptr = &d_X[step * batch_size];
             float* step_y_ptr = &d_y[step * batch_size];
             
-            // Copy data to step buffers
-            CHECK_CUDA(cudaMemcpy(d_step_X, step_X_ptr, batch_size * sizeof(float), 
-                                 cudaMemcpyDeviceToDevice));
-            CHECK_CUDA(cudaMemcpy(d_step_y, step_y_ptr, batch_size * sizeof(float), 
-                                 cudaMemcpyDeviceToDevice));
-            
             // Forward pass
-            forward_pass(ssm, d_step_X);
+            forward_pass(ssm, step_X_ptr);
             
             // Calculate loss
-            float step_loss = calculate_loss(ssm, d_step_y);
+            float step_loss = calculate_loss(ssm, step_y_ptr);
             epoch_loss += step_loss;
             
             // Backward pass and update
             zero_gradients(ssm);
-            backward_pass(ssm, d_step_X);
-            update_weights(ssm, learning_rate);
+            backward_pass(ssm, step_X_ptr);
+            update_weights(ssm, current_lr);
             
             // Print progress periodically
             if (step % 20 == 0) {
-                printf("\rEpoch %d/%d, Step %d/%d, Loss: %.6f", 
-                       epoch + 1, num_epochs, step + 1, seq_length, step_loss);
+                printf("\rEpoch %d/%d, Step %d/%d, Loss: %.6f, LR: %.6f", 
+                       epoch + 1, num_epochs, step + 1, seq_length, step_loss, current_lr);
                 fflush(stdout);
             }
         }
@@ -212,55 +214,39 @@ int main() {
         printf("\nEpoch %d/%d completed, Average Loss: %.6f\n", 
                epoch + 1, num_epochs, epoch_loss);
         
-        // Generate sample text periodically
-        if ((epoch + 1) % 5 == 0 || epoch == num_epochs - 1) {
-            // Create inference model with batch_size=1
-            SSM* inference_ssm = init_ssm(input_dim, state_dim, output_dim, 1);
+        // Save model checkpoint at the end
+        if (epoch == num_epochs - 1) {
+            // Save final model
+            char model_fname[64];
+            time_t now = time(NULL);
+            struct tm *timeinfo = localtime(&now);
+            sprintf(model_fname, "%04d%02d%02d_%02d%02d%02d_slm_final.bin", 
+                   timeinfo->tm_year + 1900, timeinfo->tm_mon + 1, timeinfo->tm_mday,
+                   timeinfo->tm_hour, timeinfo->tm_min, timeinfo->tm_sec);
             
-            // Copy trained weights
-            CHECK_CUDA(cudaMemcpy(inference_ssm->d_A, ssm->d_A, 
+            // Create inference model with batch_size=1 for saving
+            SSM* inference_model = init_ssm(input_dim, state_dim, output_dim, 1);
+            CHECK_CUDA(cudaMemcpy(inference_model->d_A, ssm->d_A, 
                                  state_dim * state_dim * sizeof(float), 
                                  cudaMemcpyDeviceToDevice));
-            CHECK_CUDA(cudaMemcpy(inference_ssm->d_B, ssm->d_B, 
+            CHECK_CUDA(cudaMemcpy(inference_model->d_B, ssm->d_B, 
                                  state_dim * input_dim * sizeof(float), 
                                  cudaMemcpyDeviceToDevice));
-            CHECK_CUDA(cudaMemcpy(inference_ssm->d_C, ssm->d_C, 
+            CHECK_CUDA(cudaMemcpy(inference_model->d_C, ssm->d_C, 
                                  output_dim * state_dim * sizeof(float), 
                                  cudaMemcpyDeviceToDevice));
-            CHECK_CUDA(cudaMemcpy(inference_ssm->d_D, ssm->d_D, 
+            CHECK_CUDA(cudaMemcpy(inference_model->d_D, ssm->d_D, 
                                  output_dim * input_dim * sizeof(float), 
                                  cudaMemcpyDeviceToDevice));
             
-            // Generate text
-            const char* seed = "<USER> ";
-            generate_text(inference_ssm, seed, 256);
+            save_ssm(inference_model, model_fname);
+            printf("Model saved to %s\n", model_fname);
             
-            free_ssm(inference_ssm);
+            free_ssm(inference_model);
         }
     }
     
-    printf("Training completed!\n");
-    
-    // Save model (create inference version with batch_size=1)
-    SSM* inference_model = init_ssm(input_dim, state_dim, output_dim, 1);
-    CHECK_CUDA(cudaMemcpy(inference_model->d_A, ssm->d_A, 
-                         state_dim * state_dim * sizeof(float), 
-                         cudaMemcpyDeviceToDevice));
-    CHECK_CUDA(cudaMemcpy(inference_model->d_B, ssm->d_B, 
-                         state_dim * input_dim * sizeof(float), 
-                         cudaMemcpyDeviceToDevice));
-    CHECK_CUDA(cudaMemcpy(inference_model->d_C, ssm->d_C, 
-                         output_dim * state_dim * sizeof(float), 
-                         cudaMemcpyDeviceToDevice));
-    CHECK_CUDA(cudaMemcpy(inference_model->d_D, ssm->d_D, 
-                         output_dim * input_dim * sizeof(float), 
-                         cudaMemcpyDeviceToDevice));
-    
-    char model_fname[64];
-    time_t now = time(NULL);
-    strftime(model_fname, sizeof(model_fname), "%Y%m%d_%H%M%S_slm.bin", localtime(&now));
-    save_ssm(inference_model, model_fname);
-    printf("Model saved to %s\n", model_fname);
+    printf("\nTraining completed!\n");
     
     // Clean up
     free(text);
@@ -268,10 +254,7 @@ int main() {
     free(h_y);
     cudaFree(d_X);
     cudaFree(d_y);
-    cudaFree(d_step_X);
-    cudaFree(d_step_y);
     free_ssm(ssm);
-    free_ssm(inference_model);
     
     return 0;
 }
