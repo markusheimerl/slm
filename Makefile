@@ -1,11 +1,7 @@
 CC = clang
 CFLAGS = -O3 -march=native -ffast-math -Wall -Wextra
 LDFLAGS = -lm -lcurl -flto
-CUDAFLAGS = --cuda-gpu-arch=sm_89 \
-    -x cuda \
-    -fcuda-flush-denormals-to-zero \
-    -fcuda-approx-transcendentals \
-    -Wno-unknown-cuda-version
+CUDAFLAGS = --cuda-gpu-arch=sm_89 -x cuda -Wno-unknown-cuda-version
 
 CUDALIBS = -L/usr/local/cuda/lib64 -lcudart -lcublas
 
@@ -16,7 +12,7 @@ slm.out: slm.c
 	$(CC) $(CFLAGS) $(CUDAFLAGS) $< $(CUDALIBS) $(LDFLAGS) -o $@
 
 data: data.out
-	@time ./data.out | tee -a data.txt
+	@time ./data.out | tr -s '\n' | tee -a data.txt
 
 run: slm.out
 	@time ./slm.out
