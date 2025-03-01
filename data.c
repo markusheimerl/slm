@@ -3,9 +3,8 @@
 #include <string.h>
 #include <curl/curl.h>
 
-// Simplified streaming callback
 size_t writefunc(void *ptr, size_t size, size_t nmemb, void *unused) {
-    (void)unused; // Suppress unused parameter warning
+    (void)unused;
     
     const char *data = (char *)ptr;
     size_t realsize = size * nmemb;
