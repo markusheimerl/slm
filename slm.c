@@ -105,11 +105,17 @@ int main() {
     
     // Find the minimum length among conversations
     int min_length = strlen(conversations[0]);
+    int min_length_idx = 0;
     for (int i = 1; i < conversation_count; i++) {
         int len = strlen(conversations[i]);
-        if (len < min_length) min_length = len;
+        if (len < min_length) {
+            min_length = len;
+            min_length_idx = i;
+        }
     }
-    
+
+    printf("Shortest conversation is line %d with length %d\n", min_length_idx + 1, min_length);
+
     // Use sequence length of minimum conversation length
     int seq_length = min_length;
     printf("Using sequence length: %d (from shortest conversation)\n", seq_length);
