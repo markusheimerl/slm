@@ -51,21 +51,6 @@ int main() {
         return EXIT_FAILURE;
     }
     
-    // Count number of lines (conversations)
-    int num_conversations = 0;
-    char buffer[4096];
-    
-    rewind(file);
-    while (fgets(buffer, sizeof(buffer), file)) {
-        num_conversations++;
-    }
-    
-    printf("Found %d conversations in data.txt\n", num_conversations);
-    
-    // Use all conversations for batch processing
-    int batch_size = num_conversations;
-    printf("Using batch size: %d (processing all conversations in parallel)\n", batch_size);
-    
     // Get file size
     fseek(file, 0, SEEK_END);
     long file_size = ftell(file);
@@ -85,13 +70,41 @@ int main() {
     
     printf("Loaded %zu bytes of text data\n", bytes_read);
     
-    // Split data into conversations (each line is an example)
-    char** conversations = (char**)malloc(batch_size * sizeof(char*));
-    int conversation_count = 0;
+    // Pre-scan to count non-empty lines (conversations)
+    int num_conversations = 0;
+    char* scan_ptr = text_data;
+    while (*scan_ptr) {
+        // Skip to the next line start
+        char* line_start = scan_ptr;
+        
+        // Find the end of the current line
+        while (*scan_ptr && *scan_ptr != '\n') {
+            scan_ptr++;
+        }
+        
+        // Check if the line has content (non-empty)
+        if (scan_ptr > line_start) {
+            num_conversations++;
+        }
+        
+        // Move past the newline if present
+        if (*scan_ptr == '\n') {
+            scan_ptr++;
+        }
+    }
     
-    // Load all available conversations
+    printf("Found %d conversations in data.txt\n", num_conversations);
+    
+    // Use all conversations for batch processing
+    printf("Using batch size: %d (processing all conversations in parallel)\n", num_conversations);
+    
+    // Split data into conversations (each line is an example)
+    char** conversations = (char**)malloc(num_conversations * sizeof(char*));
+    
+    // Load all available conversations (single pass)
+    int conversation_count = 0;
     char* line = strtok(text_data, "\n");
-    while (line && conversation_count < batch_size) {
+    while (line && conversation_count < num_conversations) {
         size_t len = strlen(line);
         if (len > 0) {  // Skip empty lines
             conversations[conversation_count] = (char*)malloc(len + 1);
