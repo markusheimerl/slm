@@ -26,20 +26,55 @@ void reorganize_data(const unsigned char* input, unsigned char* output,
     }
 }
 
+// ---------------------------------------------------------------------
+// Function: Propagate gradients between stacked models
+// ---------------------------------------------------------------------
+void backward_between_models(SSM* first_model, SSM* second_model, float* d_first_model_input) {
+    // Zero gradients for first model
+    zero_gradients(first_model);
+    
+    const float alpha = 1.0f, beta = 0.0f;
+    
+    // Compute gradient from state path: d_input_grad = B^T * state_error
+    CHECK_CUBLAS(cublasSgemm(second_model->cublas_handle, CUBLAS_OP_T, CUBLAS_OP_N,
+                           first_model->output_dim, first_model->batch_size, second_model->state_dim,
+                           &alpha,
+                           second_model->d_B, second_model->state_dim,
+                           second_model->d_state_error, second_model->state_dim,
+                           &beta,
+                           first_model->d_error, first_model->output_dim));
+    
+    // Add gradient from direct path: d_input_grad += D^T * error
+    CHECK_CUBLAS(cublasSgemm(second_model->cublas_handle, CUBLAS_OP_T, CUBLAS_OP_N,
+                           first_model->output_dim, first_model->batch_size, second_model->output_dim,
+                           &alpha,
+                           second_model->d_D, second_model->output_dim,
+                           second_model->d_error, second_model->output_dim,
+                           &alpha, // Add to existing gradient
+                           first_model->d_error, first_model->output_dim));
+    
+    // Now do the backward pass for the first model
+    backward_pass(first_model, d_first_model_input);
+}
+
 int main() {
     // Seed random number generator
     srand(time(NULL) ^ getpid());
     
     // Model parameters
     int embedding_dim = 512;     // Embedding dimension
+    int encoding_dim = 256;      // Encoding layer dimension
+    int reasoning_dim = 128;     // Reasoning layer dimension
     int state_dim = 1024;        // State dimension (reduced from 2048)
     int vocab_size = 256;        // One per possible byte value
-    float learning_rate = 0.0001; // Learning rate
+    float learning_rate = 0.00001; // Learning rate
     int num_epochs = 1000;        // Number of training epochs
     
     printf("=== SLM Training Configuration ===\n");
     printf("Vocabulary size: %d (byte values)\n", vocab_size);
     printf("Embedding dimension: %d\n", embedding_dim);
+    printf("Encoding dimension: %d\n", encoding_dim);
+    printf("Reasoning dimension: %d\n", reasoning_dim);
     printf("State dimension: %d\n", state_dim);
     printf("Learning rate: %.6f\n", learning_rate);
     printf("Training epochs: %d\n\n", num_epochs);
@@ -96,15 +131,16 @@ int main() {
     printf("Found %d conversations in data.txt\n", num_conversations);
     
     // Use all conversations for batch processing
-    printf("Using batch size: %d (processing all conversations in parallel)\n", num_conversations);
+    int batch_size = num_conversations;
+    printf("Using batch size: %d (processing all conversations in parallel)\n", batch_size);
     
     // Split data into conversations (each line is an example)
-    char** conversations = (char**)malloc(num_conversations * sizeof(char*));
+    char** conversations = (char**)malloc(batch_size * sizeof(char*));
     
     // Load all available conversations (single pass)
     int conversation_count = 0;
     char* line = strtok(text_data, "\n");
-    while (line && conversation_count < num_conversations) {
+    while (line && conversation_count < batch_size) {
         size_t len = strlen(line);
         if (len > 0) {  // Skip empty lines
             conversations[conversation_count] = (char*)malloc(len + 1);
@@ -186,19 +222,31 @@ int main() {
     // Initialize the embedding layer
     Embeddings* embeddings = init_embeddings(vocab_size, embedding_dim);
     
-    // Allocate memory for embedded inputs
+    // Allocate memory for embedded inputs and intermediate outputs
     float* d_X_embedded;
+    float* d_encoding_output;
+    float* d_reasoning_output;
     CHECK_CUDA(cudaMalloc(&d_X_embedded, conversation_count * embedding_dim * sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&d_encoding_output, conversation_count * encoding_dim * sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&d_reasoning_output, conversation_count * reasoning_dim * sizeof(float)));
     
-    // Initialize SSM model with batch_size = number of conversations
-    SSM* ssm = init_ssm(embedding_dim, state_dim, vocab_size, conversation_count);
+    // Initialize the stacked SSM models
+    // 1. Encoder model processes embeddings -> encoding_dim
+    // 2. Reasoning model processes encoding_dim -> reasoning_dim
+    // 3. Output model processes reasoning_dim -> vocab_size
+    SSM* encoder_ssm = init_ssm(embedding_dim, state_dim, encoding_dim, conversation_count);
+    SSM* reasoning_ssm = init_ssm(encoding_dim, state_dim, reasoning_dim, conversation_count);
+    SSM* output_ssm = init_ssm(reasoning_dim, state_dim, vocab_size, conversation_count);
     
     printf("\nStarting training for %d epochs with batch size of %d...\n", num_epochs, conversation_count);
+    printf("Using three-stage stacked SSM architecture\n");
     
     // Training loop
     for (int epoch = 0; epoch < num_epochs; epoch++) {
         // Reset state at the beginning of each epoch
-        CHECK_CUDA(cudaMemset(ssm->d_state, 0, conversation_count * state_dim * sizeof(float)));
+        CHECK_CUDA(cudaMemset(encoder_ssm->d_state, 0, conversation_count * state_dim * sizeof(float)));
+        CHECK_CUDA(cudaMemset(reasoning_ssm->d_state, 0, conversation_count * state_dim * sizeof(float)));
+        CHECK_CUDA(cudaMemset(output_ssm->d_state, 0, conversation_count * state_dim * sizeof(float)));
         
         float epoch_loss = 0.0f;
         
@@ -211,23 +259,47 @@ int main() {
             // Forward pass: embedding layer
             embeddings_forward(embeddings, d_X_t, d_X_embedded, conversation_count);
             
-            // Forward pass: SSM layer
-            forward_pass(ssm, d_X_embedded);
+            // Forward pass: encoder SSM layer
+            forward_pass(encoder_ssm, d_X_embedded);
+            
+            // Copy encoder output for reasoning model input
+            CHECK_CUDA(cudaMemcpy(d_encoding_output, encoder_ssm->d_predictions, 
+                              conversation_count * encoding_dim * sizeof(float), 
+                              cudaMemcpyDeviceToDevice));
+            
+            // Forward pass: reasoning SSM layer
+            forward_pass(reasoning_ssm, d_encoding_output);
+            
+            // Copy reasoning output for output model input
+            CHECK_CUDA(cudaMemcpy(d_reasoning_output, reasoning_ssm->d_predictions, 
+                              conversation_count * reasoning_dim * sizeof(float), 
+                              cudaMemcpyDeviceToDevice));
+            
+            // Forward pass: output SSM layer
+            forward_pass(output_ssm, d_reasoning_output);
             
             // Calculate loss
-            float loss = calculate_cross_entropy_loss(ssm, d_y_t);
+            float loss = calculate_cross_entropy_loss(output_ssm, d_y_t);
             epoch_loss += loss;
             
-            // Backward pass: SSM
-            zero_gradients(ssm);
-            backward_pass(ssm, d_X_embedded);
+            // Backward pass: output SSM layer
+            zero_gradients(output_ssm);
+            backward_pass(output_ssm, d_reasoning_output);
+            
+            // Backward pass: reasoning SSM layer
+            backward_between_models(reasoning_ssm, output_ssm, d_encoding_output);
+            
+            // Backward pass: encoder SSM layer
+            backward_between_models(encoder_ssm, reasoning_ssm, d_X_embedded);
             
             // Backward pass: embeddings
             zero_embedding_gradients(embeddings);
-            embeddings_backward(embeddings, ssm->d_B_grad, d_X_t, conversation_count);
+            embeddings_backward(embeddings, encoder_ssm->d_B_grad, d_X_t, conversation_count);
             
             // Update weights
-            update_weights(ssm, learning_rate);
+            update_weights(encoder_ssm, learning_rate);
+            update_weights(reasoning_ssm, learning_rate);
+            update_weights(output_ssm, learning_rate);
             update_embeddings(embeddings, learning_rate, conversation_count);
         }
         
@@ -241,25 +313,32 @@ int main() {
         }
     }
     
-    // Save the final model
-    char model_fname[64];
-    char embedding_fname[64];
+    // Save the final models
+    char model_time[20];
     time_t now = time(NULL);
     struct tm *timeinfo = localtime(&now);
-    sprintf(model_fname, "%04d%02d%02d_%02d%02d%02d_slm.bin", 
-           timeinfo->tm_year + 1900, timeinfo->tm_mon + 1, timeinfo->tm_mday,
-           timeinfo->tm_hour, timeinfo->tm_min, timeinfo->tm_sec);
-    sprintf(embedding_fname, "%04d%02d%02d_%02d%02d%02d_embeddings.bin", 
-           timeinfo->tm_year + 1900, timeinfo->tm_mon + 1, timeinfo->tm_mday,
-           timeinfo->tm_hour, timeinfo->tm_min, timeinfo->tm_sec);
+    strftime(model_time, sizeof(model_time), "%Y%m%d_%H%M%S", timeinfo);
+    
+    char encoder_fname[64], reasoning_fname[64], output_fname[64], embedding_fname[64];
+    sprintf(encoder_fname, "%s_encoder.bin", model_time);
+    sprintf(reasoning_fname, "%s_reasoning.bin", model_time);
+    sprintf(output_fname, "%s_output.bin", model_time);
+    sprintf(embedding_fname, "%s_embeddings.bin", model_time);
     
     // For inference, we need batch_size=1
-    ssm->batch_size = 1;
-    save_ssm(ssm, model_fname);
+    encoder_ssm->batch_size = 1;
+    reasoning_ssm->batch_size = 1;
+    output_ssm->batch_size = 1;
+    
+    save_ssm(encoder_ssm, encoder_fname);
+    save_ssm(reasoning_ssm, reasoning_fname);
+    save_ssm(output_ssm, output_fname);
     save_embeddings(embeddings, embedding_fname);
 
     // Clean up
-    free_ssm(ssm);
+    free_ssm(encoder_ssm);
+    free_ssm(reasoning_ssm);
+    free_ssm(output_ssm);
     free_embeddings(embeddings);
     
     for (int i = 0; i < conversation_count; i++) {
@@ -273,6 +352,8 @@ int main() {
     
     cudaFree(d_X_bytes);
     cudaFree(d_X_embedded);
+    cudaFree(d_encoding_output);
+    cudaFree(d_reasoning_output);
     cudaFree(d_y_onehot);
     
     printf("\nTraining completed!\n");

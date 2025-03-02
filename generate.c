@@ -90,79 +90,59 @@ int main(int argc, char** argv) {
     // Seed random generator
     srand(time(NULL));
     
-    // Default model file paths (will be overridden by command line args)
-    char* model_filename = NULL;
+    // Files for stacked models
+    char* encoder_filename = NULL;
+    char* reasoning_filename = NULL;
+    char* output_filename = NULL;
     char* embedding_filename = NULL;
     
-    // Generation parameters (fixed, sensible defaults)
+    // Generation parameters
     float temperature = 0.8f;
     float top_p = 0.9f;
     int max_tokens = 512;
     
     // Parse command line arguments
-    if (argc >= 3) {
-        model_filename = argv[1];
-        embedding_filename = argv[2];
+    if (argc >= 5) {
+        encoder_filename = argv[1];
+        reasoning_filename = argv[2];
+        output_filename = argv[3];
+        embedding_filename = argv[4];
     } else {
-        fprintf(stderr, "Usage: %s <model_file> <embeddings_file>\n", argv[0]);
+        fprintf(stderr, "Usage: %s <encoder_model> <reasoning_model> <output_model> <embeddings_file>\n", argv[0]);
         return EXIT_FAILURE;
     }
     
-    printf("=== SLM Generation ===\n");
-    printf("Model file: %s\n", model_filename);
+    printf("=== SLM Generation with Stacked SSM ===\n");
+    printf("Encoder model: %s\n", encoder_filename);
+    printf("Reasoning model: %s\n", reasoning_filename);
+    printf("Output model: %s\n", output_filename);
     printf("Embeddings file: %s\n", embedding_filename);
     printf("Temperature: %.2f\n", temperature);
     printf("Top-p: %.2f\n", top_p);
     printf("Max tokens: %d\n\n", max_tokens);
     
-    // Load embeddings and model
+    // Load embeddings and models
     Embeddings* embeddings = load_embeddings_inference(embedding_filename);
-    if (!embeddings) {
-        fprintf(stderr, "Failed to load embeddings\n");
-        return EXIT_FAILURE;
-    }
+    SSM* encoder_ssm = load_ssm(encoder_filename);
+    SSM* reasoning_ssm = load_ssm(reasoning_filename);
+    SSM* output_ssm = load_ssm(output_filename);
     
-    SSM* ssm = load_ssm(model_filename);
-    if (!ssm) {
-        fprintf(stderr, "Failed to load model\n");
-        free_embeddings(embeddings);
-        return EXIT_FAILURE;
-    }
+    // Reset SSM states
+    CHECK_CUDA(cudaMemset(encoder_ssm->d_state, 0, encoder_ssm->batch_size * encoder_ssm->state_dim * sizeof(float)));
+    CHECK_CUDA(cudaMemset(reasoning_ssm->d_state, 0, reasoning_ssm->batch_size * reasoning_ssm->state_dim * sizeof(float)));
+    CHECK_CUDA(cudaMemset(output_ssm->d_state, 0, output_ssm->batch_size * output_ssm->state_dim * sizeof(float)));
     
-    // Check model configuration
-    if (ssm->batch_size != 1) {
-        fprintf(stderr, "Model was not saved with batch_size=1 for inference\n");
-        free_embeddings(embeddings);
-        free_ssm(ssm);
-        return EXIT_FAILURE;
-    }
-    
-    if (ssm->input_dim != embeddings->embedding_dim) {
-        fprintf(stderr, "Embedding dimension (%d) doesn't match model input dimension (%d)\n",
-                embeddings->embedding_dim, ssm->input_dim);
-        free_embeddings(embeddings);
-        free_ssm(ssm);
-        return EXIT_FAILURE;
-    }
-    
-    if (ssm->output_dim != embeddings->vocab_size) {
-        fprintf(stderr, "Model output dimension (%d) doesn't match vocabulary size (%d)\n",
-                ssm->output_dim, embeddings->vocab_size);
-        free_embeddings(embeddings);
-        free_ssm(ssm);
-        return EXIT_FAILURE;
-    }
-    
-    // Reset SSM state
-    CHECK_CUDA(cudaMemset(ssm->d_state, 0, ssm->batch_size * ssm->state_dim * sizeof(float)));
-    
-    // Allocate memory for input byte and embedded input
+    // Allocate memory for byte inputs and intermediate data
     unsigned char* d_input_byte;
     float* d_input_embedded;
+    float* d_encoder_output;
+    float* d_reasoning_output;
     float* h_output_probs = (float*)malloc(embeddings->vocab_size * sizeof(float));
     
     CHECK_CUDA(cudaMalloc(&d_input_byte, sizeof(unsigned char)));
     CHECK_CUDA(cudaMalloc(&d_input_embedded, embeddings->embedding_dim * sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&d_encoder_output, encoder_ssm->output_dim * sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&d_reasoning_output, reasoning_ssm->output_dim * sizeof(float)));
     
     // Start with the prompt
     const char* prompt = "<USER> Share a story about a garden where emotions grow as flowers. <ASSISTANT> ";
@@ -180,17 +160,33 @@ int main(int argc, char** argv) {
         // Embed the byte
         embeddings_forward(embeddings, d_input_byte, d_input_embedded, 1);
         
-        // Forward pass through the model
-        forward_pass(ssm, d_input_embedded);
+        // Forward pass through encoder model
+        forward_pass(encoder_ssm, d_input_embedded);
+        
+        // Copy encoder output for reasoning model
+        CHECK_CUDA(cudaMemcpy(d_encoder_output, encoder_ssm->d_predictions, 
+                             encoder_ssm->output_dim * sizeof(float), 
+                             cudaMemcpyDeviceToDevice));
+        
+        // Forward pass through reasoning model
+        forward_pass(reasoning_ssm, d_encoder_output);
+        
+        // Copy reasoning output for output model
+        CHECK_CUDA(cudaMemcpy(d_reasoning_output, reasoning_ssm->d_predictions, 
+                             reasoning_ssm->output_dim * sizeof(float), 
+                             cudaMemcpyDeviceToDevice));
+        
+        // Forward pass through output model
+        forward_pass(output_ssm, d_reasoning_output);
     }
     
     // Generate tokens
     for (int i = 0; i < max_tokens; i++) {
         // Apply softmax to get probabilities
-        softmax_kernel<<<1, 1>>>(ssm->d_predictions, 1, embeddings->vocab_size);
+        softmax_kernel<<<1, 1>>>(output_ssm->d_predictions, 1, embeddings->vocab_size);
         
         // Copy probabilities to host
-        CHECK_CUDA(cudaMemcpy(h_output_probs, ssm->d_predictions, 
+        CHECK_CUDA(cudaMemcpy(h_output_probs, output_ssm->d_predictions, 
                              embeddings->vocab_size * sizeof(float), 
                              cudaMemcpyDeviceToHost));
         
@@ -202,51 +198,25 @@ int main(int argc, char** argv) {
         putchar(next_byte);
         fflush(stdout);
         
-        // Check for special sequences to end generation
-        if (i > 0 && next_byte == '<') {
-            char potential_end_tag[12] = {0};
-            potential_end_tag[0] = '<';
-            
-            // Keep going for enough characters to potentially have "<USER>"
-            for (int j = 1; j < 6 && i + j < max_tokens; j++) {
-                // Apply softmax
-                softmax_kernel<<<1, 1>>>(ssm->d_predictions, 1, embeddings->vocab_size);
-                
-                // Copy probabilities to host
-                CHECK_CUDA(cudaMemcpy(h_output_probs, ssm->d_predictions, 
-                                     embeddings->vocab_size * sizeof(float), 
-                                     cudaMemcpyDeviceToHost));
-                
-                // Sample the next token
-                int tag_byte = sample_from_distribution(h_output_probs, embeddings->vocab_size, 
-                                                      temperature, top_p);
-                
-                // Update the tag
-                potential_end_tag[j] = tag_byte;
-                putchar(tag_byte);
-                fflush(stdout);
-                
-                // Update for next token
-                unsigned char current_byte = tag_byte;
-                CHECK_CUDA(cudaMemcpy(d_input_byte, &current_byte, sizeof(unsigned char), cudaMemcpyHostToDevice));
-                embeddings_forward(embeddings, d_input_byte, d_input_embedded, 1);
-                forward_pass(ssm, d_input_embedded);
-                
-                i++;
-            }
-            
-            // Check if we generated "<USER>"
-            if (strncmp(potential_end_tag, "<USER>", 6) == 0) {
-                printf("\n\n[End of generation - detected new user turn]\n");
-                break;
-            }
-        }
-        
-        // Update for next token
+        // Process the next token through all models
         unsigned char current_byte = next_byte;
         CHECK_CUDA(cudaMemcpy(d_input_byte, &current_byte, sizeof(unsigned char), cudaMemcpyHostToDevice));
+        
+        // Embed the byte
         embeddings_forward(embeddings, d_input_byte, d_input_embedded, 1);
-        forward_pass(ssm, d_input_embedded);
+        
+        // Forward pass through all models with proper copies between stages
+        forward_pass(encoder_ssm, d_input_embedded);
+        CHECK_CUDA(cudaMemcpy(d_encoder_output, encoder_ssm->d_predictions, 
+                            encoder_ssm->output_dim * sizeof(float), 
+                            cudaMemcpyDeviceToDevice));
+        
+        forward_pass(reasoning_ssm, d_encoder_output);
+        CHECK_CUDA(cudaMemcpy(d_reasoning_output, reasoning_ssm->d_predictions, 
+                            reasoning_ssm->output_dim * sizeof(float), 
+                            cudaMemcpyDeviceToDevice));
+        
+        forward_pass(output_ssm, d_reasoning_output);
     }
     
     printf("\n\n[Generation complete - reached token limit]\n");
@@ -254,9 +224,13 @@ int main(int argc, char** argv) {
     // Clean up
     free(h_output_probs);
     free_embeddings(embeddings);
-    free_ssm(ssm);
+    free_ssm(encoder_ssm);
+    free_ssm(reasoning_ssm);
+    free_ssm(output_ssm);
     cudaFree(d_input_byte);
     cudaFree(d_input_embedded);
+    cudaFree(d_encoder_output);
+    cudaFree(d_reasoning_output);
     
     return 0;
 }
