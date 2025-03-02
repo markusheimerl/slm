@@ -6,92 +6,62 @@
 #include <math.h>
 #include "ssm/gpu/ssm.h"
 
-// ---------------------------------------------------------------------
-// CUDA kernel: Softmax activation for cross-entropy loss
-// ---------------------------------------------------------------------
-__global__ void softmax_kernel(float* predictions, int batch_size, int output_dim) {
-    int batch_idx = blockIdx.x;
-    
-    if (batch_idx < batch_size) {
-        // Get pointer to this batch item's prediction vector
-        float* batch_pred = predictions + batch_idx * output_dim;
-        
-        // Find max value for numerical stability
-        float max_val = batch_pred[0];
-        for (int i = 1; i < output_dim; i++) {
-            max_val = fmaxf(max_val, batch_pred[i]);
-        }
-        
-        // Compute exponentials and sum
-        float sum_exp = 0.0f;
-        for (int i = 0; i < output_dim; i++) {
-            batch_pred[i] = expf(batch_pred[i] - max_val);
-            sum_exp += batch_pred[i];
-        }
-        
-        // Normalize to get softmax probabilities
-        for (int i = 0; i < output_dim; i++) {
-            batch_pred[i] /= sum_exp;
-        }
-    }
-}
+#define VOCAB_SIZE 256        // One embedding per possible byte value
+#define EMBEDDING_DIM 512     // Embedding dimension
 
 // ---------------------------------------------------------------------
-// CUDA kernel: Cross-entropy loss computation
+// Structure for holding embeddings and their gradients
 // ---------------------------------------------------------------------
-__global__ void cross_entropy_loss_kernel(float* loss, float* d_error, 
-                                         const float* predictions, 
-                                         const float* targets, 
-                                         int batch_size, int output_dim) {
-    int batch_idx = blockIdx.x;
+typedef struct {
+    // Embeddings and gradients (device memory)
+    float* d_embeddings;      // VOCAB_SIZE x EMBEDDING_DIM
+    float* d_embedding_grads; // VOCAB_SIZE x EMBEDDING_DIM
     
-    if (batch_idx < batch_size) {
-        const float* batch_pred = predictions + batch_idx * output_dim;
-        const float* batch_target = targets + batch_idx * output_dim;
-        float* batch_error = d_error + batch_idx * output_dim;
-        float batch_loss = 0.0f;
-        
-        for (int i = 0; i < output_dim; i++) {
-            // Cross-entropy loss contribution: -target * log(pred)
-            float pred = fmaxf(batch_pred[i], 1e-15f); // Prevent log(0)
-            float target = batch_target[i];
-            
-            if (target > 0.0f) {
-                batch_loss -= target * logf(pred);
-            }
-            
-            // Gradient for cross-entropy with softmax is simple: pred - target
-            batch_error[i] = batch_pred[i] - target;
-        }
-        
-        atomicAdd(loss, batch_loss);
-    }
-}
+    // Adam optimizer parameters for embeddings
+    float* d_embedding_m;     // First moment
+    float* d_embedding_v;     // Second moment
+    
+    // Adam hyperparameters
+    float beta1;
+    float beta2;
+    float epsilon;
+    float weight_decay;
+    int adam_t;
+    
+    // Dimensions
+    int vocab_size;
+    int embedding_dim;
+} Embeddings;
 
 // ---------------------------------------------------------------------
-// CUDA kernel: Initialize fixed random embeddings
+// CUDA kernel: Initialize embeddings
 // ---------------------------------------------------------------------
-__global__ void initialize_embeddings_kernel(float* embeddings, int num_embeddings, int embedding_dim, unsigned int seed) {
+__global__ void initialize_embeddings_kernel(float* embeddings, 
+                                            int vocab_size, 
+                                            int embedding_dim, 
+                                            unsigned int seed) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     
-    if (idx < num_embeddings * embedding_dim) {
+    if (idx < vocab_size * embedding_dim) {
         // Simple random number generator
         unsigned int state = seed + idx;
         state = ((state * 1103515245) + 12345) & 0x7fffffff;
         
         // Scale to [-0.1, 0.1]
-        float scale = 0.1f;
+        float scale = 0.1f / sqrtf((float)embedding_dim);
         float value = ((float)state / (float)0x7fffffff) * 2.0f - 1.0f;
         embeddings[idx] = value * scale;
     }
 }
 
 // ---------------------------------------------------------------------
-// CUDA kernel: Convert bytes to embeddings in batch
+// CUDA kernel: Embed input bytes (forward pass)
 // ---------------------------------------------------------------------
-__global__ void bytes_to_embeddings_kernel(float* output, const unsigned char* bytes, 
-                                          const float* embeddings, 
-                                          int batch_size, int embedding_dim) {
+__global__ void embed_bytes_kernel(float* output, 
+                                  const unsigned char* bytes, 
+                                  const float* embeddings, 
+                                  int batch_size, 
+                                  int embedding_dim) {
     int batch_idx = blockIdx.x;
     int emb_idx = threadIdx.x;
     
@@ -108,11 +78,262 @@ __global__ void bytes_to_embeddings_kernel(float* output, const unsigned char* b
 }
 
 // ---------------------------------------------------------------------
-// Function: calculate_cross_entropy_loss
-// Computes cross-entropy loss between predictions and targets
+// CUDA kernel: Compute embedding gradients (backward pass)
+// ---------------------------------------------------------------------
+__global__ void embedding_gradient_kernel(float* embedding_grads,
+                                         const float* input_grads,
+                                         const unsigned char* bytes,
+                                         int batch_size,
+                                         int embedding_dim) {
+    int batch_idx = blockIdx.x;
+    int emb_idx = threadIdx.x;
+    
+    if (batch_idx < batch_size && emb_idx < embedding_dim) {
+        // Get the byte value for this batch item
+        unsigned char byte_val = bytes[batch_idx];
+        
+        // Calculate position in embedding gradient table
+        int grad_offset = byte_val * embedding_dim + emb_idx;
+        
+        // Add gradient to embedding gradient table
+        // Using atomicAdd for thread safety since multiple threads might update the same embedding
+        atomicAdd(&embedding_grads[grad_offset], 
+                 input_grads[batch_idx * embedding_dim + emb_idx]);
+    }
+}
+
+// ---------------------------------------------------------------------
+// CUDA kernel: AdamW update for embeddings (similar to SSM implementation)
+// ---------------------------------------------------------------------
+__global__ void adamw_embeddings_kernel(float* W, const float* grad, float* m, float* v, 
+                                       int size, float beta1, float beta2, float epsilon, 
+                                       float weight_decay, float learning_rate, int batch_size, 
+                                       float bias_correction1, float bias_correction2) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < size) {
+        float g = grad[idx] / ((float) batch_size);
+        m[idx] = beta1 * m[idx] + (1.0f - beta1) * g;
+        v[idx] = beta2 * v[idx] + (1.0f - beta2) * g * g;
+        float m_hat = m[idx] / bias_correction1;
+        float v_hat = v[idx] / bias_correction2;
+        W[idx] = W[idx] * (1.0f - learning_rate * weight_decay) - learning_rate * (m_hat / (sqrtf(v_hat) + epsilon));
+    }
+}
+
+// ---------------------------------------------------------------------
+// CUDA kernel: Softmax for log probabilities output
+// ---------------------------------------------------------------------
+__global__ void softmax_kernel(float* logits, int batch_size, int vocab_size) {
+    int batch_idx = blockIdx.x;
+    
+    if (batch_idx < batch_size) {
+        // Get pointer to this batch item's prediction vector
+        float* batch_logits = logits + batch_idx * vocab_size;
+        
+        // Find max value for numerical stability
+        float max_val = batch_logits[0];
+        for (int i = 1; i < vocab_size; i++) {
+            max_val = fmaxf(max_val, batch_logits[i]);
+        }
+        
+        // Compute exp(logits - max) and sum
+        float sum_exp = 0.0f;
+        for (int i = 0; i < vocab_size; i++) {
+            batch_logits[i] = expf(batch_logits[i] - max_val);
+            sum_exp += batch_logits[i];
+        }
+        
+        // Normalize to get probabilities
+        for (int i = 0; i < vocab_size; i++) {
+            batch_logits[i] /= sum_exp;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------
+// CUDA kernel: Cross-entropy loss computation
+// ---------------------------------------------------------------------
+__global__ void cross_entropy_loss_kernel(float* loss, 
+                                         float* d_error, 
+                                         const float* probs, 
+                                         const float* targets, 
+                                         int batch_size, 
+                                         int vocab_size) {
+    int batch_idx = blockIdx.x;
+    
+    if (batch_idx < batch_size) {
+        const float* batch_probs = probs + batch_idx * vocab_size;
+        const float* batch_target = targets + batch_idx * vocab_size;
+        float* batch_error = d_error + batch_idx * vocab_size;
+        float batch_loss = 0.0f;
+        
+        for (int i = 0; i < vocab_size; i++) {
+            // Cross-entropy loss contribution: -target * log(prob)
+            float prob = fmaxf(batch_probs[i], 1e-15f); // Prevent log(0)
+            if (batch_target[i] > 0.0f) {
+                batch_loss -= batch_target[i] * logf(prob);
+            }
+            
+            // Gradient for softmax with cross-entropy: prob - target
+            batch_error[i] = batch_probs[i] - batch_target[i];
+        }
+        
+        atomicAdd(loss, batch_loss);
+    }
+}
+
+// ---------------------------------------------------------------------
+// Function: Initialize embeddings
+// ---------------------------------------------------------------------
+Embeddings* init_embeddings(int vocab_size, int embedding_dim) {
+    Embeddings* emb = (Embeddings*)malloc(sizeof(Embeddings));
+    emb->vocab_size = vocab_size;
+    emb->embedding_dim = embedding_dim;
+    
+    // Set Adam hyperparameters (similar to SSM)
+    emb->beta1 = 0.9f;
+    emb->beta2 = 0.999f;
+    emb->epsilon = 1e-8f;
+    emb->weight_decay = 0.01f;
+    emb->adam_t = 0;
+    
+    size_t emb_size = vocab_size * embedding_dim * sizeof(float);
+    
+    // Allocate device memory
+    CHECK_CUDA(cudaMalloc(&emb->d_embeddings, emb_size));
+    CHECK_CUDA(cudaMalloc(&emb->d_embedding_grads, emb_size));
+    CHECK_CUDA(cudaMalloc(&emb->d_embedding_m, emb_size));
+    CHECK_CUDA(cudaMalloc(&emb->d_embedding_v, emb_size));
+    
+    // Initialize gradients and Adam parameters to zero
+    CHECK_CUDA(cudaMemset(emb->d_embedding_grads, 0, emb_size));
+    CHECK_CUDA(cudaMemset(emb->d_embedding_m, 0, emb_size));
+    CHECK_CUDA(cudaMemset(emb->d_embedding_v, 0, emb_size));
+    
+    // Initialize embeddings with random values
+    int block_size = 256;
+    int num_blocks = (vocab_size * embedding_dim + block_size - 1) / block_size;
+    initialize_embeddings_kernel<<<num_blocks, block_size>>>(
+        emb->d_embeddings, vocab_size, embedding_dim, time(NULL));
+    
+    return emb;
+}
+
+// ---------------------------------------------------------------------
+// Function: Free embeddings
+// ---------------------------------------------------------------------
+void free_embeddings(Embeddings* emb) {
+    if (!emb) return;
+    
+    cudaFree(emb->d_embeddings);
+    cudaFree(emb->d_embedding_grads);
+    cudaFree(emb->d_embedding_m);
+    cudaFree(emb->d_embedding_v);
+    free(emb);
+}
+
+// ---------------------------------------------------------------------
+// Function: Save embeddings
+// ---------------------------------------------------------------------
+void save_embeddings(Embeddings* emb, const char* filename) {
+    FILE* file = fopen(filename, "wb");
+    if (!file) {
+        printf("Error opening file for writing: %s\n", filename);
+        return;
+    }
+    
+    // Write dimensions
+    fwrite(&emb->vocab_size, sizeof(int), 1, file);
+    fwrite(&emb->embedding_dim, sizeof(int), 1, file);
+    
+    // Copy embeddings from device to host and save
+    size_t emb_size = emb->vocab_size * emb->embedding_dim * sizeof(float);
+    float* h_embeddings = (float*)malloc(emb_size);
+    CHECK_CUDA(cudaMemcpy(h_embeddings, emb->d_embeddings, emb_size, cudaMemcpyDeviceToHost));
+    
+    fwrite(h_embeddings, sizeof(float), emb->vocab_size * emb->embedding_dim, file);
+    
+    free(h_embeddings);
+    fclose(file);
+    printf("Embeddings saved to %s\n", filename);
+}
+
+// ---------------------------------------------------------------------
+// Function: Load embeddings
+// ---------------------------------------------------------------------
+Embeddings* load_embeddings(const char* filename) {
+    FILE* file = fopen(filename, "rb");
+    if (!file) {
+        printf("Error opening file for reading: %s\n", filename);
+        return NULL;
+    }
+    
+    int vocab_size, embedding_dim;
+    fread(&vocab_size, sizeof(int), 1, file);
+    fread(&embedding_dim, sizeof(int), 1, file);
+    
+    Embeddings* emb = init_embeddings(vocab_size, embedding_dim);
+    
+    size_t emb_size = vocab_size * embedding_dim * sizeof(float);
+    float* h_embeddings = (float*)malloc(emb_size);
+    
+    fread(h_embeddings, sizeof(float), vocab_size * embedding_dim, file);
+    CHECK_CUDA(cudaMemcpy(emb->d_embeddings, h_embeddings, emb_size, cudaMemcpyHostToDevice));
+    
+    free(h_embeddings);
+    fclose(file);
+    printf("Embeddings loaded from %s\n", filename);
+    return emb;
+}
+
+// ---------------------------------------------------------------------
+// Function: Forward pass for embeddings
+// ---------------------------------------------------------------------
+void embeddings_forward(Embeddings* emb, unsigned char* d_bytes, float* d_output, int batch_size) {
+    embed_bytes_kernel<<<batch_size, emb->embedding_dim>>>(
+        d_output, d_bytes, emb->d_embeddings, batch_size, emb->embedding_dim);
+}
+
+// ---------------------------------------------------------------------
+// Function: Backward pass for embeddings
+// ---------------------------------------------------------------------
+void embeddings_backward(Embeddings* emb, float* d_input_grads, unsigned char* d_bytes, int batch_size) {
+    embedding_gradient_kernel<<<batch_size, emb->embedding_dim>>>(
+        emb->d_embedding_grads, d_input_grads, d_bytes, batch_size, emb->embedding_dim);
+}
+
+// ---------------------------------------------------------------------
+// Function: Zero gradients for embeddings
+// ---------------------------------------------------------------------
+void zero_embedding_gradients(Embeddings* emb) {
+    size_t emb_size = emb->vocab_size * emb->embedding_dim * sizeof(float);
+    CHECK_CUDA(cudaMemset(emb->d_embedding_grads, 0, emb_size));
+}
+
+// ---------------------------------------------------------------------
+// Function: Update embeddings with AdamW optimizer (similar to SSM implementation)
+// ---------------------------------------------------------------------
+void update_embeddings(Embeddings* emb, float learning_rate, int batch_size) {
+    emb->adam_t++; // Increment time step
+    
+    float bias_correction1 = 1.0f - powf(emb->beta1, (float)emb->adam_t);
+    float bias_correction2 = 1.0f - powf(emb->beta2, (float)emb->adam_t);
+    
+    int block_size = 256;
+    int size = emb->vocab_size * emb->embedding_dim;
+    int num_blocks = (size + block_size - 1) / block_size;
+    
+    adamw_embeddings_kernel<<<num_blocks, block_size>>>(
+        emb->d_embeddings, emb->d_embedding_grads, emb->d_embedding_m, emb->d_embedding_v,
+        size, emb->beta1, emb->beta2, emb->epsilon, emb->weight_decay, 
+        learning_rate, batch_size, bias_correction1, bias_correction2);
+}
+
+// ---------------------------------------------------------------------
+// Function: Calculate cross-entropy loss (renamed to avoid conflict)
 // ---------------------------------------------------------------------
 float calculate_cross_entropy_loss(SSM* ssm, float* d_y) {
-    // Apply softmax to predictions
+    // Apply softmax to get probabilities
     softmax_kernel<<<ssm->batch_size, 1>>>(ssm->d_predictions, 
                                           ssm->batch_size, 
                                           ssm->output_dim);
@@ -135,146 +356,26 @@ float calculate_cross_entropy_loss(SSM* ssm, float* d_y) {
     CHECK_CUDA(cudaMemcpy(&h_loss, d_loss, sizeof(float), cudaMemcpyDeviceToHost));
     CHECK_CUDA(cudaFree(d_loss));
     
-    // Return average loss per batch
+    // Return average loss per batch item
     return h_loss / ssm->batch_size;
 }
 
-// Read text file into memory
-char* read_text_file(const char* filename, size_t* text_length) {
-    FILE* file = fopen(filename, "r");
-    if (!file) {
-        fprintf(stderr, "Error opening file: %s\n", filename);
-        exit(EXIT_FAILURE);
-    }
-    
-    fseek(file, 0, SEEK_END);
-    size_t file_size = ftell(file);
-    rewind(file);
-    
-    char* buffer = (char*)malloc(file_size + 1);
-    if (!buffer) {
-        fprintf(stderr, "Memory allocation failed\n");
-        fclose(file);
-        exit(EXIT_FAILURE);
-    }
-    
-    *text_length = fread(buffer, 1, file_size, file);
-    buffer[*text_length] = '\0';
-    
-    fclose(file);
-    return buffer;
-}
-
-// Split text into separate training examples (conversations)
-char** split_into_examples(const char* text, int* num_examples) {
-    // Count the number of examples (separated by single newlines)
-    int count = 0;
-    const char* pos = text;
-    while ((pos = strstr(pos, "\n")) != NULL) {
-        count++;
-        pos++;
-    }
-    
-    char** examples = (char**)malloc((count + 1) * sizeof(char*));
-    if (!examples) {
-        fprintf(stderr, "Memory allocation failed\n");
-        exit(EXIT_FAILURE);
-    }
-    
-    // Split text into examples
-    const char* start = text;
-    const char* end;
-    int idx = 0;
-    
-    while ((end = strchr(start, '\n')) != NULL) {
-        size_t len = end - start;
-        examples[idx] = (char*)malloc(len + 1);
-        if (!examples[idx]) {
-            fprintf(stderr, "Memory allocation failed\n");
-            exit(EXIT_FAILURE);
+// ---------------------------------------------------------------------
+// Function: Reorganize data for batch processing
+// (Converts from [example][time] to [time][example] layout)
+// ---------------------------------------------------------------------
+void reorganize_data(const unsigned char* input, unsigned char* output, 
+                    int num_examples, int seq_length) {
+    for (int example = 0; example < num_examples; example++) {
+        for (int step = 0; step < seq_length; step++) {
+            int src_idx = example * seq_length + step;
+            int dst_idx = step * num_examples + example;
+            
+            // Check bounds
+            if (src_idx < num_examples * seq_length && dst_idx < num_examples * seq_length) {
+                output[dst_idx] = input[src_idx];
+            }
         }
-        
-        strncpy(examples[idx], start, len);
-        examples[idx][len] = '\0';
-        
-        start = end + 1;  // Skip the newline
-        idx++;
-    }
-    
-    // Get the last example if it doesn't end with a newline
-    if (*start != '\0') {
-        size_t len = strlen(start);
-        examples[idx] = (char*)malloc(len + 1);
-        if (!examples[idx]) {
-            fprintf(stderr, "Memory allocation failed\n");
-            exit(EXIT_FAILURE);
-        }
-        
-        strcpy(examples[idx], start);
-        idx++;
-    }
-    
-    *num_examples = idx;
-    return examples;
-}
-
-// Find the length of the shortest example
-int find_min_length(char** examples, int num_examples) {
-    if (num_examples == 0) return 0;
-    
-    int min_len = strlen(examples[0]);
-    for (int i = 1; i < num_examples; i++) {
-        int len = strlen(examples[i]);
-        if (len < min_len) min_len = len;
-    }
-    
-    return min_len;
-}
-
-// Prepare byte data in GPU-friendly layout
-void prepare_training_data(char** examples, int num_examples, int seq_length,
-                          unsigned char** h_X_bytes, float** h_y) {
-    // Allocate space for byte input and one-hot output
-    *h_X_bytes = (unsigned char*)malloc(num_examples * seq_length * sizeof(unsigned char));
-    size_t y_size = num_examples * seq_length * 256;  // One-hot encoded targets
-    *h_y = (float*)calloc(y_size, sizeof(float));  // Initialize to all zeros
-    
-    if (!*h_X_bytes || !*h_y) {
-        fprintf(stderr, "Memory allocation failed for training data\n");
-        exit(EXIT_FAILURE);
-    }
-    
-    // Fill data arrays
-    for (int step = 0; step < seq_length - 1; step++) {
-        for (int ex = 0; ex < num_examples; ex++) {
-            // Input byte at current position
-            unsigned char cur_char = examples[ex][step];
-            
-            // Calculate position in flattened array
-            size_t byte_pos = step * num_examples + ex;
-            (*h_X_bytes)[byte_pos] = cur_char;
-            
-            // Target character (next position)
-            unsigned char next_char = examples[ex][step + 1];
-            
-            // Calculate position in flattened array for target one-hot vector
-            size_t y_pos = (byte_pos * 256) + next_char;
-            
-            // Set the corresponding bit to 1 in the one-hot vector
-            (*h_y)[y_pos] = 1.0f;
-        }
-    }
-    
-    // Handle the last character of each sequence
-    int last_step = seq_length - 1;
-    for (int ex = 0; ex < num_examples; ex++) {
-        // Input: last character
-        unsigned char last_char = examples[ex][last_step];
-        size_t byte_pos = last_step * num_examples + ex;
-        (*h_X_bytes)[byte_pos] = last_char;
-        
-        // Target: we'll use a zero vector for simplicity (end of sequence marker)
-        // This is already handled by calloc initialization
     }
 }
 
@@ -283,108 +384,167 @@ int main() {
     srand(time(NULL) ^ getpid());
     
     // Model parameters
-    int embedding_dim = 1024;     // Fixed embedding dimension
-    int output_dim = 256;         // One-hot encoded output prediction
     int state_dim = 2048;         // State dimension
-    float learning_rate = 0.0001; // Fixed learning rate
-    int num_epochs = 300;         // Number of training epochs
+    float learning_rate = 0.0001; // Learning rate
+    int num_epochs = 100;         // Number of training epochs
+    int batch_size = 64;          // Batch size
     
     printf("=== SLM Training Configuration ===\n");
-    printf("Embedding dimension: %d (fixed random)\n", embedding_dim);
-    printf("Output dimension: %d (one-hot encoded)\n", output_dim);
+    printf("Vocabulary size: %d (byte values)\n", VOCAB_SIZE);
+    printf("Embedding dimension: %d\n", EMBEDDING_DIM);
     printf("State dimension: %d\n", state_dim);
-    printf("Learning rate: %.9f\n", learning_rate);
+    printf("Learning rate: %.6f\n", learning_rate);
+    printf("Batch size: %d\n", batch_size);
     printf("Training epochs: %d\n\n", num_epochs);
     
     // Read training data
-    size_t text_length;
-    char* text = read_text_file("data.txt", &text_length);
-    printf("Loaded %zu characters of text data\n", text_length);
-    
-    // Split text into separate training examples
-    int num_examples;
-    char** examples = split_into_examples(text, &num_examples);
-    printf("Split data into %d separate examples\n", num_examples);
-    
-    // Use the actual length of the shortest example
-    int seq_length = find_min_length(examples, num_examples);
-    printf("Training with sequence length: %d (from shortest example)\n\n", seq_length);
-    
-    // Prepare training data
-    unsigned char *h_X_bytes;
-    float *h_y;
-    prepare_training_data(examples, num_examples, seq_length, &h_X_bytes, &h_y);
-    
-    // Initialize fixed random embeddings
-    float *h_embeddings = (float*)malloc(256 * embedding_dim * sizeof(float));
-    if (!h_embeddings) {
-        fprintf(stderr, "Memory allocation failed for embeddings\n");
-        exit(EXIT_FAILURE);
+    FILE* file = fopen("data.txt", "rb");
+    if (!file) {
+        fprintf(stderr, "Error opening data.txt\n");
+        return EXIT_FAILURE;
     }
     
-    // Generate random embeddings in host memory
-    for (int i = 0; i < 256 * embedding_dim; i++) {
-        h_embeddings[i] = ((float)rand() / RAND_MAX) * 0.2f - 0.1f;  // Range: [-0.1, 0.1]
+    // Get file size
+    fseek(file, 0, SEEK_END);
+    long file_size = ftell(file);
+    fseek(file, 0, SEEK_SET);
+    
+    // Read the whole file
+    char* text_data = (char*)malloc(file_size + 1);
+    if (!text_data) {
+        fprintf(stderr, "Memory allocation failed\n");
+        fclose(file);
+        return EXIT_FAILURE;
+    }
+    
+    size_t bytes_read = fread(text_data, 1, file_size, file);
+    text_data[bytes_read] = '\0';
+    fclose(file);
+    
+    printf("Loaded %zu bytes of text data\n", bytes_read);
+    
+    // Split data into examples (each line is an example)
+    char** examples = (char**)malloc(batch_size * sizeof(char*));
+    int num_examples = 0;
+    
+    char* line = strtok(text_data, "\n");
+    while (line && num_examples < batch_size) {
+        size_t len = strlen(line);
+        examples[num_examples] = (char*)malloc(len + 1);
+        strcpy(examples[num_examples], line);
+        num_examples++;
+        line = strtok(NULL, "\n");
+    }
+    
+    printf("Split data into %d examples for training\n", num_examples);
+    
+    // Find the minimum length among examples
+    int min_length = strlen(examples[0]);
+    for (int i = 1; i < num_examples; i++) {
+        int len = strlen(examples[i]);
+        if (len < min_length) min_length = len;
+    }
+    
+    // Use sequence length of minimum example
+    int seq_length = min_length;
+    printf("Using sequence length: %d\n", seq_length);
+    
+    // Prepare input and target data
+    unsigned char* h_X_data = (unsigned char*)malloc(num_examples * seq_length * sizeof(unsigned char));
+    unsigned char* h_y_data = (unsigned char*)malloc(num_examples * seq_length * sizeof(unsigned char));
+    
+    // Copy data and set up X (current char) and y (next char)
+    for (int ex = 0; ex < num_examples; ex++) {
+        for (int pos = 0; pos < seq_length - 1; pos++) {
+            h_X_data[ex * seq_length + pos] = examples[ex][pos];
+            h_y_data[ex * seq_length + pos] = examples[ex][pos + 1];
+        }
+        // For the last position, use a wrap-around (last char predicts first char)
+        h_X_data[ex * seq_length + (seq_length - 1)] = examples[ex][seq_length - 1];
+        h_y_data[ex * seq_length + (seq_length - 1)] = examples[ex][0];
+    }
+    
+    // Reorganize data to [time][example] layout for efficient processing
+    unsigned char* h_X_time_major = (unsigned char*)malloc(num_examples * seq_length * sizeof(unsigned char));
+    unsigned char* h_y_time_major = (unsigned char*)malloc(num_examples * seq_length * sizeof(unsigned char));
+    
+    reorganize_data(h_X_data, h_X_time_major, num_examples, seq_length);
+    reorganize_data(h_y_data, h_y_time_major, num_examples, seq_length);
+    
+    // Free original arrays
+    free(h_X_data);
+    free(h_y_data);
+    
+    // Create one-hot encoded targets
+    float* h_y_onehot = (float*)calloc(num_examples * seq_length * VOCAB_SIZE, sizeof(float));
+    for (int t = 0; t < seq_length; t++) {
+        for (int ex = 0; ex < num_examples; ex++) {
+            int idx = t * num_examples + ex;
+            unsigned char target = h_y_time_major[idx];
+            h_y_onehot[idx * VOCAB_SIZE + target] = 1.0f;
+        }
     }
     
     // Transfer data to GPU
-    unsigned char *d_X_bytes;
-    float *d_embeddings, *d_y, *d_X_embedded;
-    size_t x_bytes_size = num_examples * seq_length * sizeof(unsigned char);
-    size_t embeddings_size = 256 * embedding_dim * sizeof(float);
-    size_t y_data_size = num_examples * seq_length * output_dim * sizeof(float);
-    size_t x_embedded_size = num_examples * seq_length * embedding_dim * sizeof(float);
+    unsigned char* d_X_bytes;
+    float* d_y_onehot;
     
-    CHECK_CUDA(cudaMalloc(&d_X_bytes, x_bytes_size));
-    CHECK_CUDA(cudaMalloc(&d_embeddings, embeddings_size));
-    CHECK_CUDA(cudaMalloc(&d_X_embedded, x_embedded_size));
-    CHECK_CUDA(cudaMalloc(&d_y, y_data_size));
+    CHECK_CUDA(cudaMalloc(&d_X_bytes, num_examples * seq_length * sizeof(unsigned char)));
+    CHECK_CUDA(cudaMalloc(&d_y_onehot, num_examples * seq_length * VOCAB_SIZE * sizeof(float)));
     
-    CHECK_CUDA(cudaMemcpy(d_X_bytes, h_X_bytes, x_bytes_size, cudaMemcpyHostToDevice));
-    CHECK_CUDA(cudaMemcpy(d_embeddings, h_embeddings, embeddings_size, cudaMemcpyHostToDevice));
-    CHECK_CUDA(cudaMemcpy(d_y, h_y, y_data_size, cudaMemcpyHostToDevice));
+    CHECK_CUDA(cudaMemcpy(d_X_bytes, h_X_time_major, 
+                         num_examples * seq_length * sizeof(unsigned char), 
+                         cudaMemcpyHostToDevice));
+    CHECK_CUDA(cudaMemcpy(d_y_onehot, h_y_onehot, 
+                         num_examples * seq_length * VOCAB_SIZE * sizeof(float), 
+                         cudaMemcpyHostToDevice));
     
-    // Initialize fixed embeddings on GPU with more diversity
-    int block_size = 256;
-    int num_blocks = (256 * embedding_dim + block_size - 1) / block_size;
-    initialize_embeddings_kernel<<<num_blocks, block_size>>>(d_embeddings, 256, embedding_dim, time(NULL));
+    // Initialize the embedding layer
+    Embeddings* embeddings = init_embeddings(VOCAB_SIZE, EMBEDDING_DIM);
     
-    // Initialize model (each example is processed in parallel)
-    int batch_size = num_examples;
-    SSM* ssm = init_ssm(embedding_dim, state_dim, output_dim, batch_size);
+    // Allocate memory for embedded inputs
+    float* d_X_embedded;
+    CHECK_CUDA(cudaMalloc(&d_X_embedded, num_examples * EMBEDDING_DIM * sizeof(float)));
     
-    printf("Starting training for %d epochs (batch size: %d examples)\n\n", 
-           num_epochs, batch_size);
+    // Initialize SSM model
+    SSM* ssm = init_ssm(EMBEDDING_DIM, state_dim, VOCAB_SIZE, num_examples);
+    
+    printf("\nStarting training for %d epochs...\n", num_epochs);
     
     // Training loop
     for (int epoch = 0; epoch < num_epochs; epoch++) {
-        // Reset states at the beginning of each epoch
-        CHECK_CUDA(cudaMemset(ssm->d_state, 0, batch_size * state_dim * sizeof(float)));
+        // Reset state at the beginning of each epoch
+        CHECK_CUDA(cudaMemset(ssm->d_state, 0, num_examples * state_dim * sizeof(float)));
         
         float epoch_loss = 0.0f;
         
-        // Process each timestep across all examples
-        for (int step = 0; step < seq_length; step++) {
-            // Get pointers to this step's data across all examples
-            unsigned char* step_X_bytes_ptr = &d_X_bytes[step * batch_size];
-            float* step_y_ptr = &d_y[step * batch_size * output_dim];
-            float* step_X_embedded_ptr = &d_X_embedded[step * batch_size * embedding_dim];
+        // Process each timestep
+        for (int t = 0; t < seq_length; t++) {
+            // Get current timestep data
+            unsigned char* d_X_t = d_X_bytes + t * num_examples;
+            float* d_y_t = d_y_onehot + t * num_examples * VOCAB_SIZE;
             
-            // Convert bytes to embeddings for this batch
-            bytes_to_embeddings_kernel<<<batch_size, embedding_dim>>>(
-                step_X_embedded_ptr, step_X_bytes_ptr, d_embeddings, batch_size, embedding_dim);
+            // Forward pass: embedding layer
+            embeddings_forward(embeddings, d_X_t, d_X_embedded, num_examples);
             
-            // Forward pass with embedded input
-            forward_pass(ssm, step_X_embedded_ptr);
+            // Forward pass: SSM layer
+            forward_pass(ssm, d_X_embedded);
             
-            // Calculate cross-entropy loss
-            float step_loss = calculate_cross_entropy_loss(ssm, step_y_ptr);
-            epoch_loss += step_loss;
+            // Calculate loss
+            float loss = calculate_cross_entropy_loss(ssm, d_y_t);
+            epoch_loss += loss;
             
-            // Backward pass and update
+            // Backward pass: SSM
             zero_gradients(ssm);
-            backward_pass(ssm, step_X_embedded_ptr);
+            backward_pass(ssm, d_X_embedded);
+            
+            // Backward pass: embeddings
+            zero_embedding_gradients(embeddings);
+            embeddings_backward(embeddings, ssm->d_B_grad, d_X_t, num_examples);
+            
+            // Update weights
             update_weights(ssm, learning_rate);
+            update_embeddings(embeddings, learning_rate, num_examples);
         }
         
         printf("Epoch %d/%d, Average Loss: %.6f\n", 
@@ -393,52 +553,55 @@ int main() {
     
     // Save the final model
     char model_fname[64];
+    char embedding_fname[64];
     time_t now = time(NULL);
     struct tm *timeinfo = localtime(&now);
     sprintf(model_fname, "%04d%02d%02d_%02d%02d%02d_slm_final.bin", 
            timeinfo->tm_year + 1900, timeinfo->tm_mon + 1, timeinfo->tm_mday,
            timeinfo->tm_hour, timeinfo->tm_min, timeinfo->tm_sec);
+    sprintf(embedding_fname, "%04d%02d%02d_%02d%02d%02d_embeddings.bin", 
+           timeinfo->tm_year + 1900, timeinfo->tm_mon + 1, timeinfo->tm_mday,
+           timeinfo->tm_hour, timeinfo->tm_min, timeinfo->tm_sec);
     
     // Create inference model with batch_size=1 for saving
-    SSM* inference_model = init_ssm(embedding_dim, state_dim, output_dim, 1);
+    SSM* inference_model = init_ssm(EMBEDDING_DIM, state_dim, VOCAB_SIZE, 1);
     CHECK_CUDA(cudaMemcpy(inference_model->d_A, ssm->d_A, 
                          state_dim * state_dim * sizeof(float), 
                          cudaMemcpyDeviceToDevice));
     CHECK_CUDA(cudaMemcpy(inference_model->d_B, ssm->d_B, 
-                         state_dim * embedding_dim * sizeof(float), 
+                         state_dim * EMBEDDING_DIM * sizeof(float), 
                          cudaMemcpyDeviceToDevice));
     CHECK_CUDA(cudaMemcpy(inference_model->d_C, ssm->d_C, 
-                         output_dim * state_dim * sizeof(float), 
+                         VOCAB_SIZE * state_dim * sizeof(float), 
                          cudaMemcpyDeviceToDevice));
     CHECK_CUDA(cudaMemcpy(inference_model->d_D, ssm->d_D, 
-                         output_dim * embedding_dim * sizeof(float), 
+                         VOCAB_SIZE * EMBEDDING_DIM * sizeof(float), 
                          cudaMemcpyDeviceToDevice));
     
-    // Also save embeddings with the model for inference
-    // Note: We need to extend the save_ssm and load_ssm functions to include embeddings
-    // For now, we'll just mention this requirement
-    printf("\nNote: For full inference functionality, embeddings should also be saved\n");
-    
     save_ssm(inference_model, model_fname);
-    printf("\nModel saved to %s\n", model_fname);
+    save_embeddings(embeddings, embedding_fname);
     
-    free_ssm(inference_model);
-    printf("Training completed!\n");
+    printf("\nModel saved to %s\n", model_fname);
+    printf("Embeddings saved to %s\n", embedding_fname);
     
     // Clean up
+    free_ssm(inference_model);
+    free_ssm(ssm);
+    free_embeddings(embeddings);
+    
     for (int i = 0; i < num_examples; i++) {
         free(examples[i]);
     }
     free(examples);
-    free(text);
-    free(h_X_bytes);
-    free(h_y);
-    free(h_embeddings);
-    cudaFree(d_X_bytes);
-    cudaFree(d_embeddings);
-    cudaFree(d_X_embedded);
-    cudaFree(d_y);
-    free_ssm(ssm);
+    free(text_data);
+    free(h_X_time_major);
+    free(h_y_time_major);
+    free(h_y_onehot);
     
+    cudaFree(d_X_bytes);
+    cudaFree(d_X_embedded);
+    cudaFree(d_y_onehot);
+    
+    printf("\nTraining completed!\n");
     return 0;
 }
