@@ -10,46 +10,28 @@
 // Structure for holding embeddings and their gradients
 // ---------------------------------------------------------------------
 typedef struct {
-    // Embeddings and gradients (device memory)
-    float* d_embeddings;      // 256 x EMBEDDING_DIM
-    float* d_embedding_grads; // 256 x EMBEDDING_DIM
+    // Embeddings (device and host memory)
+    float* d_embeddings;      // vocab_size x embedding_dim
+    float* h_embeddings;      // vocab_size x embedding_dim
     
-    // Adam optimizer parameters for embeddings
+    // Gradients (device memory)
+    float* d_embedding_grads; // vocab_size x embedding_dim
+    
+    // Adam optimizer first (m) and second (v) moment estimates (device pointers)
     float* d_embedding_m;     // First moment
     float* d_embedding_v;     // Second moment
     
-    // Adam hyperparameters
-    float beta1;
-    float beta2;
-    float epsilon;
-    float weight_decay;
-    int adam_t;
+    // Adam hyperparameters and counter
+    float beta1;         // e.g., 0.9
+    float beta2;         // e.g., 0.999
+    float epsilon;       // e.g., 1e-8
+    float weight_decay;  // e.g., 0.01
+    int adam_t;          // time step counter
     
     // Dimensions
     int vocab_size;
     int embedding_dim;
 } Embeddings;
-
-// ---------------------------------------------------------------------
-// CUDA kernel: Initialize embeddings
-// ---------------------------------------------------------------------
-__global__ void initialize_embeddings_kernel(float* embeddings, 
-                                            int vocab_size, 
-                                            int embedding_dim, 
-                                            unsigned int seed) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    
-    if (idx < vocab_size * embedding_dim) {
-        // Simple random number generator
-        unsigned int state = seed + idx;
-        state = ((state * 1103515245) + 12345) & 0x7fffffff;
-        
-        // Scale to [-0.08, 0.08]
-        float scale = 0.08f / sqrtf((float)embedding_dim);
-        float value = ((float)state / (float)0x7fffffff) * 2.0f - 1.0f;
-        embeddings[idx] = value * scale;
-    }
-}
 
 // ---------------------------------------------------------------------
 // CUDA kernel: Embed input bytes (forward pass)
@@ -117,7 +99,7 @@ __global__ void adamw_embeddings_kernel(float* W, const float* grad, float* m, f
 }
 
 // ---------------------------------------------------------------------
-// CUDA kernel: Softmax for log probabilities output
+// CUDA kernel: Softmax for probabilities output
 // ---------------------------------------------------------------------
 __global__ void softmax_kernel(float* logits, int batch_size, int vocab_size) {
     int batch_idx = blockIdx.x;
@@ -183,105 +165,51 @@ __global__ void cross_entropy_loss_kernel(float* loss,
 
 // ---------------------------------------------------------------------
 // Function: Initialize embeddings
+// Initializes the embeddings structure, allocates host and device memory,
+// sets initial weights with scaled random values, and copies them to device.
+// Also initializes Adam optimizer parameters.
 // ---------------------------------------------------------------------
 Embeddings* init_embeddings(int vocab_size, int embedding_dim) {
     Embeddings* emb = (Embeddings*)malloc(sizeof(Embeddings));
     emb->vocab_size = vocab_size;
     emb->embedding_dim = embedding_dim;
     
-    // Set Adam hyperparameters (similar to SSM)
+    // Set Adam hyperparameters
     emb->beta1 = 0.9f;
     emb->beta2 = 0.999f;
     emb->epsilon = 1e-8f;
     emb->weight_decay = 0.01f;
     emb->adam_t = 0;
     
-    size_t emb_size = vocab_size * embedding_dim * sizeof(float);
+    // Allocate host memory for embeddings
+    emb->h_embeddings = (float*)malloc(vocab_size * embedding_dim * sizeof(float));
     
-    // Allocate device memory
-    CHECK_CUDA(cudaMalloc(&emb->d_embeddings, emb_size));
-    CHECK_CUDA(cudaMalloc(&emb->d_embedding_grads, emb_size));
-    CHECK_CUDA(cudaMalloc(&emb->d_embedding_m, emb_size));
-    CHECK_CUDA(cudaMalloc(&emb->d_embedding_v, emb_size));
+    // Initialize matrices with scaled random values
+    float scale = 1.0f / sqrtf(embedding_dim);
     
-    // Initialize gradients and Adam parameters to zero
-    CHECK_CUDA(cudaMemset(emb->d_embedding_grads, 0, emb_size));
-    CHECK_CUDA(cudaMemset(emb->d_embedding_m, 0, emb_size));
-    CHECK_CUDA(cudaMemset(emb->d_embedding_v, 0, emb_size));
-    
-    // Initialize embeddings with random values
-    int block_size = 256;
-    int num_blocks = (vocab_size * embedding_dim + block_size - 1) / block_size;
-    initialize_embeddings_kernel<<<num_blocks, block_size>>>(
-        emb->d_embeddings, vocab_size, embedding_dim, time(NULL));
-    
-    return emb;
-}
-
-// ---------------------------------------------------------------------
-// Function: Free embeddings
-// ---------------------------------------------------------------------
-void free_embeddings(Embeddings* emb) {
-    if (!emb) return;
-    
-    cudaFree(emb->d_embeddings);
-    cudaFree(emb->d_embedding_grads);
-    cudaFree(emb->d_embedding_m);
-    cudaFree(emb->d_embedding_v);
-    free(emb);
-}
-
-// ---------------------------------------------------------------------
-// Function: Save embeddings
-// ---------------------------------------------------------------------
-void save_embeddings(Embeddings* emb, const char* filename) {
-    FILE* file = fopen(filename, "wb");
-    if (!file) {
-        printf("Error opening file for writing: %s\n", filename);
-        return;
+    for (int i = 0; i < vocab_size * embedding_dim; i++) {
+        emb->h_embeddings[i] = (((float)rand() / (float)RAND_MAX) * 2.0f - 1.0f) * scale;
     }
     
-    // Write dimensions
-    fwrite(&emb->vocab_size, sizeof(int), 1, file);
-    fwrite(&emb->embedding_dim, sizeof(int), 1, file);
+    // Allocate device memory for embeddings
+    CHECK_CUDA(cudaMalloc(&emb->d_embeddings, vocab_size * embedding_dim * sizeof(float)));
     
-    // Copy embeddings from device to host and save
-    size_t emb_size = emb->vocab_size * emb->embedding_dim * sizeof(float);
-    float* h_embeddings = (float*)malloc(emb_size);
-    CHECK_CUDA(cudaMemcpy(h_embeddings, emb->d_embeddings, emb_size, cudaMemcpyDeviceToHost));
+    // Allocate device memory for gradients
+    CHECK_CUDA(cudaMalloc(&emb->d_embedding_grads, vocab_size * embedding_dim * sizeof(float)));
     
-    fwrite(h_embeddings, sizeof(float), emb->vocab_size * emb->embedding_dim, file);
+    // Allocate device memory for Adam first and second moment estimates and initialize to zero
+    CHECK_CUDA(cudaMalloc(&emb->d_embedding_m, vocab_size * embedding_dim * sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&emb->d_embedding_v, vocab_size * embedding_dim * sizeof(float)));
     
-    free(h_embeddings);
-    fclose(file);
-    printf("Embeddings saved to %s\n", filename);
-}
-
-// ---------------------------------------------------------------------
-// Function: Load embeddings
-// ---------------------------------------------------------------------
-Embeddings* load_embeddings(const char* filename) {
-    FILE* file = fopen(filename, "rb");
-    if (!file) {
-        printf("Error opening file for reading: %s\n", filename);
-        return NULL;
-    }
+    CHECK_CUDA(cudaMemset(emb->d_embedding_grads, 0, vocab_size * embedding_dim * sizeof(float)));
+    CHECK_CUDA(cudaMemset(emb->d_embedding_m, 0, vocab_size * embedding_dim * sizeof(float)));
+    CHECK_CUDA(cudaMemset(emb->d_embedding_v, 0, vocab_size * embedding_dim * sizeof(float)));
     
-    int vocab_size, embedding_dim;
-    fread(&vocab_size, sizeof(int), 1, file);
-    fread(&embedding_dim, sizeof(int), 1, file);
+    // Copy embeddings from host to device
+    CHECK_CUDA(cudaMemcpy(emb->d_embeddings, emb->h_embeddings, 
+                         vocab_size * embedding_dim * sizeof(float), 
+                         cudaMemcpyHostToDevice));
     
-    Embeddings* emb = init_embeddings(vocab_size, embedding_dim);
-    
-    size_t emb_size = vocab_size * embedding_dim * sizeof(float);
-    float* h_embeddings = (float*)malloc(emb_size);
-    
-    fread(h_embeddings, sizeof(float), vocab_size * embedding_dim, file);
-    CHECK_CUDA(cudaMemcpy(emb->d_embeddings, h_embeddings, emb_size, cudaMemcpyHostToDevice));
-    
-    free(h_embeddings);
-    fclose(file);
-    printf("Embeddings loaded from %s\n", filename);
     return emb;
 }
 
@@ -329,7 +257,82 @@ void update_embeddings(Embeddings* emb, float learning_rate, int batch_size) {
 }
 
 // ---------------------------------------------------------------------
-// Function: Calculate cross-entropy loss (renamed to avoid conflict)
+// Function: Free embeddings
+// Frees all allocated memory (both device and host).
+// ---------------------------------------------------------------------
+void free_embeddings(Embeddings* emb) {
+    if (!emb) return;
+    
+    // Free device memory
+    cudaFree(emb->d_embeddings);
+    cudaFree(emb->d_embedding_grads);
+    cudaFree(emb->d_embedding_m);
+    cudaFree(emb->d_embedding_v);
+    
+    // Free host memory
+    free(emb->h_embeddings);
+    free(emb);
+}
+
+// ---------------------------------------------------------------------
+// Function: Save embeddings
+// Saves the embeddings to a binary file.
+// ---------------------------------------------------------------------
+void save_embeddings(Embeddings* emb, const char* filename) {
+    FILE* file = fopen(filename, "wb");
+    if (!file) {
+        printf("Error opening file for writing: %s\n", filename);
+        return;
+    }
+    
+    // Write dimensions
+    fwrite(&emb->vocab_size, sizeof(int), 1, file);
+    fwrite(&emb->embedding_dim, sizeof(int), 1, file);
+    
+    // Copy embeddings from device to host
+    CHECK_CUDA(cudaMemcpy(emb->h_embeddings, emb->d_embeddings, 
+                         emb->vocab_size * emb->embedding_dim * sizeof(float), 
+                         cudaMemcpyDeviceToHost));
+    
+    // Write embeddings to file
+    fwrite(emb->h_embeddings, sizeof(float), emb->vocab_size * emb->embedding_dim, file);
+    
+    fclose(file);
+    printf("Embeddings saved to %s\n", filename);
+}
+
+// ---------------------------------------------------------------------
+// Function: Load embeddings
+// Loads the embeddings from a binary file and initializes.
+// ---------------------------------------------------------------------
+Embeddings* load_embeddings(const char* filename) {
+    FILE* file = fopen(filename, "rb");
+    if (!file) {
+        printf("Error opening file for reading: %s\n", filename);
+        return NULL;
+    }
+    
+    int vocab_size, embedding_dim;
+    fread(&vocab_size, sizeof(int), 1, file);
+    fread(&embedding_dim, sizeof(int), 1, file);
+    
+    Embeddings* emb = init_embeddings(vocab_size, embedding_dim);
+    
+    // Read embeddings from file to host memory
+    fread(emb->h_embeddings, sizeof(float), vocab_size * embedding_dim, file);
+    
+    // Copy embeddings to device
+    CHECK_CUDA(cudaMemcpy(emb->d_embeddings, emb->h_embeddings, 
+                         vocab_size * embedding_dim * sizeof(float), 
+                         cudaMemcpyHostToDevice));
+    
+    fclose(file);
+    printf("Embeddings loaded from %s\n", filename);
+    return emb;
+}
+
+// ---------------------------------------------------------------------
+// Function: Calculate cross-entropy loss
 // ---------------------------------------------------------------------
 float calculate_cross_entropy_loss(SSM* ssm, float* d_y) {
     // Apply softmax to get probabilities
@@ -357,26 +360,6 @@ float calculate_cross_entropy_loss(SSM* ssm, float* d_y) {
     
     // Return average loss per batch item
     return h_loss / ssm->batch_size;
-}
-
-// ---------------------------------------------------------------------
-// Function: Count the number of lines in a file
-// ---------------------------------------------------------------------
-int count_lines(FILE* file) {
-    int count = 0;
-    char buffer[4096];
-    
-    // Save current position
-    long pos = ftell(file);
-    rewind(file);
-    
-    while (fgets(buffer, sizeof(buffer), file)) {
-        count++;
-    }
-    
-    // Restore position
-    fseek(file, pos, SEEK_SET);
-    return count;
 }
 
 // ---------------------------------------------------------------------
@@ -424,7 +407,14 @@ int main() {
     }
     
     // Count number of lines (conversations)
-    int num_conversations = count_lines(file);
+    int num_conversations = 0;
+    char buffer[4096];
+    
+    rewind(file);
+    while (fgets(buffer, sizeof(buffer), file)) {
+        num_conversations++;
+    }
+    
     printf("Found %d conversations in data.txt\n", num_conversations);
     
     // Use all conversations for batch processing
@@ -454,19 +444,14 @@ int main() {
     char** conversations = (char**)malloc(batch_size * sizeof(char*));
     int conversation_count = 0;
     
-    // First count the actual number of lines
+    // Load all available conversations
     char* line = strtok(text_data, "\n");
-    while (line) {
+    while (line && conversation_count < batch_size) {
         size_t len = strlen(line);
         if (len > 0) {  // Skip empty lines
-            if (conversation_count < batch_size) {
-                conversations[conversation_count] = (char*)malloc(len + 1);
-                strcpy(conversations[conversation_count], line);
-                conversation_count++;
-            } else {
-                printf("Warning: More conversations found than expected. Using first %d.\n", batch_size);
-                break;
-            }
+            conversations[conversation_count] = (char*)malloc(len + 1);
+            strcpy(conversations[conversation_count], line);
+            conversation_count++;
         }
         line = strtok(NULL, "\n");
     }
@@ -604,29 +589,15 @@ int main() {
            timeinfo->tm_year + 1900, timeinfo->tm_mon + 1, timeinfo->tm_mday,
            timeinfo->tm_hour, timeinfo->tm_min, timeinfo->tm_sec);
     
-    // Create inference model with batch_size=1 for saving
-    SSM* inference_model = init_ssm(embedding_dim, state_dim, vocab_size, 1);
-    CHECK_CUDA(cudaMemcpy(inference_model->d_A, ssm->d_A, 
-                         state_dim * state_dim * sizeof(float), 
-                         cudaMemcpyDeviceToDevice));
-    CHECK_CUDA(cudaMemcpy(inference_model->d_B, ssm->d_B, 
-                         state_dim * embedding_dim * sizeof(float), 
-                         cudaMemcpyDeviceToDevice));
-    CHECK_CUDA(cudaMemcpy(inference_model->d_C, ssm->d_C, 
-                         vocab_size * state_dim * sizeof(float), 
-                         cudaMemcpyDeviceToDevice));
-    CHECK_CUDA(cudaMemcpy(inference_model->d_D, ssm->d_D, 
-                         vocab_size * embedding_dim * sizeof(float), 
-                         cudaMemcpyDeviceToDevice));
-    
-    save_ssm(inference_model, model_fname);
+    // For inference, we need batch_size=1
+    ssm->batch_size = 1;
+    save_ssm(ssm, model_fname);
     save_embeddings(embeddings, embedding_fname);
     
     printf("\nFinal model saved to %s\n", model_fname);
     printf("Final embeddings saved to %s\n", embedding_fname);
     
     // Clean up
-    free_ssm(inference_model);
     free_ssm(ssm);
     free_embeddings(embeddings);
     
