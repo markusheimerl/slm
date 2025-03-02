@@ -1,0 +1,183 @@
+name: Train SLM Model
+
+on:
+  workflow_dispatch:
+    inputs:
+      epochs:
+        description: 'Number of training epochs'
+        required: true
+        type: number
+        default: 1000
+
+permissions:
+  contents: write
+
+jobs:
+  train-model:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Create RunPod Instance
+        id: create-pod
+        run: |
+          RESPONSE=$(curl --request POST \
+            --header 'content-type: application/json' \
+            --url 'https://api.runpod.io/graphql?api_key=${{ secrets.RUNPOD_API_KEY }}' \
+            --data @- << 'EOF'
+          {
+            "query": "mutation { podFindAndDeployOnDemand(input: { cloudType: SECURE, gpuCount: 1, volumeInGb: 2, containerDiskInGb: 10, minVcpuCount: 4, minMemoryInGb: 30, gpuTypeId: \"NVIDIA RTX A4500\", name: \"slm-training\", imageName: \"runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04\", volumeMountPath: \"/workspace\", dockerArgs: \"bash -c 'cd /workspace && git clone https://github.com/markusheimerl/slm.git && cd slm && apt-get update && apt-get install -y time clang curl libcurl4-openssl-dev && make data && sed -i \\\"s/int num_epochs = 1000;/int num_epochs = ${{ inputs.epochs }};/g\\\" slm.c && make run && make gen > generation_output.txt && mkdir -p /workspace/artifacts && cp *.bin /workspace/artifacts/ && cp generation_output.txt /workspace/artifacts/ && poweroff'\"}) { id imageName machineId } }"
+          }
+          EOF
+          )
+
+          echo "Response: $RESPONSE"
+          
+          if echo "$RESPONSE" | grep -q "error"; then
+            echo "Error creating pod"
+            echo "$RESPONSE"
+            exit 1
+          fi
+          
+          POD_ID=$(echo "$RESPONSE" | jq -r '.data.podFindAndDeployOnDemand.id')
+          echo "Created pod with ID: $POD_ID"
+          echo "pod_id=$POD_ID" >> $GITHUB_OUTPUT
+
+      - name: Wait for training to complete and download artifacts
+        run: |
+          POD_ID="${{ steps.create-pod.outputs.pod_id }}"
+          
+          echo "Waiting for pod to initialize..."
+          sleep 60
+          
+          status="RUNNING"
+          
+          while true; do
+            # Check pod status
+            STATUS_RESPONSE=$(curl --silent --request POST \
+              --header 'content-type: application/json' \
+              --url 'https://api.runpod.io/graphql?api_key=${{ secrets.RUNPOD_API_KEY }}' \
+              --data "{\"query\": \"query { pod(input: {podId: \\\"$POD_ID\\\"}) { id status } }\"}")
+            
+            status=$(echo "$STATUS_RESPONSE" | jq -r '.data.pod.status')
+            
+            echo "Current pod status: $status"
+            
+            # If the pod is EXITED, then the training is complete and pod has shut down
+            if [ "$status" = "EXITED" ]; then
+              echo "Pod has exited, training completed!"
+              break
+            fi
+            
+            # If the pod is no longer running, something went wrong
+            if [ "$status" != "RUNNING" ] && [ "$status" != "STARTING" ] && [ "$status" != "EXITED" ]; then
+              echo "Pod is in an unexpected state: $status"
+              exit 1
+            fi
+            
+            echo "Training still in progress, checking again in 5 minutes..."
+            sleep 300
+          done
+          
+          echo "Creating directory for artifacts..."
+          mkdir -p artifacts
+          
+          echo "Getting volume ID..."
+          VOLUME_RESPONSE=$(curl --silent --request POST \
+            --header 'content-type: application/json' \
+            --url 'https://api.runpod.io/graphql?api_key=${{ secrets.RUNPOD_API_KEY }}' \
+            --data "{\"query\": \"query { pod(input: {podId: \\\"$POD_ID\\\"}) { volumeId } }\"}")
+          
+          VOLUME_ID=$(echo "$VOLUME_RESPONSE" | jq -r '.data.pod.volumeId')
+          echo "Volume ID: $VOLUME_ID"
+          
+          if [ -z "$VOLUME_ID" ]; then
+            echo "Failed to retrieve volume ID"
+            exit 1
+          fi
+          
+          echo "Retrieving artifact files from volume..."
+          FILE_RESPONSE=$(curl --silent --request POST \
+            --header 'content-type: application/json' \
+            --url 'https://api.runpod.io/graphql?api_key=${{ secrets.RUNPOD_API_KEY }}' \
+            --data "{\"query\": \"query { volumeGetFiles(input: {podId: \\\"$POD_ID\\\", volumeId: \\\"$VOLUME_ID\\\", path: \\\"/workspace/artifacts\\\"}) { files { name path isDirectory } } }\"}")
+          
+          echo "File response: $FILE_RESPONSE"
+          
+          # Extract file paths
+          FILES=$(echo "$FILE_RESPONSE" | jq -r '.data.volumeGetFiles.files[] | select(.isDirectory == false) | .path')
+          
+          for FILE_PATH in $FILES; do
+            FILE_NAME=$(basename "$FILE_PATH")
+            echo "Downloading $FILE_NAME from $FILE_PATH..."
+            
+            DOWNLOAD_RESPONSE=$(curl --silent --request POST \
+              --header 'content-type: application/json' \
+              --url 'https://api.runpod.io/graphql?api_key=${{ secrets.RUNPOD_API_KEY }}' \
+              --data "{\"query\": \"query { volumeGetDownloadUrl(input: {podId: \\\"$POD_ID\\\", volumeId: \\\"$VOLUME_ID\\\", path: \\\"$FILE_PATH\\\"}) }\"}")
+            
+            DOWNLOAD_URL=$(echo "$DOWNLOAD_RESPONSE" | jq -r '.data.volumeGetDownloadUrl')
+            
+            if [ -z "$DOWNLOAD_URL" ] || [ "$DOWNLOAD_URL" = "null" ]; then
+              echo "Failed to get download URL for $FILE_PATH"
+              continue
+            fi
+            
+            curl -s -o "artifacts/$FILE_NAME" "$DOWNLOAD_URL"
+            echo "Downloaded $FILE_NAME to artifacts/"
+          done
+          
+          echo "All artifacts downloaded successfully!"
+          
+          # Show the content of the generation output
+          if [ -f "artifacts/generation_output.txt" ]; then
+            echo "Generation output:"
+            cat artifacts/generation_output.txt
+          fi
+
+      - name: Create Release
+        id: create_release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: slm-model-${{ github.run_number }}
+          name: SLM Model ${{ github.run_number }}
+          files: artifacts/*
+          body: |
+            # SLM Model Training Results
+            
+            Training completed with ${{ inputs.epochs }} epochs.
+            
+            ## Model Files
+            - Trained model binary files (*.bin)
+            - Text generation sample output
+            
+            ## Generation Sample
+            ```
+            $(cat artifacts/generation_output.txt || echo "Generation output not available")
+            ```
+
+      - name: Terminate Pod if Still Running
+        if: always()
+        run: |
+          POD_ID="${{ steps.create-pod.outputs.pod_id }}"
+          
+          # Get current pod status
+          STATUS_RESPONSE=$(curl --silent --request POST \
+            --header 'content-type: application/json' \
+            --url 'https://api.runpod.io/graphql?api_key=${{ secrets.RUNPOD_API_KEY }}' \
+            --data "{\"query\": \"query { pod(input: {podId: \\\"$POD_ID\\\"}) { id status } }\"}")
+          
+          status=$(echo "$STATUS_RESPONSE" | jq -r '.data.pod.status')
+          
+          # Only try to terminate if not already exited
+          if [ "$status" != "EXITED" ]; then
+            echo "Terminating pod $POD_ID with status $status..."
+            
+            TERMINATE_RESPONSE=$(curl --silent --request POST \
+              --header 'content-type: application/json' \
+              --url 'https://api.runpod.io/graphql?api_key=${{ secrets.RUNPOD_API_KEY }}' \
+              --data "{\"query\": \"mutation { podTerminate(input: {podId: \\\"$POD_ID\\\"}) }\"}")
+            
+            echo "Termination response: $TERMINATE_RESPONSE"
+          else
+            echo "Pod already terminated, no action needed"
+          fi
