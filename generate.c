@@ -99,39 +99,11 @@ int main(int argc, char** argv) {
     float top_p = 0.9f;
     int max_tokens = 512;
     
-    // Parse command line arguments (model and embedding files only)
+    // Parse command line arguments
     if (argc >= 3) {
         model_filename = argv[1];
         embedding_filename = argv[2];
     } else {
-        // Find the most recent model and embeddings files if not specified
-        FILE* fp = popen("ls -t *_slm.bin | head -1", "r");
-        if (fp) {
-            char buffer[256];
-            if (fgets(buffer, sizeof(buffer), fp) != NULL) {
-                size_t len = strlen(buffer);
-                if (len > 0 && buffer[len-1] == '\n')
-                    buffer[len-1] = '\0';
-                model_filename = strdup(buffer);
-            }
-            pclose(fp);
-        }
-        
-        fp = popen("ls -t *_embeddings.bin | head -1", "r");
-        if (fp) {
-            char buffer[256];
-            if (fgets(buffer, sizeof(buffer), fp) != NULL) {
-                size_t len = strlen(buffer);
-                if (len > 0 && buffer[len-1] == '\n')
-                    buffer[len-1] = '\0';
-                embedding_filename = strdup(buffer);
-            }
-            pclose(fp);
-        }
-    }
-    
-    if (!model_filename || !embedding_filename) {
-        fprintf(stderr, "Error: Missing model or embeddings file\n");
         fprintf(stderr, "Usage: %s <model_file> <embeddings_file>\n", argv[0]);
         return EXIT_FAILURE;
     }
@@ -285,11 +257,6 @@ int main(int argc, char** argv) {
     free_ssm(ssm);
     cudaFree(d_input_byte);
     cudaFree(d_input_embedded);
-    
-    if (model_filename && argc < 2)
-        free(model_filename);
-    if (embedding_filename && argc < 3)
-        free(embedding_filename);
     
     return 0;
 }
