@@ -582,10 +582,10 @@ int main() {
     char embedding_fname[64];
     time_t now = time(NULL);
     struct tm *timeinfo = localtime(&now);
-    sprintf(model_fname, "%04d%02d%02d_%02d%02d%02d_slm_final.bin", 
+    sprintf(model_fname, "%04d%02d%02d_%02d%02d%02d_slm.bin", 
            timeinfo->tm_year + 1900, timeinfo->tm_mon + 1, timeinfo->tm_mday,
            timeinfo->tm_hour, timeinfo->tm_min, timeinfo->tm_sec);
-    sprintf(embedding_fname, "%04d%02d%02d_%02d%02d%02d_embeddings_final.bin", 
+    sprintf(embedding_fname, "%04d%02d%02d_%02d%02d%02d_embeddings.bin", 
            timeinfo->tm_year + 1900, timeinfo->tm_mon + 1, timeinfo->tm_mday,
            timeinfo->tm_hour, timeinfo->tm_min, timeinfo->tm_sec);
     
@@ -593,10 +593,7 @@ int main() {
     ssm->batch_size = 1;
     save_ssm(ssm, model_fname);
     save_embeddings(embeddings, embedding_fname);
-    
-    printf("\nFinal model saved to %s\n", model_fname);
-    printf("Final embeddings saved to %s\n", embedding_fname);
-    
+
     // Clean up
     free_ssm(ssm);
     free_embeddings(embeddings);
