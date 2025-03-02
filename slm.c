@@ -62,10 +62,10 @@ int main() {
     srand(time(NULL) ^ getpid());
     
     // Model parameters
-    int embedding_dim = 512;     // Embedding dimension
+    int embedding_dim = 8;     // Embedding dimension
     int encoding_dim = 256;      // Encoding layer dimension
     int reasoning_dim = 128;     // Reasoning layer dimension
-    int state_dim = 1024;        // State dimension (reduced from 2048)
+    int state_dim = 4096;        // State dimension (reduced from 2048)
     int vocab_size = 256;        // One per possible byte value
     float learning_rate = 0.00001; // Learning rate
     int num_epochs = 1000;        // Number of training epochs
@@ -306,8 +306,8 @@ int main() {
         // Calculate average loss
         float avg_loss = epoch_loss / seq_length;
         
-        // Print progress every 10 epochs, but always print first and last
-        if (epoch == 0 || epoch == num_epochs - 1 || (epoch + 1) % 10 == 0) {
+        // Print progress every epoch, but always print first and last
+        if (epoch == 0 || epoch == num_epochs - 1 || (epoch + 1) % 1 == 0) {
             printf("Epoch %d/%d, Average Loss: %.6f\n", 
                    epoch + 1, num_epochs, avg_loss);
         }
