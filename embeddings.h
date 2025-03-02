@@ -389,8 +389,7 @@ __global__ void cross_entropy_loss_kernel(float* loss,
         float batch_loss = 0.0f;
         
         for (int i = 0; i < vocab_size; i++) {
-            // Cross-entropy loss contribution: -target * log(prob)
-            float prob = fmaxf(batch_probs[i], 1e-15f); // Prevent log(0)
+            float prob = fmaxf(fminf(batch_probs[i], 1.0f - 1e-7f), 1e-7f);
             if (batch_target[i] > 0.0f) {
                 batch_loss -= batch_target[i] * logf(prob);
             }
