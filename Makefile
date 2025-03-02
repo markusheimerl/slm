@@ -20,8 +20,10 @@ data: data.out
 run: slm.out
 	@time ./slm.out
 
-generate: generate.out
-	@time ./generate.out
+gen: generate.out
+	@time ./generate.out \
+		$(shell ls -t *_slm.bin | head -1) \
+		$(shell ls -t *_embeddings.bin | head -1)
 
 clean:
 	rm -f *.out *.bin

@@ -5,131 +5,7 @@
 #include <unistd.h>
 #include <math.h>
 #include "ssm/gpu/ssm.h"
-
-// ---------------------------------------------------------------------
-// Structure for holding embeddings
-// ---------------------------------------------------------------------
-typedef struct {
-    // Embeddings (device and host memory)
-    float* d_embeddings;      // vocab_size x embedding_dim
-    float* h_embeddings;      // vocab_size x embedding_dim
-    
-    // Dimensions
-    int vocab_size;
-    int embedding_dim;
-} Embeddings;
-
-// ---------------------------------------------------------------------
-// CUDA kernel: Embed input bytes (forward pass)
-// ---------------------------------------------------------------------
-__global__ void embed_bytes_kernel(float* output, 
-                                  const unsigned char* bytes, 
-                                  const float* embeddings, 
-                                  int batch_size, 
-                                  int embedding_dim) {
-    int batch_idx = blockIdx.x;
-    int emb_idx = threadIdx.x;
-    
-    if (batch_idx < batch_size && emb_idx < embedding_dim) {
-        // Get the byte value for this batch item
-        unsigned char byte_val = bytes[batch_idx];
-        
-        // Calculate position in embedding table
-        int embedding_offset = byte_val * embedding_dim;
-        
-        // Copy the embedding vector to output
-        output[batch_idx * embedding_dim + emb_idx] = embeddings[embedding_offset + emb_idx];
-    }
-}
-
-// ---------------------------------------------------------------------
-// CUDA kernel: Softmax for probabilities output
-// ---------------------------------------------------------------------
-__global__ void softmax_kernel(float* logits, int batch_size, int vocab_size) {
-    int batch_idx = blockIdx.x;
-    
-    if (batch_idx < batch_size) {
-        // Get pointer to this batch item's prediction vector
-        float* batch_logits = logits + batch_idx * vocab_size;
-        
-        // Find max value for numerical stability
-        float max_val = batch_logits[0];
-        for (int i = 1; i < vocab_size; i++) {
-            max_val = fmaxf(max_val, batch_logits[i]);
-        }
-        
-        // Compute exp(logits - max) and sum
-        float sum_exp = 0.0f;
-        for (int i = 0; i < vocab_size; i++) {
-            batch_logits[i] = expf(batch_logits[i] - max_val);
-            sum_exp += batch_logits[i];
-        }
-        
-        // Ensure sum is not zero
-        sum_exp = fmaxf(sum_exp, 1e-10f);
-        
-        // Normalize to get probabilities
-        for (int i = 0; i < vocab_size; i++) {
-            batch_logits[i] /= sum_exp;
-        }
-    }
-}
-
-// ---------------------------------------------------------------------
-// Function: Load embeddings
-// Loads the embeddings from a binary file
-// ---------------------------------------------------------------------
-Embeddings* load_embeddings(const char* filename) {
-    FILE* file = fopen(filename, "rb");
-    if (!file) {
-        printf("Error opening file for reading: %s\n", filename);
-        return NULL;
-    }
-    
-    Embeddings* emb = (Embeddings*)malloc(sizeof(Embeddings));
-    
-    // Read dimensions
-    fread(&emb->vocab_size, sizeof(int), 1, file);
-    fread(&emb->embedding_dim, sizeof(int), 1, file);
-    
-    printf("Loading embeddings: vocab_size=%d, embedding_dim=%d\n", 
-           emb->vocab_size, emb->embedding_dim);
-    
-    // Allocate host memory for embeddings
-    emb->h_embeddings = (float*)malloc(emb->vocab_size * emb->embedding_dim * sizeof(float));
-    
-    // Read embeddings from file to host memory
-    fread(emb->h_embeddings, sizeof(float), emb->vocab_size * emb->embedding_dim, file);
-    
-    // Allocate and copy to device memory
-    CHECK_CUDA(cudaMalloc(&emb->d_embeddings, emb->vocab_size * emb->embedding_dim * sizeof(float)));
-    CHECK_CUDA(cudaMemcpy(emb->d_embeddings, emb->h_embeddings, 
-                         emb->vocab_size * emb->embedding_dim * sizeof(float), 
-                         cudaMemcpyHostToDevice));
-    
-    fclose(file);
-    printf("Embeddings loaded from %s\n", filename);
-    return emb;
-}
-
-// ---------------------------------------------------------------------
-// Function: Forward pass for embeddings
-// ---------------------------------------------------------------------
-void embeddings_forward(Embeddings* emb, unsigned char* d_bytes, float* d_output, int batch_size) {
-    embed_bytes_kernel<<<batch_size, emb->embedding_dim>>>(
-        d_output, d_bytes, emb->d_embeddings, batch_size, emb->embedding_dim);
-}
-
-// ---------------------------------------------------------------------
-// Function: Free embeddings
-// ---------------------------------------------------------------------
-void free_embeddings(Embeddings* emb) {
-    if (!emb) return;
-    
-    cudaFree(emb->d_embeddings);
-    free(emb->h_embeddings);
-    free(emb);
-}
+#include "embeddings.h"
 
 // ---------------------------------------------------------------------
 // Function: Sample from probability distribution (using categorical sampling)
@@ -214,32 +90,21 @@ int main(int argc, char** argv) {
     // Seed random generator
     srand(time(NULL));
     
-    // Default model filenames (can be overridden by command line args)
+    // Default model file paths (will be overridden by command line args)
     char* model_filename = NULL;
     char* embedding_filename = NULL;
     
-    // Default sampling parameters
+    // Generation parameters (fixed, sensible defaults)
     float temperature = 0.8f;
     float top_p = 0.9f;
     int max_tokens = 512;
     
-    // Parse command line arguments
-    for (int i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "--model") == 0 && i + 1 < argc) {
-            model_filename = argv[++i];
-        } else if (strcmp(argv[i], "--embeddings") == 0 && i + 1 < argc) {
-            embedding_filename = argv[++i];
-        } else if (strcmp(argv[i], "--temperature") == 0 && i + 1 < argc) {
-            temperature = atof(argv[++i]);
-        } else if (strcmp(argv[i], "--top-p") == 0 && i + 1 < argc) {
-            top_p = atof(argv[++i]);
-        } else if (strcmp(argv[i], "--max-tokens") == 0 && i + 1 < argc) {
-            max_tokens = atoi(argv[++i]);
-        }
-    }
-    
-    // Find the most recent model and embeddings files if not specified
-    if (!model_filename || !embedding_filename) {
+    // Parse command line arguments (model and embedding files only)
+    if (argc >= 3) {
+        model_filename = argv[1];
+        embedding_filename = argv[2];
+    } else {
+        // Find the most recent model and embeddings files if not specified
         FILE* fp = popen("ls -t *_slm.bin | head -1", "r");
         if (fp) {
             char buffer[256];
@@ -247,10 +112,7 @@ int main(int argc, char** argv) {
                 size_t len = strlen(buffer);
                 if (len > 0 && buffer[len-1] == '\n')
                     buffer[len-1] = '\0';
-                
-                if (!model_filename) {
-                    model_filename = strdup(buffer);
-                }
+                model_filename = strdup(buffer);
             }
             pclose(fp);
         }
@@ -262,21 +124,19 @@ int main(int argc, char** argv) {
                 size_t len = strlen(buffer);
                 if (len > 0 && buffer[len-1] == '\n')
                     buffer[len-1] = '\0';
-                
-                if (!embedding_filename) {
-                    embedding_filename = strdup(buffer);
-                }
+                embedding_filename = strdup(buffer);
             }
             pclose(fp);
         }
     }
     
     if (!model_filename || !embedding_filename) {
-        fprintf(stderr, "Error: Could not find model and/or embeddings files\n");
+        fprintf(stderr, "Error: Missing model or embeddings file\n");
+        fprintf(stderr, "Usage: %s <model_file> <embeddings_file>\n", argv[0]);
         return EXIT_FAILURE;
     }
     
-    printf("=== SLM Generation Parameters ===\n");
+    printf("=== SLM Generation ===\n");
     printf("Model file: %s\n", model_filename);
     printf("Embeddings file: %s\n", embedding_filename);
     printf("Temperature: %.2f\n", temperature);
@@ -284,7 +144,7 @@ int main(int argc, char** argv) {
     printf("Max tokens: %d\n\n", max_tokens);
     
     // Load embeddings and model
-    Embeddings* embeddings = load_embeddings(embedding_filename);
+    Embeddings* embeddings = load_embeddings_inference(embedding_filename);
     if (!embeddings) {
         fprintf(stderr, "Failed to load embeddings\n");
         return EXIT_FAILURE;
@@ -426,9 +286,9 @@ int main(int argc, char** argv) {
     cudaFree(d_input_byte);
     cudaFree(d_input_embedded);
     
-    if (model_filename && !strstr(model_filename, "_slm.bin"))
+    if (model_filename && argc < 2)
         free(model_filename);
-    if (embedding_filename && !strstr(embedding_filename, "_embeddings.bin"))
+    if (embedding_filename && argc < 3)
         free(embedding_filename);
     
     return 0;
