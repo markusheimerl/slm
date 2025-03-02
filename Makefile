@@ -11,11 +11,17 @@ data.out: data.c
 slm.out: slm.c
 	$(CC) $(CFLAGS) $(CUDAFLAGS) $< $(CUDALIBS) $(LDFLAGS) -o $@
 
+generate.out: generate.c
+	$(CC) $(CFLAGS) $(CUDAFLAGS) $< $(CUDALIBS) $(LDFLAGS) -o $@
+
 data: data.out
 	@time ./data.out
 
 run: slm.out
 	@time ./slm.out
+
+generate: generate.out
+	@time ./generate.out
 
 clean:
 	rm -f *.out *.bin
