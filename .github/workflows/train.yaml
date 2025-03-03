@@ -3,75 +3,27 @@ name: Train SLM Model
 on:
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
-  start-training-pod:
+  create-pod:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
     
     steps:
       - name: Create RunPod Instance
+        id: create-pod
         run: |
-          # Launch pod with direct script
           RESPONSE=$(curl --request POST \
             --header 'content-type: application/json' \
-            --url "https://api.runpod.io/graphql?api_key=${{ secrets.RUNPOD_API_KEY }}" \
-            --data '{
-              "query": "mutation { podFindAndDeployOnDemand(input: { 
-                cloudType: SECURE, 
-                gpuCount: 1, 
-                volumeInGb: 2, 
-                containerDiskInGb: 10, 
-                minVcpuCount: 4, 
-                minMemoryInGb: 30, 
-                gpuTypeId: \"NVIDIA RTX A4500\", 
-                name: \"slm-training\", 
-                imageName: \"runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04\", 
-                volumeMountPath: \"/workspace\", 
-                env: [
-                  { key: \"GITHUB_TOKEN\", value: \"${{ secrets.GITHUB_TOKEN }}\" },
-                  { key: \"REPO_OWNER\", value: \"${{ github.repository_owner }}\" },
-                  { key: \"REPO_NAME\", value: \"${{ github.event.repository.name }}\" },
-                  { key: \"RUN_NUMBER\", value: \"${{ github.run_number }}\" }
-                ], 
-                dockerArgs: \"bash -c \\\"cd /workspace && \
-                  apt-get update && \
-                  apt-get install -y time clang curl libcurl4-openssl-dev jq && \
-                  git clone https://github.com/${{ github.repository_owner }}/${{ github.event.repository.name }}.git && \
-                  cd ${{ github.event.repository.name }} && \
-                  make data && \
-                  make run && \
-                  make gen > generation_output.txt && \
-                  ARTIFACT_DIR=artifacts-${{ github.run_number }} && \
-                  mkdir -p \\\\${ARTIFACT_DIR} && \
-                  cp *.bin \\\\${ARTIFACT_DIR}/ && \
-                  cp generation_output.txt \\\\${ARTIFACT_DIR}/ && \
-                  GENERATION_CONTENT=\\\\$(cat generation_output.txt) && \
-                  RELEASE_JSON=\\\\\\\"{\\\\\\\\\\\\\\\"tag_name\\\\\\\\\\\\\\\":\\\\\\\\\\\\\\\"slm-model-${{ github.run_number }}\\\\\\\\\\\\\\\",\\\\\\\\\\\\\\\"name\\\\\\\\\\\\\\\":\\\\\\\\\\\\\\\"SLM Model ${{ github.run_number }}\\\\\\\\\\\\\\\",\\\\\\\\\\\\\\\"body\\\\\\\\\\\\\\\":\\\\\\\\\\\\\\\"Training completed. Generated sample:\\\\\\\\n\\\\\\\\n\\\\\\\\\\\\\\\\`\\\\\\\\\\\\\\`\\\\\\\\\\\\\\`\\\\\\\\n\\\\\\\\${GENERATION_CONTENT}\\\\\\\\n\\\\\\\\\\\\\\\\`\\\\\\\\\\\\\\`\\\\\\\\\\\\\\`\\\\\\\\\\\\\\\"}\\\\\\\\" && \
-                  curl -L \
-                    -X POST \
-                    -H \\\\\\\"Accept: application/vnd.github+json\\\\\\\" \
-                    -H \\\\\\\"Authorization: Bearer \\\\${GITHUB_TOKEN}\\\\\\\" \
-                    -H \\\\\\\"X-GitHub-Api-Version: 2022-11-28\\\\\\\" \
-                    https://api.github.com/repos/\\\\${REPO_OWNER}/\\\\${REPO_NAME}/releases \
-                    -d \\\\\\\"${RELEASE_JSON}\\\\\\\" > release_response.json && \
-                  RELEASE_ID=\\\\$(cat release_response.json | jq -r \\\\\\\".id\\\\\\\") && \
-                  for file in \\\\${ARTIFACT_DIR}/*; do \
-                    FILENAME=\\\\$(basename \\\\${file}) && \
-                    curl -L \
-                      -X POST \
-                      -H \\\\\\\"Accept: application/vnd.github+json\\\\\\\" \
-                      -H \\\\\\\"Authorization: Bearer \\\\${GITHUB_TOKEN}\\\\\\\" \
-                      -H \\\\\\\"X-GitHub-Api-Version: 2022-11-28\\\\\\\" \
-                      -H \\\\\\\"Content-Type: application/octet-stream\\\\\\\" \
-                      https://uploads.github.com/repos/\\\\${REPO_OWNER}/\\\\${REPO_NAME}/releases/\\\\${RELEASE_ID}/assets?name=\\\\${FILENAME} \
-                      --data-binary @\\\\${file}; \
-                  done && \
-                  poweroff\\\"
-              }}) { id imageName machineId } }"
-            }'
+            --url 'https://api.runpod.io/graphql?api_key=${{ secrets.RUNPOD_API_KEY }}' \
+            --data @- << 'EOF'
+          {
+            "query": "mutation { podFindAndDeployOnDemand(input: { cloudType: SECURE, gpuCount: 1, volumeInGb: 2, containerDiskInGb: 10, minVcpuCount: 4, minMemoryInGb: 30, gpuTypeId: \"NVIDIA RTX A4500\", name: \"slm-training\", imageName: \"runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04\", volumeMountPath: \"/workspace\", env: [{ key: \"GITHUB_TOKEN\", value: \"${{ secrets.GITHUB_TOKEN }}\" }, { key: \"REPO_OWNER\", value: \"${{ github.repository_owner }}\" }, { key: \"REPO_NAME\", value: \"${{ github.event.repository.name }}\" }, { key: \"RUN_NUMBER\", value: \"${{ github.run_number }}\" }], dockerArgs: \"bash -c 'cd /workspace && apt-get update && apt-get install -y time clang curl libcurl4-openssl-dev jq && git clone https://github.com/${{ github.repository_owner }}/${{ github.event.repository.name }}.git && cd ${{ github.event.repository.name }} && make data && make run && make gen > generation_output.txt && mkdir -p artifacts && cp *.bin artifacts/ && cp generation_output.txt artifacts/ && CONTENT=\\$(cat generation_output.txt) && curl -L -X POST -H \\\"Accept: application/vnd.github+json\\\" -H \\\"Authorization: Bearer \\$GITHUB_TOKEN\\\" -H \\\"X-GitHub-Api-Version: 2022-11-28\\\" https://api.github.com/repos/\\$REPO_OWNER/\\$REPO_NAME/releases -d \\\"{\\\\\\\"tag_name\\\\\\\":\\\\\\\"slm-model-\\$RUN_NUMBER\\\\\\\",\\\\\\\"name\\\\\\\":\\\\\\\"SLM Model \\$RUN_NUMBER\\\\\\\",\\\\\\\"body\\\\\\\":\\\\\\\"Training completed. Generated sample:\\\\\\\\n\\\\\\\\n\`\`\`\\\\\\\\n\\$CONTENT\\\\\\\\n\`\`\`\\\\\\\"}\\\" > release.json && RELEASE_ID=\\$(cat release.json | jq -r \\\".id\\\") && for file in artifacts/*; do FILENAME=\\$(basename \\$file); curl -L -X POST -H \\\"Accept: application/vnd.github+json\\\" -H \\\"Authorization: Bearer \\$GITHUB_TOKEN\\\" -H \\\"X-GitHub-Api-Version: 2022-11-28\\\" -H \\\"Content-Type: application/octet-stream\\\" https://uploads.github.com/repos/\\$REPO_OWNER/\\$REPO_NAME/releases/\\$RELEASE_ID/assets?name=\\$FILENAME --data-binary @\\$file; done && poweroff'\" }) { id imageName machineId } }"
+          }
+          EOF
           )
-          
+
           echo "Response: $RESPONSE"
           
           if echo "$RESPONSE" | grep -q "error"; then
@@ -87,5 +39,7 @@ jobs:
           fi
           
           echo "Created pod with ID: $POD_ID"
+          echo "pod_id=$POD_ID" >> $GITHUB_OUTPUT
+          
           echo "Pod has been started and will complete training and release process independently."
           echo "Training with default epoch count and releasing as slm-model-${{ github.run_number }}."
