@@ -65,7 +65,7 @@ jobs:
           rm token.txt  # Remove the token file for security
           
           # Create the release with the model weights and the captured output
-          gh release create ${MODEL_FILE_PREFIX} ${MODEL_FILE_PREFIX}_weights.tar.gz --title "SLM Model ${MODEL_FILE_PREFIX} ($EPOCHS epochs)" --notes-file release_notes.md
+          gh release create ${MODEL_FILE_PREFIX} ${MODEL_FILE_PREFIX}_weights.tar.gz --title "${MODEL_FILE_PREFIX} SLM Training" --notes-file release_notes.md
           
           # Clean up the pod once we're done
           runpodctl remove pod $RUNPOD_POD_ID
