@@ -37,8 +37,6 @@ jobs:
           
           # Prepare release notes with the generation output
           cat > release_notes.md << EOF2
-          # SLM Model ${MODEL_FILE_PREFIX}
-          
           Automatically trained SLM model weights.
           
           ## Generation Sample Output
