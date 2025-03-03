@@ -27,17 +27,34 @@ jobs:
           cd $REPO_NAME
           make data > /dev/null
           make run
-          make gen
+          
+          # Capture the output of make gen
+          GEN_OUTPUT=$(make gen 2>&1)
+          echo "$GEN_OUTPUT"
+          
           MODEL_FILE_PREFIX=$(ls -t *_encoder.bin | head -1 | sed "s/_encoder.bin//")
           tar -czvf ${MODEL_FILE_PREFIX}_weights.tar.gz ${MODEL_FILE_PREFIX}_*.bin
+          
+          # Prepare release notes with the generation output
+          cat > release_notes.md << EOF2
+          # SLM Model ${MODEL_FILE_PREFIX}
+          
+          Automatically trained SLM model weights.
+          
+          ## Generation Sample Output
+          
+          \`\`\`
+          ${GEN_OUTPUT}
+          \`\`\`
+          EOF2
           
           # Use the personal access token for authentication
           echo "$USER_PAT" > token.txt
           gh auth login --with-token < token.txt
           rm token.txt  # Remove the token file for security
           
-          # Create the release with the model weights
-          gh release create ${MODEL_FILE_PREFIX} ${MODEL_FILE_PREFIX}_weights.tar.gz --title "SLM Model ${MODEL_FILE_PREFIX}" --notes "Automatically trained SLM model weights"
+          # Create the release with the model weights and the captured output
+          gh release create ${MODEL_FILE_PREFIX} ${MODEL_FILE_PREFIX}_weights.tar.gz --title "SLM Model ${MODEL_FILE_PREFIX}" --notes-file release_notes.md
           
           # Clean up the pod once we're done
           runpodctl remove pod $RUNPOD_POD_ID
