@@ -14,32 +14,15 @@ jobs:
       - name: Create RunPod Instance
         id: create-pod
         run: |
-          # Calculate termination time - 2 hours from now
-          # Get current time in epoch seconds and add 2 hours (7200 seconds)
-          FUTURE_EPOCH=$(($(date +%s) + 7200))
-          # Convert to the exact format shown in the example
-          TERMINATE_TIME=$(date -u -d "@$FUTURE_EPOCH" "+%Y-%m-%dT%H:%M:%SZ")
-          
-          echo "Will set pod to terminate at: $TERMINATE_TIME"
-          
-          # Create the pod with terminateAfter parameter
           RESPONSE=$(curl --request POST \
             --header 'content-type: application/json' \
             --url 'https://api.runpod.io/graphql?api_key=${{ secrets.RUNPOD_API_KEY }}' \
-            --data '{
-              "query": "mutation { podFindAndDeployOnDemand(input: { cloudType: SECURE, gpuCount: 1, volumeInGb: 10, containerDiskInGb: 20, minVcpuCount: 1, minMemoryInGb: 20, gpuTypeId: \"NVIDIA GeForce RTX 4090\", name: \"slm-training\", imageName: \"runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04\", ports: \"8888/http,22/tcp,8080/http\", volumeMountPath: \"/workspace\", terminateAfter: \"'"$TERMINATE_TIME"'\", dockerArgs: \"bash -c '"'cd /workspace && 
-              echo \"deb http://apt.llvm.org/jammy/ llvm-toolchain-jammy-17 main\" > /etc/apt/sources.list.d/llvm-17.list && 
-              echo \"deb-src http://apt.llvm.org/jammy/ llvm-toolchain-jammy-17 main\" >> /etc/apt/sources.list.d/llvm-17.list && 
-              wget -q -O - https://apt.llvm.org/llvm-snapshot.gpg.key | apt-key add - && 
-              apt update && 
-              apt install -y time tree htop nvtop libwebp-dev libopenblas-dev libcurl4-openssl-dev clang-17 curl jq && 
-              update-alternatives --install /usr/bin/clang clang /usr/bin/clang-17 100 && 
-              git clone --recursive https://github.com/${{ github.repository_owner }}/${{ github.event.repository.name }}.git && 
-              cd ${{ github.event.repository.name }} && 
-              make data > /dev/null && 
-              make run && 
-              make gen'"'\" }) { id imageName machineId } }"
-            }')
+            --data @- << 'EOF'
+          {
+            "query": "mutation { podFindAndDeployOnDemand(input: { cloudType: SECURE, gpuCount: 1, volumeInGb: 10, containerDiskInGb: 20, minVcpuCount: 1, minMemoryInGb: 20, gpuTypeId: \"NVIDIA GeForce RTX 4090\", name: \"slm-training\", imageName: \"runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04\", ports: \"8888/http,22/tcp,8080/http\", volumeMountPath: \"/workspace\", dockerArgs: \"bash -c 'cd /workspace && echo \\\"deb http://apt.llvm.org/jammy/ llvm-toolchain-jammy-17 main\\\" > /etc/apt/sources.list.d/llvm-17.list && echo \\\"deb-src http://apt.llvm.org/jammy/ llvm-toolchain-jammy-17 main\\\" >> /etc/apt/sources.list.d/llvm-17.list && wget -q -O - https://apt.llvm.org/llvm-snapshot.gpg.key | apt-key add - && apt update && apt install -y time tree htop nvtop libwebp-dev libopenblas-dev libcurl4-openssl-dev clang-17 && update-alternatives --install /usr/bin/clang clang /usr/bin/clang-17 100 && git clone --recursive https://github.com/${{ github.repository_owner }}/${{ github.event.repository.name }}.git && cd ${{ github.event.repository.name }} && make data > /dev/null && make run && make gen && sleep 5s && runpodctl remove pod $RUNPOD_POD_ID'\" }) { id imageName machineId } }"
+          }
+          EOF
+          )
 
           echo "Response: $RESPONSE"
           
@@ -59,4 +42,3 @@ jobs:
           echo "pod_id=$POD_ID" >> $GITHUB_OUTPUT
           
           echo "Pod has been started."
-          echo "The pod will automatically terminate at $TERMINATE_TIME"
