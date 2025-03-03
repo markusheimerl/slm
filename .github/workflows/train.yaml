@@ -19,7 +19,7 @@ jobs:
             --url 'https://api.runpod.io/graphql?api_key=${{ secrets.RUNPOD_API_KEY }}' \
             --data @- << 'EOF'
           {
-            "query": "mutation { podFindAndDeployOnDemand(input: { cloudType: SECURE, gpuCount: 1, volumeInGb: 5, containerDiskInGb: 10, minVcpuCount: 4, minMemoryInGb: 30, gpuTypeId: \"NVIDIA RTX A4500\", name: \"slm-training\", imageName: \"runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04\", volumeMountPath: \"/workspace\", dockerArgs: \"bash -c 'cd /workspace && apt-get update && apt-get install -y time clang curl libcurl4-openssl-dev && git clone https://github.com/${{ github.repository_owner }}/${{ github.event.repository.name }}.git && cd ${{ github.event.repository.name }} && make data && make run && make gen > generation_output.txt && poweroff'\" }) { id imageName machineId } }"
+            "query": "mutation { podFindAndDeployOnDemand(input: { cloudType: SECURE, gpuCount: 1, volumeInGb: 5, containerDiskInGb: 10, minVcpuCount: 4, minMemoryInGb: 30, gpuTypeId: \"NVIDIA RTX A4500\", name: \"slm-training\", imageName: \"runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04\", volumeMountPath: \"/workspace\", dockerArgs: \"bash -c 'cd /workspace && apt-get update && apt-get install -y time clang curl libcurl4-openssl-dev && git clone https://github.com/${{ github.repository_owner }}/${{ github.event.repository.name }}.git && cd ${{ github.event.repository.name }} && make data > /dev/null && make run && make gen > generation_output.txt && poweroff'\" }) { id imageName machineId } }"
           }
           EOF
           )
