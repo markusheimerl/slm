@@ -63,12 +63,12 @@ int main() {
     
     // Model parameters
     int embedding_dim = 8;     // Embedding dimension
-    int encoding_dim = 256;      // Encoding layer dimension
-    int reasoning_dim = 128;     // Reasoning layer dimension
-    int state_dim = 512;        // State dimension
+    int encoding_dim = 512;      // Encoding layer dimension
+    int reasoning_dim = 256;     // Reasoning layer dimension
+    int state_dim = 8192;        // State dimension
     int vocab_size = 256;        // One per possible byte value
     float learning_rate = 0.00001; // Learning rate
-    int num_epochs = 20;        // Number of training epochs
+    int num_epochs = 1000;        // Number of training epochs
     int max_samples = 16384;       // Maximum number of samples to use
     
     printf("=== SLM Training Configuration ===\n");
