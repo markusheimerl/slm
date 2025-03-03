@@ -65,10 +65,11 @@ int main() {
     int embedding_dim = 8;     // Embedding dimension
     int encoding_dim = 256;      // Encoding layer dimension
     int reasoning_dim = 128;     // Reasoning layer dimension
-    int state_dim = 4096;        // State dimension (reduced from 2048)
+    int state_dim = 512;        // State dimension
     int vocab_size = 256;        // One per possible byte value
     float learning_rate = 0.00001; // Learning rate
-    int num_epochs = 1000;        // Number of training epochs
+    int num_epochs = 20;        // Number of training epochs
+    int max_samples = 16384;       // Maximum number of samples to use
     
     printf("=== SLM Training Configuration ===\n");
     printf("Vocabulary size: %d (byte values)\n", vocab_size);
@@ -77,7 +78,8 @@ int main() {
     printf("Reasoning dimension: %d\n", reasoning_dim);
     printf("State dimension: %d\n", state_dim);
     printf("Learning rate: %.6f\n", learning_rate);
-    printf("Training epochs: %d\n\n", num_epochs);
+    printf("Training epochs: %d\n", num_epochs);
+    printf("Using first %d samples for training\n\n", max_samples);
     
     // Read training data
     FILE* file = fopen("data.txt", "rb");
@@ -105,10 +107,10 @@ int main() {
     
     printf("Loaded %zu bytes of text data\n", bytes_read);
     
-    // Pre-scan to count non-empty lines (conversations)
-    int num_conversations = 0;
+    // Pre-scan to count non-empty lines (training samples) up to max_samples
+    int num_training_samples = 0;
     char* scan_ptr = text_data;
-    while (*scan_ptr) {
+    while (*scan_ptr && num_training_samples < max_samples) {
         // Skip to the next line start
         char* line_start = scan_ptr;
         
@@ -119,7 +121,7 @@ int main() {
         
         // Check if the line has content (non-empty)
         if (scan_ptr > line_start) {
-            num_conversations++;
+            num_training_samples++;
         }
         
         // Move past the newline if present
@@ -128,78 +130,78 @@ int main() {
         }
     }
     
-    printf("Found %d conversations in data.txt\n", num_conversations);
+    printf("Found %d training samples (limited to first %d)\n", num_training_samples, max_samples);
     
-    // Use all conversations for batch processing
-    int batch_size = num_conversations;
-    printf("Using batch size: %d (processing all conversations in parallel)\n", batch_size);
+    // Use the first max_samples samples for batch processing
+    int batch_size = num_training_samples;
+    printf("Using batch size: %d (processing samples in parallel)\n", batch_size);
     
-    // Split data into conversations (each line is an example)
-    char** conversations = (char**)malloc(batch_size * sizeof(char*));
+    // Split data into training samples (each line is an example)
+    char** training_samples = (char**)malloc(batch_size * sizeof(char*));
     
-    // Load all available conversations (single pass)
-    int conversation_count = 0;
+    // Load all available training samples (single pass)
+    int sample_count = 0;
     char* line = strtok(text_data, "\n");
-    while (line && conversation_count < batch_size) {
+    while (line && sample_count < batch_size) {
         size_t len = strlen(line);
         if (len > 0) {  // Skip empty lines
-            conversations[conversation_count] = (char*)malloc(len + 1);
-            strcpy(conversations[conversation_count], line);
-            conversation_count++;
+            training_samples[sample_count] = (char*)malloc(len + 1);
+            strcpy(training_samples[sample_count], line);
+            sample_count++;
         }
         line = strtok(NULL, "\n");
     }
     
-    printf("Loaded %d conversations for training\n", conversation_count);
+    printf("Loaded %d samples for training\n", sample_count);
     
-    // Find the minimum length among conversations
-    int min_length = strlen(conversations[0]);
+    // Find the minimum length among training samples
+    int min_length = strlen(training_samples[0]);
     int min_length_idx = 0;
-    for (int i = 1; i < conversation_count; i++) {
-        int len = strlen(conversations[i]);
+    for (int i = 1; i < sample_count; i++) {
+        int len = strlen(training_samples[i]);
         if (len < min_length) {
             min_length = len;
             min_length_idx = i;
         }
     }
 
-    printf("Shortest conversation is line %d with length %d\n", min_length_idx + 1, min_length);
+    printf("Shortest sample is line %d with length %d\n", min_length_idx + 1, min_length);
 
-    // Use sequence length of minimum conversation length
+    // Use sequence length of minimum sample length
     int seq_length = min_length;
-    printf("Using sequence length: %d (from shortest conversation)\n", seq_length);
+    printf("Using sequence length: %d (from shortest sample)\n", seq_length);
     
     // Prepare input and target data
-    unsigned char* h_X_data = (unsigned char*)malloc(conversation_count * seq_length * sizeof(unsigned char));
-    unsigned char* h_y_data = (unsigned char*)malloc(conversation_count * seq_length * sizeof(unsigned char));
+    unsigned char* h_X_data = (unsigned char*)malloc(sample_count * seq_length * sizeof(unsigned char));
+    unsigned char* h_y_data = (unsigned char*)malloc(sample_count * seq_length * sizeof(unsigned char));
     
     // Copy data and set up X (current char) and y (next char)
-    for (int ex = 0; ex < conversation_count; ex++) {
+    for (int ex = 0; ex < sample_count; ex++) {
         for (int pos = 0; pos < seq_length - 1; pos++) {
-            h_X_data[ex * seq_length + pos] = conversations[ex][pos];
-            h_y_data[ex * seq_length + pos] = conversations[ex][pos + 1];
+            h_X_data[ex * seq_length + pos] = training_samples[ex][pos];
+            h_y_data[ex * seq_length + pos] = training_samples[ex][pos + 1];
         }
         // For the last position, use a wrap-around (last char predicts first char)
-        h_X_data[ex * seq_length + (seq_length - 1)] = conversations[ex][seq_length - 1];
-        h_y_data[ex * seq_length + (seq_length - 1)] = conversations[ex][0];
+        h_X_data[ex * seq_length + (seq_length - 1)] = training_samples[ex][seq_length - 1];
+        h_y_data[ex * seq_length + (seq_length - 1)] = training_samples[ex][0];
     }
     
     // Reorganize data to [time][example] layout for efficient processing
-    unsigned char* h_X_time_major = (unsigned char*)malloc(conversation_count * seq_length * sizeof(unsigned char));
-    unsigned char* h_y_time_major = (unsigned char*)malloc(conversation_count * seq_length * sizeof(unsigned char));
+    unsigned char* h_X_time_major = (unsigned char*)malloc(sample_count * seq_length * sizeof(unsigned char));
+    unsigned char* h_y_time_major = (unsigned char*)malloc(sample_count * seq_length * sizeof(unsigned char));
     
-    reorganize_data(h_X_data, h_X_time_major, conversation_count, seq_length);
-    reorganize_data(h_y_data, h_y_time_major, conversation_count, seq_length);
+    reorganize_data(h_X_data, h_X_time_major, sample_count, seq_length);
+    reorganize_data(h_y_data, h_y_time_major, sample_count, seq_length);
     
     // Free original arrays
     free(h_X_data);
     free(h_y_data);
     
     // Create one-hot encoded targets
-    float* h_y_onehot = (float*)calloc(conversation_count * seq_length * vocab_size, sizeof(float));
+    float* h_y_onehot = (float*)calloc(sample_count * seq_length * vocab_size, sizeof(float));
     for (int t = 0; t < seq_length; t++) {
-        for (int ex = 0; ex < conversation_count; ex++) {
-            int idx = t * conversation_count + ex;
+        for (int ex = 0; ex < sample_count; ex++) {
+            int idx = t * sample_count + ex;
             unsigned char target = h_y_time_major[idx];
             h_y_onehot[idx * vocab_size + target] = 1.0f;
         }
@@ -209,14 +211,14 @@ int main() {
     unsigned char* d_X_bytes;
     float* d_y_onehot;
     
-    CHECK_CUDA(cudaMalloc(&d_X_bytes, conversation_count * seq_length * sizeof(unsigned char)));
-    CHECK_CUDA(cudaMalloc(&d_y_onehot, conversation_count * seq_length * vocab_size * sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&d_X_bytes, sample_count * seq_length * sizeof(unsigned char)));
+    CHECK_CUDA(cudaMalloc(&d_y_onehot, sample_count * seq_length * vocab_size * sizeof(float)));
     
     CHECK_CUDA(cudaMemcpy(d_X_bytes, h_X_time_major, 
-                         conversation_count * seq_length * sizeof(unsigned char), 
+                         sample_count * seq_length * sizeof(unsigned char), 
                          cudaMemcpyHostToDevice));
     CHECK_CUDA(cudaMemcpy(d_y_onehot, h_y_onehot, 
-                         conversation_count * seq_length * vocab_size * sizeof(float), 
+                         sample_count * seq_length * vocab_size * sizeof(float), 
                          cudaMemcpyHostToDevice));
     
     // Initialize the embedding layer
@@ -226,45 +228,45 @@ int main() {
     float* d_X_embedded;
     float* d_encoding_output;
     float* d_reasoning_output;
-    CHECK_CUDA(cudaMalloc(&d_X_embedded, conversation_count * embedding_dim * sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&d_encoding_output, conversation_count * encoding_dim * sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&d_reasoning_output, conversation_count * reasoning_dim * sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&d_X_embedded, sample_count * embedding_dim * sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&d_encoding_output, sample_count * encoding_dim * sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&d_reasoning_output, sample_count * reasoning_dim * sizeof(float)));
     
     // Initialize the stacked SSM models
     // 1. Encoder model processes embeddings -> encoding_dim
     // 2. Reasoning model processes encoding_dim -> reasoning_dim
     // 3. Output model processes reasoning_dim -> vocab_size
-    SSM* encoder_ssm = init_ssm(embedding_dim, state_dim, encoding_dim, conversation_count);
-    SSM* reasoning_ssm = init_ssm(encoding_dim, state_dim, reasoning_dim, conversation_count);
-    SSM* output_ssm = init_ssm(reasoning_dim, state_dim, vocab_size, conversation_count);
+    SSM* encoder_ssm = init_ssm(embedding_dim, state_dim, encoding_dim, sample_count);
+    SSM* reasoning_ssm = init_ssm(encoding_dim, state_dim, reasoning_dim, sample_count);
+    SSM* output_ssm = init_ssm(reasoning_dim, state_dim, vocab_size, sample_count);
     
-    printf("\nStarting training for %d epochs with batch size of %d...\n", num_epochs, conversation_count);
+    printf("\nStarting training for %d epochs with all %d samples...\n", num_epochs, sample_count);
     printf("Using three-stage stacked SSM architecture\n");
     
     // Training loop
     for (int epoch = 0; epoch < num_epochs; epoch++) {
         // Reset state at the beginning of each epoch
-        CHECK_CUDA(cudaMemset(encoder_ssm->d_state, 0, conversation_count * state_dim * sizeof(float)));
-        CHECK_CUDA(cudaMemset(reasoning_ssm->d_state, 0, conversation_count * state_dim * sizeof(float)));
-        CHECK_CUDA(cudaMemset(output_ssm->d_state, 0, conversation_count * state_dim * sizeof(float)));
+        CHECK_CUDA(cudaMemset(encoder_ssm->d_state, 0, sample_count * state_dim * sizeof(float)));
+        CHECK_CUDA(cudaMemset(reasoning_ssm->d_state, 0, sample_count * state_dim * sizeof(float)));
+        CHECK_CUDA(cudaMemset(output_ssm->d_state, 0, sample_count * state_dim * sizeof(float)));
         
         float epoch_loss = 0.0f;
         
         // Process each timestep
         for (int t = 0; t < seq_length; t++) {
             // Get current timestep data
-            unsigned char* d_X_t = d_X_bytes + t * conversation_count;
-            float* d_y_t = d_y_onehot + t * conversation_count * vocab_size;
+            unsigned char* d_X_t = d_X_bytes + t * sample_count;
+            float* d_y_t = d_y_onehot + t * sample_count * vocab_size;
             
             // Forward pass: embedding layer
-            embeddings_forward(embeddings, d_X_t, d_X_embedded, conversation_count);
+            embeddings_forward(embeddings, d_X_t, d_X_embedded, sample_count);
             
             // Forward pass: encoder SSM layer
             forward_pass(encoder_ssm, d_X_embedded);
             
             // Copy encoder output for reasoning model input
             CHECK_CUDA(cudaMemcpy(d_encoding_output, encoder_ssm->d_predictions, 
-                              conversation_count * encoding_dim * sizeof(float), 
+                              sample_count * encoding_dim * sizeof(float), 
                               cudaMemcpyDeviceToDevice));
             
             // Forward pass: reasoning SSM layer
@@ -272,7 +274,7 @@ int main() {
             
             // Copy reasoning output for output model input
             CHECK_CUDA(cudaMemcpy(d_reasoning_output, reasoning_ssm->d_predictions, 
-                              conversation_count * reasoning_dim * sizeof(float), 
+                              sample_count * reasoning_dim * sizeof(float), 
                               cudaMemcpyDeviceToDevice));
             
             // Forward pass: output SSM layer
@@ -294,13 +296,13 @@ int main() {
             
             // Backward pass: embeddings
             zero_embedding_gradients(embeddings);
-            embeddings_backward(embeddings, encoder_ssm->d_B_grad, d_X_t, conversation_count);
+            embeddings_backward(embeddings, encoder_ssm->d_B_grad, d_X_t, sample_count);
             
             // Update weights
             update_weights(encoder_ssm, learning_rate);
             update_weights(reasoning_ssm, learning_rate);
             update_weights(output_ssm, learning_rate);
-            update_embeddings(embeddings, learning_rate, conversation_count);
+            update_embeddings(embeddings, learning_rate, sample_count);
         }
         
         // Calculate average loss
@@ -341,10 +343,10 @@ int main() {
     free_ssm(output_ssm);
     free_embeddings(embeddings);
     
-    for (int i = 0; i < conversation_count; i++) {
-        free(conversations[i]);
+    for (int i = 0; i < sample_count; i++) {
+        free(training_samples[i]);
     }
-    free(conversations);
+    free(training_samples);
     free(text_data);
     free(h_X_time_major);
     free(h_y_time_major);

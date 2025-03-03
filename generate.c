@@ -145,7 +145,7 @@ int main(int argc, char** argv) {
     CHECK_CUDA(cudaMalloc(&d_reasoning_output, reasoning_ssm->output_dim * sizeof(float)));
     
     // Start with the prompt
-    const char* prompt = "<USER> Share a story about a garden where emotions grow as flowers. <ASSISTANT> ";
+    const char* prompt = "Once upon a time";
     size_t prompt_len = strlen(prompt);
     
     // Output the prompt
