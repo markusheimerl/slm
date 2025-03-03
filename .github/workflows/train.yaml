@@ -30,11 +30,16 @@ jobs:
           make gen
           MODEL_FILE_PREFIX=$(ls -t *_encoder.bin | head -1 | sed "s/_encoder.bin//")
           tar -czvf ${MODEL_FILE_PREFIX}_weights.tar.gz ${MODEL_FILE_PREFIX}_*.bin
-          gh auth login --with-token << EOF2
-          $GITHUB_TOKEN
-          EOF2
+          
+          # Use the personal access token for authentication
+          echo "$USER_PAT" > token.txt
+          gh auth login --with-token < token.txt
+          rm token.txt  # Remove the token file for security
+          
+          # Create the release with the model weights
           gh release create ${MODEL_FILE_PREFIX} ${MODEL_FILE_PREFIX}_weights.tar.gz --title "SLM Model ${MODEL_FILE_PREFIX}" --notes "Automatically trained SLM model weights"
-          sleep 1m
+          
+          # Clean up the pod once we're done
           runpodctl remove pod $RUNPOD_POD_ID
           EOF
           
@@ -42,7 +47,7 @@ jobs:
           ENCODED_SCRIPT=$(base64 -w 0 setup_script.sh)
           
           # Create the command that will be run inside the pod
-          DOCKER_ARGS="bash -c 'echo $ENCODED_SCRIPT | base64 -d > /workspace/setup.sh && chmod +x /workspace/setup.sh && REPO_OWNER=${{ github.repository_owner }} REPO_NAME=${{ github.event.repository.name }} GITHUB_TOKEN=${{ secrets.GITHUB_TOKEN }} /workspace/setup.sh'"
+          DOCKER_ARGS="bash -c 'echo $ENCODED_SCRIPT | base64 -d > /workspace/setup.sh && chmod +x /workspace/setup.sh && REPO_OWNER=${{ github.repository_owner }} REPO_NAME=${{ github.event.repository.name }} USER_PAT=${{ secrets.USER_PAT }} /workspace/setup.sh'"
 
           # Submit the pod creation request to RunPod
           RESPONSE=$(curl --request POST \
