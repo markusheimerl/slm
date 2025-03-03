@@ -67,7 +67,7 @@ jobs:
           # Submit the pod creation request to RunPod
           RESPONSE=$(curl --request POST \
             --header 'content-type: application/json' \
-            --url 'https://api.runpod.io/graphql?api_key=${{ secrets.RUNPOD_API_KEY }}' \
+            --url "https://api.runpod.io/graphql?api_key=${{ secrets.RUNPOD_API_KEY }}" \
             --data "$(jq -n \
               --arg docker_args "$DOCKER_ARGS" \
               '{
@@ -89,7 +89,7 @@ jobs:
                   }
                 }
               }'
-            )"
+            )")
 
           echo "Response: $RESPONSE"
           
