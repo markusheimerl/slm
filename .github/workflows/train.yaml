@@ -8,8 +8,6 @@ on:
         required: true
         default: '1000'
         type: string
-  schedule:
-    - cron: '0 23 * * *'  # Run at 11 PM UTC every day
 
 permissions:
   contents: write
@@ -19,15 +17,6 @@ jobs:
     runs-on: ubuntu-latest
     
     steps:
-      - name: Set Epochs
-        id: set-epochs
-        run: |
-          if [ "${{ github.event_name }}" == "schedule" ]; then
-            echo "EPOCHS=2000" >> $GITHUB_ENV
-          else
-            echo "EPOCHS=${{ inputs.epochs }}" >> $GITHUB_ENV
-          fi
-
       - name: Create RunPod Instance
         id: create-pod
         run: |
@@ -62,7 +51,6 @@ jobs:
           
           ## Training Configuration
           - Epochs: $EPOCHS
-          - Trigger: $TRIGGER_TYPE
           
           ## Generation Sample Output
           
@@ -86,15 +74,8 @@ jobs:
           # Base64 encode the script to avoid escaping issues
           ENCODED_SCRIPT=$(base64 -w 0 setup_script.sh)
           
-          # Determine trigger type
-          if [ "${{ github.event_name }}" == "schedule" ]; then
-            TRIGGER="Scheduled (nightly run)"
-          else
-            TRIGGER="Manual"
-          fi
-          
           # Create the command that will be run inside the pod
-          DOCKER_ARGS="bash -c 'echo $ENCODED_SCRIPT | base64 -d > /workspace/setup.sh && chmod +x /workspace/setup.sh && REPO_OWNER=${{ github.repository_owner }} REPO_NAME=${{ github.event.repository.name }} USER_PAT=${{ secrets.USER_PAT }} EPOCHS=${{ env.EPOCHS }} TRIGGER_TYPE=\"$TRIGGER\" /workspace/setup.sh'"
+          DOCKER_ARGS="bash -c 'echo $ENCODED_SCRIPT | base64 -d > /workspace/setup.sh && chmod +x /workspace/setup.sh && REPO_OWNER=${{ github.repository_owner }} REPO_NAME=${{ github.event.repository.name }} USER_PAT=${{ secrets.USER_PAT }} EPOCHS=${{ inputs.epochs }} /workspace/setup.sh'"
 
           # Submit the pod creation request to RunPod
           RESPONSE=$(curl --request POST \
