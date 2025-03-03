@@ -14,15 +14,61 @@ jobs:
       - name: Create RunPod Instance
         id: create-pod
         run: |
+          # Create a script file with the setup and training logic
+          cat > setup_script.sh << 'EOF'
+          cd /workspace
+          echo "deb http://apt.llvm.org/jammy/ llvm-toolchain-jammy-17 main" > /etc/apt/sources.list.d/llvm-17.list
+          echo "deb-src http://apt.llvm.org/jammy/ llvm-toolchain-jammy-17 main" >> /etc/apt/sources.list.d/llvm-17.list
+          wget -q -O - https://apt.llvm.org/llvm-snapshot.gpg.key | apt-key add -
+          apt update
+          apt install -y time tree htop nvtop libwebp-dev libopenblas-dev libcurl4-openssl-dev clang-17 gh
+          update-alternatives --install /usr/bin/clang clang /usr/bin/clang-17 100
+          git clone --recursive https://github.com/$REPO_OWNER/$REPO_NAME.git
+          cd $REPO_NAME
+          make data > /dev/null
+          make run
+          make gen
+          MODEL_FILE_PREFIX=$(ls -t *_encoder.bin | head -1 | sed "s/_encoder.bin//")
+          tar -czvf ${MODEL_FILE_PREFIX}_weights.tar.gz ${MODEL_FILE_PREFIX}_*.bin
+          gh auth login --with-token << EOF2
+          $GITHUB_TOKEN
+          EOF2
+          gh release create ${MODEL_FILE_PREFIX} ${MODEL_FILE_PREFIX}_weights.tar.gz --title "SLM Model ${MODEL_FILE_PREFIX}" --notes "Automatically trained SLM model weights"
+          runpodctl remove pod $RUNPOD_POD_ID
+          EOF
+          
+          # Base64 encode the script to avoid escaping issues
+          ENCODED_SCRIPT=$(base64 -w 0 setup_script.sh)
+          
+          # Create the command that will be run inside the pod
+          DOCKER_ARGS="bash -c 'echo $ENCODED_SCRIPT | base64 -d > /workspace/setup.sh && chmod +x /workspace/setup.sh && REPO_OWNER=${{ github.repository_owner }} REPO_NAME=${{ github.event.repository.name }} GITHUB_TOKEN=${{ secrets.GITHUB_TOKEN }} /workspace/setup.sh'"
+
+          # Submit the pod creation request to RunPod
           RESPONSE=$(curl --request POST \
             --header 'content-type: application/json' \
             --url 'https://api.runpod.io/graphql?api_key=${{ secrets.RUNPOD_API_KEY }}' \
-            --data @- << 'EOF'
-          {
-            "query": "mutation { podFindAndDeployOnDemand(input: { cloudType: SECURE, gpuCount: 1, volumeInGb: 10, containerDiskInGb: 20, minVcpuCount: 1, minMemoryInGb: 20, gpuTypeId: \"NVIDIA GeForce RTX 4090\", name: \"slm-training\", imageName: \"runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04\", ports: \"8888/http,22/tcp,8080/http\", volumeMountPath: \"/workspace\", dockerArgs: \"bash -c 'cd /workspace && echo \\\"deb http://apt.llvm.org/jammy/ llvm-toolchain-jammy-17 main\\\" > /etc/apt/sources.list.d/llvm-17.list && echo \\\"deb-src http://apt.llvm.org/jammy/ llvm-toolchain-jammy-17 main\\\" >> /etc/apt/sources.list.d/llvm-17.list && wget -q -O - https://apt.llvm.org/llvm-snapshot.gpg.key | apt-key add - && apt update && apt install -y time tree htop nvtop libwebp-dev libopenblas-dev libcurl4-openssl-dev clang-17 gh && update-alternatives --install /usr/bin/clang clang /usr/bin/clang-17 100 && git clone --recursive https://github.com/${{ github.repository_owner }}/${{ github.event.repository.name }}.git && cd ${{ github.event.repository.name }} && make data > /dev/null && make run && make gen && MODEL_FILE_PREFIX=$(ls -t *_encoder.bin | head -1 | sed \"s/_encoder.bin//\") && tar -czvf ${MODEL_FILE_PREFIX}_weights.tar.gz ${MODEL_FILE_PREFIX}_*.bin && gh auth login --with-token <<< \\\"${{ secrets.GITHUB_TOKEN }}\\\" && gh release create ${MODEL_FILE_PREFIX} ${MODEL_FILE_PREFIX}_weights.tar.gz --title \\\"SLM Model ${MODEL_FILE_PREFIX}\\\" --notes \\\"Automatically trained SLM model weights\\\" && runpodctl remove pod $RUNPOD_POD_ID'\" }) { id imageName machineId } }"
-          }
-          EOF
-          )
+            --data "$(jq -n \
+              --arg docker_args "$DOCKER_ARGS" \
+              '{
+                "query": "mutation($input: PodFindAndDeployOnDemandInput!) { podFindAndDeployOnDemand(input: $input) { id imageName machineId } }",
+                "variables": {
+                  "input": {
+                    "cloudType": "SECURE",
+                    "gpuCount": 1,
+                    "volumeInGb": 10,
+                    "containerDiskInGb": 20,
+                    "minVcpuCount": 1,
+                    "minMemoryInGb": 20,
+                    "gpuTypeId": "NVIDIA GeForce RTX 4090",
+                    "name": "slm-training",
+                    "imageName": "runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04",
+                    "ports": "8888/http,22/tcp,8080/http",
+                    "volumeMountPath": "/workspace",
+                    "dockerArgs": $docker_args
+                  }
+                }
+              }'
+            )")
 
           echo "Response: $RESPONSE"
           
