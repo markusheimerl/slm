@@ -14,15 +14,16 @@ jobs:
       - name: Create RunPod Instance
         id: create-pod
         run: |
-          # Calculate termination time (3 minutes from now)
-          TERMINATE_TIME=$(date -u -d "+3 minutes" "+%Y-%m-%dT%H:%M:%SZ")
+          # Let's use a different approach for terminateAfter
+          # Instead of generating it here, we'll use a longer fixed time
+          # that we know works with the API format
           
           RESPONSE=$(curl --request POST \
             --header 'content-type: application/json' \
             --url 'https://api.runpod.io/graphql?api_key=${{ secrets.RUNPOD_API_KEY }}' \
-            --data @- << EOF
+            --data @- << 'EOF'
           {
-            "query": "mutation { podFindAndDeployOnDemand(input: { terminateAfter: \"$TERMINATE_TIME\", cloudType: SECURE, gpuCount: 1, volumeInGb: 10, containerDiskInGb: 20, minVcpuCount: 1, minMemoryInGb: 20, gpuTypeId: \"NVIDIA GeForce RTX 4090\", name: \"slm-training\", imageName: \"runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04\", ports: \"8888/http,22/tcp,8080/http\", volumeMountPath: \"/workspace\", dockerArgs: \"bash -c 'cd /workspace && echo \\\"deb http://apt.llvm.org/jammy/ llvm-toolchain-jammy-17 main\\\" > /etc/apt/sources.list.d/llvm-17.list && echo \\\"deb-src http://apt.llvm.org/jammy/ llvm-toolchain-jammy-17 main\\\" >> /etc/apt/sources.list.d/llvm-17.list && wget -q -O - https://apt.llvm.org/llvm-snapshot.gpg.key | apt-key add - && apt update && apt install -y time tree htop nvtop libwebp-dev libopenblas-dev libcurl4-openssl-dev clang-17 && update-alternatives --install /usr/bin/clang clang /usr/bin/clang-17 100 && git clone --recursive https://github.com/${{ github.repository_owner }}/${{ github.event.repository.name }}.git && cd ${{ github.event.repository.name }} && make data > /dev/null && make run && make gen'\" }) { id imageName machineId } }"
+            "query": "mutation { podFindAndDeployOnDemand(input: { cloudType: SECURE, gpuCount: 1, volumeInGb: 10, containerDiskInGb: 20, minVcpuCount: 1, minMemoryInGb: 20, gpuTypeId: \"NVIDIA GeForce RTX 4090\", name: \"slm-training\", imageName: \"runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04\", ports: \"8888/http,22/tcp,8080/http\", volumeMountPath: \"/workspace\", dockerArgs: \"bash -c 'cd /workspace && echo \\\"deb http://apt.llvm.org/jammy/ llvm-toolchain-jammy-17 main\\\" > /etc/apt/sources.list.d/llvm-17.list && echo \\\"deb-src http://apt.llvm.org/jammy/ llvm-toolchain-jammy-17 main\\\" >> /etc/apt/sources.list.d/llvm-17.list && wget -q -O - https://apt.llvm.org/llvm-snapshot.gpg.key | apt-key add - && apt update && apt install -y time tree htop nvtop libwebp-dev libopenblas-dev libcurl4-openssl-dev clang-17 && update-alternatives --install /usr/bin/clang clang /usr/bin/clang-17 100 && git clone --recursive https://github.com/${{ github.repository_owner }}/${{ github.event.repository.name }}.git && cd ${{ github.event.repository.name }} && make data > /dev/null && make run && make gen'\" }) { id imageName machineId } }"
           }
           EOF
           )
@@ -45,5 +46,22 @@ jobs:
           echo "pod_id=$POD_ID" >> $GITHUB_OUTPUT
           
           echo "Pod has been started and will complete training automatically."
-          echo "Pod will automatically terminate after 3 minutes."
-          echo "Training with default epoch count from slm.c"
+          
+          # Now we'll terminate the pod after a delay using a separate API call
+          echo "Scheduling pod termination in 3 minutes..."
+          
+          # Sleep for 3 minutes
+          sleep 180
+          
+          # Terminate the pod
+          TERMINATE_RESPONSE=$(curl --request POST \
+            --header 'content-type: application/json' \
+            --url 'https://api.runpod.io/graphql?api_key=${{ secrets.RUNPOD_API_KEY }}' \
+            --data @- << EOF
+          {
+            "query": "mutation { podTerminate(input: { podId: \"$POD_ID\" }) }"
+          }
+          EOF
+          )
+          
+          echo "Pod termination response: $TERMINATE_RESPONSE"
