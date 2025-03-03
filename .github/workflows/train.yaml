@@ -17,7 +17,6 @@ jobs:
           # Create a script file that will be executed in the pod
           cat > terminate_script.sh << 'EOL'
           #!/bin/bash
-          
           # This script will be run at the end of training to terminate the pod
           echo "=== Training complete, terminating pod ==="
           curl --request POST \
@@ -29,13 +28,30 @@ jobs:
           # Base64 encode the script to include in the pod configuration
           TERMINATE_SCRIPT=$(base64 -w 0 terminate_script.sh)
           
+          # Let's separate the dockerArgs to keep it cleaner
+          DOCKER_ARGS="cd /workspace && \
+          echo \"deb http://apt.llvm.org/jammy/ llvm-toolchain-jammy-17 main\" > /etc/apt/sources.list.d/llvm-17.list && \
+          echo \"deb-src http://apt.llvm.org/jammy/ llvm-toolchain-jammy-17 main\" >> /etc/apt/sources.list.d/llvm-17.list && \
+          wget -q -O - https://apt.llvm.org/llvm-snapshot.gpg.key | apt-key add - && \
+          apt update && \
+          apt install -y time tree htop nvtop libwebp-dev libopenblas-dev libcurl4-openssl-dev clang-17 curl jq && \
+          update-alternatives --install /usr/bin/clang clang /usr/bin/clang-17 100 && \
+          echo \"${TERMINATE_SCRIPT}\" | base64 -d > /terminate.sh && \
+          chmod +x /terminate.sh && \
+          git clone --recursive https://github.com/${{ github.repository_owner }}/${{ github.event.repository.name }}.git && \
+          cd ${{ github.event.repository.name }} && \
+          make data > /dev/null && \
+          make run && \
+          make gen && \
+          /terminate.sh"
+          
           # Create the pod with the script included
           RESPONSE=$(curl --request POST \
             --header 'content-type: application/json' \
             --url 'https://api.runpod.io/graphql?api_key=${{ secrets.RUNPOD_API_KEY }}' \
             --data @- << EOF
           {
-            "query": "mutation { podFindAndDeployOnDemand(input: { cloudType: SECURE, gpuCount: 1, volumeInGb: 10, containerDiskInGb: 20, minVcpuCount: 1, minMemoryInGb: 20, gpuTypeId: \"NVIDIA GeForce RTX 4090\", name: \"slm-training\", imageName: \"runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04\", ports: \"8888/http,22/tcp,8080/http\", volumeMountPath: \"/workspace\", env: [{key: \"RUNPOD_API_KEY\", value: \"${{ secrets.RUNPOD_API_KEY }}\"}], dockerArgs: \"bash -c 'cd /workspace && echo \\\"deb http://apt.llvm.org/jammy/ llvm-toolchain-jammy-17 main\\\" > /etc/apt/sources.list.d/llvm-17.list && echo \\\"deb-src http://apt.llvm.org/jammy/ llvm-toolchain-jammy-17 main\\\" >> /etc/apt/sources.list.d/llvm-17.list && wget -q -O - https://apt.llvm.org/llvm-snapshot.gpg.key | apt-key add - && apt update && apt install -y time tree htop nvtop libwebp-dev libopenblas-dev libcurl4-openssl-dev clang-17 curl jq && update-alternatives --install /usr/bin/clang clang /usr/bin/clang-17 100 && echo $TERMINATE_SCRIPT | base64 -d > /terminate_script.sh && chmod +x /terminate_script.sh && git clone --recursive https://github.com/${{ github.repository_owner }}/${{ github.event.repository.name }}.git && cd ${{ github.event.repository.name }} && make data > /dev/null && make run && make gen && /terminate_script.sh'\" }) { id imageName machineId } }"
+            "query": "mutation { podFindAndDeployOnDemand(input: { cloudType: SECURE, gpuCount: 1, volumeInGb: 10, containerDiskInGb: 20, minVcpuCount: 1, minMemoryInGb: 20, gpuTypeId: \"NVIDIA GeForce RTX 4090\", name: \"slm-training\", imageName: \"runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04\", ports: \"8888/http,22/tcp,8080/http\", volumeMountPath: \"/workspace\", env: [{key: \"RUNPOD_API_KEY\", value: \"${{ secrets.RUNPOD_API_KEY }}\"}], dockerArgs: \"bash -c '${DOCKER_ARGS}'\" }) { id imageName machineId } }"
           }
           EOF
           )
