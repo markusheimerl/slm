@@ -63,19 +63,23 @@ int main() {
     
     // Model parameters
     int embedding_dim = 8;     // Embedding dimension
-    int encoding_dim = 128;      // Encoding layer dimension
-    int reasoning_dim = 128;     // Reasoning layer dimension
-    int state_dim = 2048;        // State dimension
-    int vocab_size = 256;        // One per possible byte value
+    int layer1_dim = 128;      // Layer 1 dimension
+    int layer2_dim = 128;      // Layer 2 dimension
+    int layer3_dim = 128;      // Layer 3 dimension
+    int layer4_dim = 128;      // Layer 4 dimension
+    int state_dim = 2048;      // State dimension
+    int vocab_size = 256;      // One per possible byte value
     float learning_rate = 0.00001; // Learning rate
-    int num_epochs = 1000;        // Number of training epochs
-    int max_samples = 16384;       // Maximum number of samples to use
+    int num_epochs = 1000;     // Number of training epochs
+    int max_samples = 16384;   // Maximum number of samples to use
     
     printf("=== SLM Training Configuration ===\n");
     printf("Vocabulary size: %d (byte values)\n", vocab_size);
     printf("Embedding dimension: %d\n", embedding_dim);
-    printf("Encoding dimension: %d\n", encoding_dim);
-    printf("Reasoning dimension: %d\n", reasoning_dim);
+    printf("Layer 1 dimension: %d\n", layer1_dim);
+    printf("Layer 2 dimension: %d\n", layer2_dim);
+    printf("Layer 3 dimension: %d\n", layer3_dim);
+    printf("Layer 4 dimension: %d\n", layer4_dim);
     printf("State dimension: %d\n", state_dim);
     printf("Learning rate: %.6f\n", learning_rate);
     printf("Training epochs: %d\n", num_epochs);
@@ -226,29 +230,37 @@ int main() {
     
     // Allocate memory for embedded inputs and intermediate outputs
     float* d_X_embedded;
-    float* d_encoding_output;
-    float* d_reasoning_output;
+    float* d_layer1_output;
+    float* d_layer2_output;
+    float* d_layer3_output;
+    float* d_layer4_output;
+
     CHECK_CUDA(cudaMalloc(&d_X_embedded, sample_count * embedding_dim * sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&d_encoding_output, sample_count * encoding_dim * sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&d_reasoning_output, sample_count * reasoning_dim * sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&d_layer1_output, sample_count * layer1_dim * sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&d_layer2_output, sample_count * layer2_dim * sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&d_layer3_output, sample_count * layer3_dim * sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&d_layer4_output, sample_count * layer4_dim * sizeof(float)));
     
     // Initialize the stacked SSM models
-    // 1. Encoder model processes embeddings -> encoding_dim
-    // 2. Reasoning model processes encoding_dim -> reasoning_dim
-    // 3. Output model processes reasoning_dim -> vocab_size
-    SSM* encoder_ssm = init_ssm(embedding_dim, state_dim, encoding_dim, sample_count);
-    SSM* reasoning_ssm = init_ssm(encoding_dim, state_dim, reasoning_dim, sample_count);
-    SSM* output_ssm = init_ssm(reasoning_dim, state_dim, vocab_size, sample_count);
+    // 1. Layer 1 processes embeddings -> layer1_dim
+    // 2. Layer 2 processes layer1_dim -> layer2_dim
+    // 3. Layer 3 processes layer2_dim -> layer3_dim
+    // 4. Layer 4 processes layer3_dim -> vocab_size
+    SSM* layer1_ssm = init_ssm(embedding_dim, state_dim, layer1_dim, sample_count);
+    SSM* layer2_ssm = init_ssm(layer1_dim, state_dim, layer2_dim, sample_count);
+    SSM* layer3_ssm = init_ssm(layer2_dim, state_dim, layer3_dim, sample_count);
+    SSM* layer4_ssm = init_ssm(layer3_dim, state_dim, vocab_size, sample_count);
     
     printf("\nStarting training for %d epochs with all %d samples...\n", num_epochs, sample_count);
-    printf("Using three-stage stacked SSM architecture\n");
+    printf("Using four-stage stacked SSM architecture\n");
     
     // Training loop
     for (int epoch = 0; epoch < num_epochs; epoch++) {
         // Reset state at the beginning of each epoch
-        CHECK_CUDA(cudaMemset(encoder_ssm->d_state, 0, sample_count * state_dim * sizeof(float)));
-        CHECK_CUDA(cudaMemset(reasoning_ssm->d_state, 0, sample_count * state_dim * sizeof(float)));
-        CHECK_CUDA(cudaMemset(output_ssm->d_state, 0, sample_count * state_dim * sizeof(float)));
+        CHECK_CUDA(cudaMemset(layer1_ssm->d_state, 0, sample_count * state_dim * sizeof(float)));
+        CHECK_CUDA(cudaMemset(layer2_ssm->d_state, 0, sample_count * state_dim * sizeof(float)));
+        CHECK_CUDA(cudaMemset(layer3_ssm->d_state, 0, sample_count * state_dim * sizeof(float)));
+        CHECK_CUDA(cudaMemset(layer4_ssm->d_state, 0, sample_count * state_dim * sizeof(float)));
         
         float epoch_loss = 0.0f;
         
@@ -261,47 +273,59 @@ int main() {
             // Forward pass: embedding layer
             embeddings_forward(embeddings, d_X_t, d_X_embedded, sample_count);
             
-            // Forward pass: encoder SSM layer
-            forward_pass(encoder_ssm, d_X_embedded);
+            // Forward pass: layer 1 SSM
+            forward_pass(layer1_ssm, d_X_embedded);
             
-            // Copy encoder output for reasoning model input
-            CHECK_CUDA(cudaMemcpy(d_encoding_output, encoder_ssm->d_predictions, 
-                              sample_count * encoding_dim * sizeof(float), 
+            // Copy layer1 output for layer2 input
+            CHECK_CUDA(cudaMemcpy(d_layer1_output, layer1_ssm->d_predictions, 
+                              sample_count * layer1_dim * sizeof(float), 
                               cudaMemcpyDeviceToDevice));
             
-            // Forward pass: reasoning SSM layer
-            forward_pass(reasoning_ssm, d_encoding_output);
+            // Forward pass: layer 2 SSM
+            forward_pass(layer2_ssm, d_layer1_output);
             
-            // Copy reasoning output for output model input
-            CHECK_CUDA(cudaMemcpy(d_reasoning_output, reasoning_ssm->d_predictions, 
-                              sample_count * reasoning_dim * sizeof(float), 
+            // Copy layer2 output for layer3 input
+            CHECK_CUDA(cudaMemcpy(d_layer2_output, layer2_ssm->d_predictions, 
+                              sample_count * layer2_dim * sizeof(float), 
                               cudaMemcpyDeviceToDevice));
             
-            // Forward pass: output SSM layer
-            forward_pass(output_ssm, d_reasoning_output);
+            // Forward pass: layer 3 SSM
+            forward_pass(layer3_ssm, d_layer2_output);
+            
+            // Copy layer3 output for layer4 input
+            CHECK_CUDA(cudaMemcpy(d_layer3_output, layer3_ssm->d_predictions, 
+                              sample_count * layer3_dim * sizeof(float), 
+                              cudaMemcpyDeviceToDevice));
+            
+            // Forward pass: layer 4 SSM (output layer)
+            forward_pass(layer4_ssm, d_layer3_output);
             
             // Calculate loss
-            float loss = calculate_cross_entropy_loss(output_ssm, d_y_t);
+            float loss = calculate_cross_entropy_loss(layer4_ssm, d_y_t);
             epoch_loss += loss;
             
-            // Backward pass: output SSM layer
-            zero_gradients(output_ssm);
-            backward_pass(output_ssm, d_reasoning_output);
+            // Backward pass: layer 4 SSM (output layer)
+            zero_gradients(layer4_ssm);
+            backward_pass(layer4_ssm, d_layer3_output);
             
-            // Backward pass: reasoning SSM layer
-            backward_between_models(reasoning_ssm, output_ssm, d_encoding_output);
+            // Backward pass: layer 3 SSM
+            backward_between_models(layer3_ssm, layer4_ssm, d_layer2_output);
             
-            // Backward pass: encoder SSM layer
-            backward_between_models(encoder_ssm, reasoning_ssm, d_X_embedded);
+            // Backward pass: layer 2 SSM
+            backward_between_models(layer2_ssm, layer3_ssm, d_layer1_output);
+            
+            // Backward pass: layer 1 SSM
+            backward_between_models(layer1_ssm, layer2_ssm, d_X_embedded);
             
             // Backward pass: embeddings
             zero_embedding_gradients(embeddings);
-            embeddings_backward(embeddings, encoder_ssm->d_B_grad, d_X_t, sample_count);
+            embeddings_backward(embeddings, layer1_ssm->d_B_grad, d_X_t, sample_count);
             
             // Update weights
-            update_weights(encoder_ssm, learning_rate);
-            update_weights(reasoning_ssm, learning_rate);
-            update_weights(output_ssm, learning_rate);
+            update_weights(layer1_ssm, learning_rate);
+            update_weights(layer2_ssm, learning_rate);
+            update_weights(layer3_ssm, learning_rate);
+            update_weights(layer4_ssm, learning_rate);
             update_embeddings(embeddings, learning_rate, sample_count);
         }
         
@@ -321,26 +345,30 @@ int main() {
     struct tm *timeinfo = localtime(&now);
     strftime(model_time, sizeof(model_time), "%Y%m%d_%H%M%S", timeinfo);
     
-    char encoder_fname[64], reasoning_fname[64], output_fname[64], embedding_fname[64];
-    sprintf(encoder_fname, "%s_encoder.bin", model_time);
-    sprintf(reasoning_fname, "%s_reasoning.bin", model_time);
-    sprintf(output_fname, "%s_output.bin", model_time);
+    char layer1_fname[64], layer2_fname[64], layer3_fname[64], layer4_fname[64], embedding_fname[64];
+    sprintf(layer1_fname, "%s_layer1.bin", model_time);
+    sprintf(layer2_fname, "%s_layer2.bin", model_time);
+    sprintf(layer3_fname, "%s_layer3.bin", model_time);
+    sprintf(layer4_fname, "%s_layer4.bin", model_time);
     sprintf(embedding_fname, "%s_embeddings.bin", model_time);
     
     // For inference, we need batch_size=1
-    encoder_ssm->batch_size = 1;
-    reasoning_ssm->batch_size = 1;
-    output_ssm->batch_size = 1;
+    layer1_ssm->batch_size = 1;
+    layer2_ssm->batch_size = 1;
+    layer3_ssm->batch_size = 1;
+    layer4_ssm->batch_size = 1;
     
-    save_ssm(encoder_ssm, encoder_fname);
-    save_ssm(reasoning_ssm, reasoning_fname);
-    save_ssm(output_ssm, output_fname);
+    save_ssm(layer1_ssm, layer1_fname);
+    save_ssm(layer2_ssm, layer2_fname);
+    save_ssm(layer3_ssm, layer3_fname);
+    save_ssm(layer4_ssm, layer4_fname);
     save_embeddings(embeddings, embedding_fname);
 
     // Clean up
-    free_ssm(encoder_ssm);
-    free_ssm(reasoning_ssm);
-    free_ssm(output_ssm);
+    free_ssm(layer1_ssm);
+    free_ssm(layer2_ssm);
+    free_ssm(layer3_ssm);
+    free_ssm(layer4_ssm);
     free_embeddings(embeddings);
     
     for (int i = 0; i < sample_count; i++) {
@@ -354,8 +382,10 @@ int main() {
     
     cudaFree(d_X_bytes);
     cudaFree(d_X_embedded);
-    cudaFree(d_encoding_output);
-    cudaFree(d_reasoning_output);
+    cudaFree(d_layer1_output);
+    cudaFree(d_layer2_output);
+    cudaFree(d_layer3_output);
+    cudaFree(d_layer4_output);
     cudaFree(d_y_onehot);
     
     printf("\nTraining completed!\n");

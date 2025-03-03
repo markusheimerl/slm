@@ -21,9 +21,10 @@ run: slm.out
 
 gen: generate.out
 	@time ./generate.out \
-		$(shell ls -t *_encoder.bin | head -1) \
-		$(shell ls -t *_reasoning.bin | head -1) \
-		$(shell ls -t *_output.bin | head -1) \
+		$(shell ls -t *_layer1.bin | head -1) \
+		$(shell ls -t *_layer2.bin | head -1) \
+		$(shell ls -t *_layer3.bin | head -1) \
+		$(shell ls -t *_layer4.bin | head -1) \
 		$(shell ls -t *_embeddings.bin | head -1)
 
 clean:

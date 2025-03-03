@@ -32,7 +32,7 @@ jobs:
           GEN_OUTPUT=$(make gen 2>&1)
           echo "$GEN_OUTPUT"
           
-          MODEL_FILE_PREFIX=$(ls -t *_encoder.bin | head -1 | sed "s/_encoder.bin//")
+          MODEL_FILE_PREFIX=$(ls -t *_layer1.bin | head -1 | sed "s/_layer1.bin//")
           tar -czvf ${MODEL_FILE_PREFIX}_weights.tar.gz ${MODEL_FILE_PREFIX}_*.bin
           
           # Prepare release notes with the generation output
@@ -89,7 +89,7 @@ jobs:
                   }
                 }
               }'
-            )")
+            )"
 
           echo "Response: $RESPONSE"
           
