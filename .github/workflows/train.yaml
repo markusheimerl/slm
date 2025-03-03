@@ -34,6 +34,7 @@ jobs:
           $GITHUB_TOKEN
           EOF2
           gh release create ${MODEL_FILE_PREFIX} ${MODEL_FILE_PREFIX}_weights.tar.gz --title "SLM Model ${MODEL_FILE_PREFIX}" --notes "Automatically trained SLM model weights"
+          sleep 1m
           runpodctl remove pod $RUNPOD_POD_ID
           EOF
           
