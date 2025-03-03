@@ -2,6 +2,12 @@ name: Train SLM Model
 
 on:
   workflow_dispatch:
+    inputs:
+      epochs:
+        description: 'Number of training epochs'
+        required: true
+        default: '1000'
+        type: string
 
 permissions:
   contents: write
@@ -25,6 +31,10 @@ jobs:
           update-alternatives --install /usr/bin/clang clang /usr/bin/clang-17 100
           git clone --recursive https://github.com/$REPO_OWNER/$REPO_NAME.git
           cd $REPO_NAME
+          
+          # Set epochs in the SLM code
+          sed -i "s/int num_epochs = 1000;/int num_epochs = $EPOCHS;/" slm.c
+          
           make data > /dev/null
           make run
           
@@ -39,6 +49,9 @@ jobs:
           cat > release_notes.md << EOF2
           Automatically trained SLM model weights.
           
+          ## Training Configuration
+          - Epochs: $EPOCHS
+          
           ## Generation Sample Output
           
           \`\`\`
@@ -52,7 +65,7 @@ jobs:
           rm token.txt  # Remove the token file for security
           
           # Create the release with the model weights and the captured output
-          gh release create ${MODEL_FILE_PREFIX} ${MODEL_FILE_PREFIX}_weights.tar.gz --title "SLM Model ${MODEL_FILE_PREFIX}" --notes-file release_notes.md
+          gh release create ${MODEL_FILE_PREFIX} ${MODEL_FILE_PREFIX}_weights.tar.gz --title "SLM Model ${MODEL_FILE_PREFIX} ($EPOCHS epochs)" --notes-file release_notes.md
           
           # Clean up the pod once we're done
           runpodctl remove pod $RUNPOD_POD_ID
@@ -62,7 +75,7 @@ jobs:
           ENCODED_SCRIPT=$(base64 -w 0 setup_script.sh)
           
           # Create the command that will be run inside the pod
-          DOCKER_ARGS="bash -c 'echo $ENCODED_SCRIPT | base64 -d > /workspace/setup.sh && chmod +x /workspace/setup.sh && REPO_OWNER=${{ github.repository_owner }} REPO_NAME=${{ github.event.repository.name }} USER_PAT=${{ secrets.USER_PAT }} /workspace/setup.sh'"
+          DOCKER_ARGS="bash -c 'echo $ENCODED_SCRIPT | base64 -d > /workspace/setup.sh && chmod +x /workspace/setup.sh && REPO_OWNER=${{ github.repository_owner }} REPO_NAME=${{ github.event.repository.name }} USER_PAT=${{ secrets.USER_PAT }} EPOCHS=${{ inputs.epochs }} /workspace/setup.sh'"
 
           # Submit the pod creation request to RunPod
           RESPONSE=$(curl --request POST \
