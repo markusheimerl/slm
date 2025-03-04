@@ -38,10 +38,14 @@ jobs:
           # Use the personal access token for authentication
           echo "$USER_PAT" > token.txt
           gh auth login --with-token < token.txt
+          rm token.txt  # Remove the token file for security
           
           # Check for previous releases
           echo "Checking for previous releases..."
           PREVIOUS_RELEASE=$(gh release list --limit 1 | grep -v "No releases" || echo "")
+          
+          # Initialize total epochs counter
+          TOTAL_EPOCHS=$EPOCHS
           
           # Process data
           make data > /dev/null
@@ -58,6 +62,16 @@ jobs:
             # Extract the weights
             WEIGHTS_ARCHIVE=$(ls *_weights.tar.gz)
             tar -xzvf "$WEIGHTS_ARCHIVE"
+            
+            # Try to extract previous total epochs from release notes
+            gh release view "$RELEASE_TAG" --json body | grep -o "Total Epochs: [0-9]*" | awk '{print $3}' > previous_total_epochs.txt
+            if [ -s previous_total_epochs.txt ]; then
+              PREV_TOTAL_EPOCHS=$(cat previous_total_epochs.txt)
+              TOTAL_EPOCHS=$((PREV_TOTAL_EPOCHS + EPOCHS))
+              echo "Found previous total epochs: $PREV_TOTAL_EPOCHS. New total: $TOTAL_EPOCHS"
+            else
+              echo "Could not find previous total epochs, using current epochs as total."
+            fi
             
             # Continue training from existing weights
             make cont
@@ -79,7 +93,8 @@ jobs:
           Automatically trained SLM model weights.
           
           ## Training Configuration
-          - Epochs: $EPOCHS
+          - Current Epochs: $EPOCHS
+          - Total Epochs: $TOTAL_EPOCHS
           
           ## Generation Sample Output
           
@@ -88,10 +103,15 @@ jobs:
           \`\`\`
           EOF2
           
+          # Delete all previous releases before creating a new one
+          echo "Deleting previous releases..."
+          gh release list | grep -v TITLE | cut -f3 | while read -r tag; do
+            echo "Deleting release with tag: $tag"
+            gh release delete -y --cleanup-tag "$tag"
+          done
+          
           # Create the release with the model weights and the captured output
           gh release create ${MODEL_FILE_PREFIX} ${MODEL_FILE_PREFIX}_weights.tar.gz --title "${MODEL_FILE_PREFIX} SLM Training" --notes-file release_notes.md
-          
-          rm token.txt  # Remove the token file for security
           
           # Clean up the pod once we're done
           runpodctl remove pod $RUNPOD_POD_ID
