@@ -6,7 +6,7 @@
 #include <math.h>
 #include <limits.h>
 #include "ssm/gpu/ssm.h"
-#include "embeddings.h"
+#include "gpu/embeddings.h"
 
 // ---------------------------------------------------------------------
 // CUDA kernel for one-hot encoding a single timestep
