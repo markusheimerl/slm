@@ -103,13 +103,6 @@ jobs:
           \`\`\`
           EOF2
           
-          # Delete all previous releases before creating a new one
-          echo "Deleting previous releases..."
-          gh release list | grep -v TITLE | cut -f3 | while read -r tag; do
-            echo "Deleting release with tag: $tag"
-            gh release delete -y --cleanup-tag "$tag"
-          done
-          
           # Create the release with the model weights and the captured output
           gh release create ${MODEL_FILE_PREFIX} ${MODEL_FILE_PREFIX}_weights.tar.gz --title "${MODEL_FILE_PREFIX} SLM Training" --notes-file release_notes.md
           
