@@ -239,13 +239,34 @@ void save_embeddings(Embeddings* emb, const char* filename) {
     fwrite(&emb->vocab_size, sizeof(int), 1, file);
     fwrite(&emb->embedding_dim, sizeof(int), 1, file);
     
-    // Copy embeddings from device to host
-    CHECK_CUDA(cudaMemcpy(emb->h_embeddings, emb->d_embeddings, 
-                         emb->vocab_size * emb->embedding_dim * sizeof(float), 
-                         cudaMemcpyDeviceToHost));
+    // Write Adam hyperparameters
+    fwrite(&emb->beta1, sizeof(float), 1, file);
+    fwrite(&emb->beta2, sizeof(float), 1, file);
+    fwrite(&emb->epsilon, sizeof(float), 1, file);
+    fwrite(&emb->weight_decay, sizeof(float), 1, file);
+    fwrite(&emb->adam_t, sizeof(int), 1, file);
     
-    // Write embeddings to file
-    fwrite(emb->h_embeddings, sizeof(float), emb->vocab_size * emb->embedding_dim, file);
+    size_t size = emb->vocab_size * emb->embedding_dim * sizeof(float);
+    
+    // Allocate host memory for copying from device
+    float* h_embeddings = (float*)malloc(size);
+    float* h_embedding_m = (float*)malloc(size);
+    float* h_embedding_v = (float*)malloc(size);
+    
+    // Copy data from device to host
+    CHECK_CUDA(cudaMemcpy(h_embeddings, emb->d_embeddings, size, cudaMemcpyDeviceToHost));
+    CHECK_CUDA(cudaMemcpy(h_embedding_m, emb->d_embedding_m, size, cudaMemcpyDeviceToHost));
+    CHECK_CUDA(cudaMemcpy(h_embedding_v, emb->d_embedding_v, size, cudaMemcpyDeviceToHost));
+    
+    // Write data to file
+    fwrite(h_embeddings, sizeof(float), emb->vocab_size * emb->embedding_dim, file);
+    fwrite(h_embedding_m, sizeof(float), emb->vocab_size * emb->embedding_dim, file);
+    fwrite(h_embedding_v, sizeof(float), emb->vocab_size * emb->embedding_dim, file);
+    
+    // Free host memory
+    free(h_embeddings);
+    free(h_embedding_m);
+    free(h_embedding_v);
     
     fclose(file);
     printf("Embeddings saved to %s\n", filename);
@@ -270,24 +291,44 @@ Embeddings* load_embeddings(const char* filename) {
     emb->vocab_size = vocab_size;
     emb->embedding_dim = embedding_dim;
     
+    // Read Adam hyperparameters
+    fread(&emb->beta1, sizeof(float), 1, file);
+    fread(&emb->beta2, sizeof(float), 1, file);
+    fread(&emb->epsilon, sizeof(float), 1, file);
+    fread(&emb->weight_decay, sizeof(float), 1, file);
+    fread(&emb->adam_t, sizeof(int), 1, file);
+    
+    size_t size = vocab_size * embedding_dim * sizeof(float);
+    
     // Allocate host memory for embeddings
-    emb->h_embeddings = (float*)malloc(vocab_size * embedding_dim * sizeof(float));
+    emb->h_embeddings = (float*)malloc(size);
     
-    // Read embeddings from file to host memory
+    // Allocate host buffers for Adam state
+    float* h_embedding_m = (float*)malloc(size);
+    float* h_embedding_v = (float*)malloc(size);
+    
+    // Read data from file to host memory
     fread(emb->h_embeddings, sizeof(float), vocab_size * embedding_dim, file);
+    fread(h_embedding_m, sizeof(float), vocab_size * embedding_dim, file);
+    fread(h_embedding_v, sizeof(float), vocab_size * embedding_dim, file);
     
-    // Allocate device memory for embeddings
-    CHECK_CUDA(cudaMalloc(&emb->d_embeddings, vocab_size * embedding_dim * sizeof(float)));
+    // Allocate device memory
+    CHECK_CUDA(cudaMalloc(&emb->d_embeddings, size));
+    CHECK_CUDA(cudaMalloc(&emb->d_embedding_grads, size));
+    CHECK_CUDA(cudaMalloc(&emb->d_embedding_m, size));
+    CHECK_CUDA(cudaMalloc(&emb->d_embedding_v, size));
     
-    // We only need gradient memory for training, not inference
-    emb->d_embedding_grads = NULL;
-    emb->d_embedding_m = NULL;
-    emb->d_embedding_v = NULL;
+    // Initialize gradients to zero
+    CHECK_CUDA(cudaMemset(emb->d_embedding_grads, 0, size));
     
-    // Copy embeddings to device
-    CHECK_CUDA(cudaMemcpy(emb->d_embeddings, emb->h_embeddings, 
-                         vocab_size * embedding_dim * sizeof(float), 
-                         cudaMemcpyHostToDevice));
+    // Copy data to device
+    CHECK_CUDA(cudaMemcpy(emb->d_embeddings, emb->h_embeddings, size, cudaMemcpyHostToDevice));
+    CHECK_CUDA(cudaMemcpy(emb->d_embedding_m, h_embedding_m, size, cudaMemcpyHostToDevice));
+    CHECK_CUDA(cudaMemcpy(emb->d_embedding_v, h_embedding_v, size, cudaMemcpyHostToDevice));
+    
+    // Free temporary host memory
+    free(h_embedding_m);
+    free(h_embedding_v);
     
     fclose(file);
     printf("Embeddings loaded from %s\n", filename);
