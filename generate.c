@@ -126,10 +126,10 @@ int main(int argc, char** argv) {
     
     // Load embeddings and models
     Embeddings* embeddings = load_embeddings(embedding_filename);
-    SSM* layer1_ssm = load_ssm(layer1_filename);
-    SSM* layer2_ssm = load_ssm(layer2_filename);
-    SSM* layer3_ssm = load_ssm(layer3_filename);
-    SSM* layer4_ssm = load_ssm(layer4_filename);
+    SSM* layer1_ssm = load_ssm(layer1_filename, 1);
+    SSM* layer2_ssm = load_ssm(layer2_filename, 1);
+    SSM* layer3_ssm = load_ssm(layer3_filename, 1);
+    SSM* layer4_ssm = load_ssm(layer4_filename, 1);
     
     // Reset SSM states
     CHECK_CUDA(cudaMemset(layer1_ssm->d_state, 0, layer1_ssm->batch_size * layer1_ssm->state_dim * sizeof(float)));
