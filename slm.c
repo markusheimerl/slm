@@ -57,7 +57,7 @@ void backward_between_models(SSM* first_model, SSM* second_model, float* d_first
     backward_pass(first_model, d_first_model_input);
 }
 
-int main() {
+int main(int argc, char *argv[]) {
     // Seed random number generator
     srand(time(NULL) ^ getpid());
     
@@ -225,8 +225,38 @@ int main() {
                          sample_count * seq_length * vocab_size * sizeof(float), 
                          cudaMemcpyHostToDevice));
     
-    // Initialize the embedding layer
-    Embeddings* embeddings = init_embeddings(vocab_size, embedding_dim);
+    // Initialize the embedding layer or load from file
+    Embeddings* embeddings;
+    SSM* layer1_ssm;
+    SSM* layer2_ssm;
+    SSM* layer3_ssm;
+    SSM* layer4_ssm;
+    
+    if (argc == 6) {
+        // Load embeddings and models from files
+        char* layer1_filename = argv[1];
+        char* layer2_filename = argv[2];
+        char* layer3_filename = argv[3];
+        char* layer4_filename = argv[4];
+        char* embedding_filename = argv[5];
+
+        embeddings = load_embeddings(embedding_filename);
+        layer1_ssm = load_ssm(layer1_filename, batch_size);
+        layer2_ssm = load_ssm(layer2_filename, batch_size);
+        layer3_ssm = load_ssm(layer3_filename, batch_size);
+        layer4_ssm = load_ssm(layer4_filename, batch_size);
+        
+        printf("Successfully loaded pretrained models\n");
+    } else {
+        // Initialize from scratch
+        embeddings = init_embeddings(vocab_size, embedding_dim);
+        layer1_ssm = init_ssm(embedding_dim, state_dim, layer1_dim, batch_size);
+        layer2_ssm = init_ssm(layer1_dim, state_dim, layer2_dim, batch_size);
+        layer3_ssm = init_ssm(layer2_dim, state_dim, layer3_dim, batch_size);
+        layer4_ssm = init_ssm(layer3_dim, state_dim, vocab_size, batch_size);
+        
+        printf("Initialized new models\n");
+    }
     
     // Allocate memory for embedded inputs and intermediate outputs
     float* d_X_embedded;
@@ -240,16 +270,6 @@ int main() {
     CHECK_CUDA(cudaMalloc(&d_layer2_output, sample_count * layer2_dim * sizeof(float)));
     CHECK_CUDA(cudaMalloc(&d_layer3_output, sample_count * layer3_dim * sizeof(float)));
     CHECK_CUDA(cudaMalloc(&d_layer4_output, sample_count * layer4_dim * sizeof(float)));
-    
-    // Initialize the stacked SSM models
-    // 1. Layer 1 processes embeddings -> layer1_dim
-    // 2. Layer 2 processes layer1_dim -> layer2_dim
-    // 3. Layer 3 processes layer2_dim -> layer3_dim
-    // 4. Layer 4 processes layer3_dim -> vocab_size
-    SSM* layer1_ssm = init_ssm(embedding_dim, state_dim, layer1_dim, sample_count);
-    SSM* layer2_ssm = init_ssm(layer1_dim, state_dim, layer2_dim, sample_count);
-    SSM* layer3_ssm = init_ssm(layer2_dim, state_dim, layer3_dim, sample_count);
-    SSM* layer4_ssm = init_ssm(layer3_dim, state_dim, vocab_size, sample_count);
     
     printf("\nStarting training for %d epochs with all %d samples...\n", num_epochs, sample_count);
     printf("Using four-stage stacked SSM architecture\n");
@@ -351,7 +371,13 @@ int main() {
     sprintf(layer3_fname, "%s_layer3.bin", model_time);
     sprintf(layer4_fname, "%s_layer4.bin", model_time);
     sprintf(embedding_fname, "%s_embeddings.bin", model_time);
-
+    
+    // For inference, we need batch_size=1
+    layer1_ssm->batch_size = 1;
+    layer2_ssm->batch_size = 1;
+    layer3_ssm->batch_size = 1;
+    layer4_ssm->batch_size = 1;
+    
     save_ssm(layer1_ssm, layer1_fname);
     save_ssm(layer2_ssm, layer2_fname);
     save_ssm(layer3_ssm, layer3_fname);
