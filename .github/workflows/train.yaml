@@ -35,8 +35,37 @@ jobs:
           # Set epochs in the SLM code
           sed -i "s/int num_epochs = 1000;/int num_epochs = $EPOCHS;/" slm.c
           
+          # Use the personal access token for authentication
+          echo "$USER_PAT" > token.txt
+          gh auth login --with-token < token.txt
+          
+          # Check for previous releases
+          echo "Checking for previous releases..."
+          PREVIOUS_RELEASE=$(gh release list --limit 1 | grep -v "No releases" || echo "")
+          
+          # Process data
           make data > /dev/null
-          make run
+          
+          if [ -n "$PREVIOUS_RELEASE" ]; then
+            echo "Found previous release. Continuing training from existing weights."
+            # Extract the tag name from the release list output
+            RELEASE_TAG=$(echo "$PREVIOUS_RELEASE" | awk '{print $1}')
+            
+            # Download the weights archive
+            echo "Downloading weights from release $RELEASE_TAG..."
+            gh release download "$RELEASE_TAG" --pattern "*_weights.tar.gz"
+            
+            # Extract the weights
+            WEIGHTS_ARCHIVE=$(ls *_weights.tar.gz)
+            tar -xzvf "$WEIGHTS_ARCHIVE"
+            
+            # Continue training from existing weights
+            make cont
+          else
+            echo "No previous release found. Starting training from scratch."
+            # Start training from scratch
+            make run
+          fi
           
           # Capture the output of make gen
           GEN_OUTPUT=$(make gen 2>&1)
@@ -59,13 +88,10 @@ jobs:
           \`\`\`
           EOF2
           
-          # Use the personal access token for authentication
-          echo "$USER_PAT" > token.txt
-          gh auth login --with-token < token.txt
-          rm token.txt  # Remove the token file for security
-          
           # Create the release with the model weights and the captured output
           gh release create ${MODEL_FILE_PREFIX} ${MODEL_FILE_PREFIX}_weights.tar.gz --title "${MODEL_FILE_PREFIX} SLM Training" --notes-file release_notes.md
+          
+          rm token.txt  # Remove the token file for security
           
           # Clean up the pod once we're done
           runpodctl remove pod $RUNPOD_POD_ID
