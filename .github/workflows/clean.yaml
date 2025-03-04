@@ -7,16 +7,13 @@ permissions:
   contents: write
 
 jobs:
-  purge-old-releases:
+  clean-old-releases:
     runs-on: ubuntu-latest
     
     steps:
       - name: Checkout repository
         uses: actions/checkout@v3
-        
-      - name: Set up GitHub CLI
-        uses: cli/cli-action@v1
-        
+
       - name: Delete all releases except the latest
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
