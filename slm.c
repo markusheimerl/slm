@@ -4,25 +4,26 @@
 #include <time.h>
 #include <unistd.h>
 #include <math.h>
+#include <limits.h>
 #include "ssm/gpu/ssm.h"
 #include "embeddings.h"
 
 // ---------------------------------------------------------------------
-// Function: Reorganize data for batch processing
-// (Converts from [example][time] to [time][example] layout)
+// CUDA kernel for one-hot encoding a single timestep
 // ---------------------------------------------------------------------
-void reorganize_data(const unsigned char* input, unsigned char* output, 
-                    int num_examples, int seq_length) {
-    for (int example = 0; example < num_examples; example++) {
-        for (int step = 0; step < seq_length; step++) {
-            int src_idx = example * seq_length + step;
-            int dst_idx = step * num_examples + example;
-            
-            // Check bounds
-            if (src_idx < num_examples * seq_length && dst_idx < num_examples * seq_length) {
-                output[dst_idx] = input[src_idx];
-            }
+__global__ void onehot_encode_timestep(const unsigned char* input, float* output, 
+                                     int batch_size, int vocab_size) {
+    int batch_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (batch_idx < batch_size) {
+        unsigned char target = input[batch_idx];
+        
+        // Clear all values first (set to zero)
+        for (int v = 0; v < vocab_size; v++) {
+            output[batch_idx * vocab_size + v] = 0.0f;
         }
+        
+        // Set the target index to 1.0
+        output[batch_idx * vocab_size + target] = 1.0f;
     }
 }
 
@@ -70,8 +71,8 @@ int main(int argc, char *argv[]) {
     int state_dim = 2048;      // State dimension
     int vocab_size = 256;      // One per possible byte value
     float learning_rate = 0.00001; // Learning rate
-    int num_epochs = 1000;     // Number of training epochs
-    int max_samples = 16384;   // Maximum number of samples to use
+    int num_epochs = 10;        // Number of training epochs
+    int max_samples = 131072;   // Maximum number of samples to use
     
     printf("=== SLM Training Configuration ===\n");
     printf("Vocabulary size: %d (byte values)\n", vocab_size);
@@ -85,147 +86,71 @@ int main(int argc, char *argv[]) {
     printf("Training epochs: %d\n", num_epochs);
     printf("Using first %d samples for training\n\n", max_samples);
     
-    // Read training data
+    int batch_size = max_samples;
+    int seq_length = 1024;
+
+    // Allocate memory for samples in time-major format
+    unsigned char** samples = (unsigned char**)malloc(batch_size * sizeof(unsigned char*));
+    for (int i = 0; i < batch_size; i++) {
+        samples[i] = (unsigned char*)malloc(seq_length * sizeof(unsigned char));
+    }
+    
+    // Read samples into memory
     FILE* file = fopen("data.txt", "rb");
-    if (!file) {
-        fprintf(stderr, "Error opening data.txt\n");
-        return EXIT_FAILURE;
+    char* line_buf = NULL;
+    size_t line_buf_size = 0;
+    ssize_t line_len;
+    int sample_idx = 0;
+    
+    while ((line_len = getline(&line_buf, &line_buf_size, file)) != -1 && sample_idx < batch_size) {
+        memcpy(samples[sample_idx], line_buf, seq_length);
+        sample_idx++;
     }
     
-    // Get file size
-    fseek(file, 0, SEEK_END);
-    long file_size = ftell(file);
-    fseek(file, 0, SEEK_SET);
-    
-    // Read the whole file
-    char* text_data = (char*)malloc(file_size + 1);
-    if (!text_data) {
-        fprintf(stderr, "Memory allocation failed\n");
-        fclose(file);
-        return EXIT_FAILURE;
-    }
-    
-    size_t bytes_read = fread(text_data, 1, file_size, file);
-    text_data[bytes_read] = '\0';
+    free(line_buf);
     fclose(file);
     
-    printf("Loaded %zu bytes of text data\n", bytes_read);
+    // Allocate time-major formatted input/target arrays
+    unsigned char* h_X_time_major = (unsigned char*)malloc(batch_size * seq_length * sizeof(unsigned char));
+    unsigned char* h_y_time_major = (unsigned char*)malloc(batch_size * seq_length * sizeof(unsigned char));
     
-    // Pre-scan to count non-empty lines (training samples) up to max_samples
-    int num_training_samples = 0;
-    char* scan_ptr = text_data;
-    while (*scan_ptr && num_training_samples < max_samples) {
-        // Skip to the next line start
-        char* line_start = scan_ptr;
-        
-        // Find the end of the current line
-        while (*scan_ptr && *scan_ptr != '\n') {
-            scan_ptr++;
-        }
-        
-        // Check if the line has content (non-empty)
-        if (scan_ptr > line_start) {
-            num_training_samples++;
-        }
-        
-        // Move past the newline if present
-        if (*scan_ptr == '\n') {
-            scan_ptr++;
-        }
-    }
-    
-    printf("Found %d training samples (limited to first %d)\n", num_training_samples, max_samples);
-    
-    // Use the first max_samples samples for batch processing
-    int batch_size = num_training_samples;
-    printf("Using batch size: %d (processing samples in parallel)\n", batch_size);
-    
-    // Split data into training samples (each line is an example)
-    char** training_samples = (char**)malloc(batch_size * sizeof(char*));
-    
-    // Load all available training samples (single pass)
-    int sample_count = 0;
-    char* line = strtok(text_data, "\n");
-    while (line && sample_count < batch_size) {
-        size_t len = strlen(line);
-        if (len > 0) {  // Skip empty lines
-            training_samples[sample_count] = (char*)malloc(len + 1);
-            strcpy(training_samples[sample_count], line);
-            sample_count++;
-        }
-        line = strtok(NULL, "\n");
-    }
-    
-    printf("Loaded %d samples for training\n", sample_count);
-    
-    // Find the minimum length among training samples
-    int min_length = strlen(training_samples[0]);
-    int min_length_idx = 0;
-    for (int i = 1; i < sample_count; i++) {
-        int len = strlen(training_samples[i]);
-        if (len < min_length) {
-            min_length = len;
-            min_length_idx = i;
-        }
-    }
-
-    printf("Shortest sample is line %d with length %d\n", min_length_idx + 1, min_length);
-
-    // Use sequence length of minimum sample length
-    int seq_length = min_length;
-    printf("Using sequence length: %d (from shortest sample)\n", seq_length);
-    
-    // Prepare input and target data
-    unsigned char* h_X_data = (unsigned char*)malloc(sample_count * seq_length * sizeof(unsigned char));
-    unsigned char* h_y_data = (unsigned char*)malloc(sample_count * seq_length * sizeof(unsigned char));
-    
-    // Copy data and set up X (current char) and y (next char)
-    for (int ex = 0; ex < sample_count; ex++) {
-        for (int pos = 0; pos < seq_length - 1; pos++) {
-            h_X_data[ex * seq_length + pos] = training_samples[ex][pos];
-            h_y_data[ex * seq_length + pos] = training_samples[ex][pos + 1];
-        }
-        // For the last position, use a wrap-around (last char predicts first char)
-        h_X_data[ex * seq_length + (seq_length - 1)] = training_samples[ex][seq_length - 1];
-        h_y_data[ex * seq_length + (seq_length - 1)] = training_samples[ex][0];
-    }
-    
-    // Reorganize data to [time][example] layout for efficient processing
-    unsigned char* h_X_time_major = (unsigned char*)malloc(sample_count * seq_length * sizeof(unsigned char));
-    unsigned char* h_y_time_major = (unsigned char*)malloc(sample_count * seq_length * sizeof(unsigned char));
-    
-    reorganize_data(h_X_data, h_X_time_major, sample_count, seq_length);
-    reorganize_data(h_y_data, h_y_time_major, sample_count, seq_length);
-    
-    // Free original arrays
-    free(h_X_data);
-    free(h_y_data);
-    
-    // Create one-hot encoded targets
-    float* h_y_onehot = (float*)calloc(sample_count * seq_length * vocab_size, sizeof(float));
+    // Fill arrays in time-major format
     for (int t = 0; t < seq_length; t++) {
-        for (int ex = 0; ex < sample_count; ex++) {
-            int idx = t * sample_count + ex;
-            unsigned char target = h_y_time_major[idx];
-            h_y_onehot[idx * vocab_size + target] = 1.0f;
+        for (int b = 0; b < batch_size; b++) {
+            int idx = t * batch_size + b;
+            h_X_time_major[idx] = samples[b][t];
+            // Next character or wrap to beginning
+            h_y_time_major[idx] = (t < seq_length-1) ? samples[b][t+1] : samples[b][0];
         }
     }
     
-    // Transfer data to GPU
-    unsigned char* d_X_bytes;
-    float* d_y_onehot;
+    // Free sample memory
+    for (int i = 0; i < batch_size; i++) {
+        free(samples[i]);
+    }
+    free(samples);
     
-    CHECK_CUDA(cudaMalloc(&d_X_bytes, sample_count * seq_length * sizeof(unsigned char)));
-    CHECK_CUDA(cudaMalloc(&d_y_onehot, sample_count * seq_length * vocab_size * sizeof(float)));
+    // Allocate GPU memory for input and target data
+    unsigned char *d_X_time_major, *d_y_time_major;
+    CHECK_CUDA(cudaMalloc(&d_X_time_major, batch_size * seq_length * sizeof(unsigned char)));
+    CHECK_CUDA(cudaMalloc(&d_y_time_major, batch_size * seq_length * sizeof(unsigned char)));
     
-    CHECK_CUDA(cudaMemcpy(d_X_bytes, h_X_time_major, 
-                         sample_count * seq_length * sizeof(unsigned char), 
+    CHECK_CUDA(cudaMemcpy(d_X_time_major, h_X_time_major, 
+                         batch_size * seq_length * sizeof(unsigned char), 
                          cudaMemcpyHostToDevice));
-    CHECK_CUDA(cudaMemcpy(d_y_onehot, h_y_onehot, 
-                         sample_count * seq_length * vocab_size * sizeof(float), 
+    CHECK_CUDA(cudaMemcpy(d_y_time_major, h_y_time_major, 
+                         batch_size * seq_length * sizeof(unsigned char), 
                          cudaMemcpyHostToDevice));
     
-    // Initialize the embedding layer or load from file
+    // Free host memory
+    free(h_X_time_major);
+    free(h_y_time_major);
+    
+    // Allocate memory for one-hot encoding for a single timestep
+    float* d_y_onehot_t;
+    CHECK_CUDA(cudaMalloc(&d_y_onehot_t, batch_size * vocab_size * sizeof(float)));
+    
+    // Initialize models
     Embeddings* embeddings;
     SSM* layer1_ssm;
     SSM* layer2_ssm;
@@ -263,42 +188,47 @@ int main(int argc, char *argv[]) {
     float* d_layer1_output;
     float* d_layer2_output;
     float* d_layer3_output;
-    float* d_layer4_output;
 
-    CHECK_CUDA(cudaMalloc(&d_X_embedded, sample_count * embedding_dim * sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&d_layer1_output, sample_count * layer1_dim * sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&d_layer2_output, sample_count * layer2_dim * sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&d_layer3_output, sample_count * layer3_dim * sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&d_layer4_output, sample_count * layer4_dim * sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&d_X_embedded, batch_size * embedding_dim * sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&d_layer1_output, batch_size * layer1_dim * sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&d_layer2_output, batch_size * layer2_dim * sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&d_layer3_output, batch_size * layer3_dim * sizeof(float)));
     
-    printf("\nStarting training for %d epochs with all %d samples...\n", num_epochs, sample_count);
-    printf("Using four-stage stacked SSM architecture\n");
+    // Configure kernel launch parameters for one-hot encoding
+    int threads_per_block = 256;
+    int num_blocks = (batch_size + threads_per_block - 1) / threads_per_block;
+    
+    printf("\nStarting training for %d epochs with %d samples...\n", num_epochs, batch_size);
     
     // Training loop
     for (int epoch = 0; epoch < num_epochs; epoch++) {
         // Reset state at the beginning of each epoch
-        CHECK_CUDA(cudaMemset(layer1_ssm->d_state, 0, sample_count * state_dim * sizeof(float)));
-        CHECK_CUDA(cudaMemset(layer2_ssm->d_state, 0, sample_count * state_dim * sizeof(float)));
-        CHECK_CUDA(cudaMemset(layer3_ssm->d_state, 0, sample_count * state_dim * sizeof(float)));
-        CHECK_CUDA(cudaMemset(layer4_ssm->d_state, 0, sample_count * state_dim * sizeof(float)));
+        CHECK_CUDA(cudaMemset(layer1_ssm->d_state, 0, batch_size * state_dim * sizeof(float)));
+        CHECK_CUDA(cudaMemset(layer2_ssm->d_state, 0, batch_size * state_dim * sizeof(float)));
+        CHECK_CUDA(cudaMemset(layer3_ssm->d_state, 0, batch_size * state_dim * sizeof(float)));
+        CHECK_CUDA(cudaMemset(layer4_ssm->d_state, 0, batch_size * state_dim * sizeof(float)));
         
         float epoch_loss = 0.0f;
         
         // Process each timestep
         for (int t = 0; t < seq_length; t++) {
-            // Get current timestep data
-            unsigned char* d_X_t = d_X_bytes + t * sample_count;
-            float* d_y_t = d_y_onehot + t * sample_count * vocab_size;
+            // Get current timestep inputs
+            unsigned char* d_X_t = d_X_time_major + t * batch_size;
+            unsigned char* d_y_t = d_y_time_major + t * batch_size;
+            
+            // Generate one-hot encoding for current timestep targets
+            onehot_encode_timestep<<<num_blocks, threads_per_block>>>(
+                d_y_t, d_y_onehot_t, batch_size, vocab_size);
             
             // Forward pass: embedding layer
-            embeddings_forward(embeddings, d_X_t, d_X_embedded, sample_count);
+            embeddings_forward(embeddings, d_X_t, d_X_embedded, batch_size);
             
             // Forward pass: layer 1 SSM
             forward_pass(layer1_ssm, d_X_embedded);
             
             // Copy layer1 output for layer2 input
             CHECK_CUDA(cudaMemcpy(d_layer1_output, layer1_ssm->d_predictions, 
-                              sample_count * layer1_dim * sizeof(float), 
+                              batch_size * layer1_dim * sizeof(float), 
                               cudaMemcpyDeviceToDevice));
             
             // Forward pass: layer 2 SSM
@@ -306,7 +236,7 @@ int main(int argc, char *argv[]) {
             
             // Copy layer2 output for layer3 input
             CHECK_CUDA(cudaMemcpy(d_layer2_output, layer2_ssm->d_predictions, 
-                              sample_count * layer2_dim * sizeof(float), 
+                              batch_size * layer2_dim * sizeof(float), 
                               cudaMemcpyDeviceToDevice));
             
             // Forward pass: layer 3 SSM
@@ -314,14 +244,14 @@ int main(int argc, char *argv[]) {
             
             // Copy layer3 output for layer4 input
             CHECK_CUDA(cudaMemcpy(d_layer3_output, layer3_ssm->d_predictions, 
-                              sample_count * layer3_dim * sizeof(float), 
+                              batch_size * layer3_dim * sizeof(float), 
                               cudaMemcpyDeviceToDevice));
             
             // Forward pass: layer 4 SSM (output layer)
             forward_pass(layer4_ssm, d_layer3_output);
             
             // Calculate loss
-            float loss = calculate_cross_entropy_loss(layer4_ssm, d_y_t);
+            float loss = calculate_cross_entropy_loss(layer4_ssm, d_y_onehot_t);
             epoch_loss += loss;
             
             // Backward pass: layer 4 SSM (output layer)
@@ -339,23 +269,20 @@ int main(int argc, char *argv[]) {
             
             // Backward pass: embeddings
             zero_embedding_gradients(embeddings);
-            embeddings_backward(embeddings, layer1_ssm->d_error, d_X_t, sample_count);
+            embeddings_backward(embeddings, layer1_ssm->d_error, d_X_t, batch_size);
             
             // Update weights
             update_weights(layer1_ssm, learning_rate);
             update_weights(layer2_ssm, learning_rate);
             update_weights(layer3_ssm, learning_rate);
             update_weights(layer4_ssm, learning_rate);
-            update_embeddings(embeddings, learning_rate, sample_count);
-        }
-        
-        // Calculate average loss
-        float avg_loss = epoch_loss / seq_length;
-        
-        // Print progress every epoch, but always print first and last
-        if (epoch == 0 || epoch == num_epochs - 1 || (epoch + 1) % 1 == 0) {
-            printf("Epoch %d/%d, Average Loss: %.6f\n", 
-                   epoch + 1, num_epochs, avg_loss);
+            update_embeddings(embeddings, learning_rate, batch_size);
+
+            // Print progress
+            if (t == 0 || t == seq_length - 1 || (t + 1) % 10 == 0) {
+                printf("Epoch %d/%d, Step %d/%d, Average Loss: %f\n", epoch + 1, 
+                    num_epochs, t + 1, seq_length, epoch_loss/(t+1));
+            }
         }
     }
     
@@ -385,22 +312,13 @@ int main(int argc, char *argv[]) {
     free_ssm(layer4_ssm);
     free_embeddings(embeddings);
     
-    for (int i = 0; i < sample_count; i++) {
-        free(training_samples[i]);
-    }
-    free(training_samples);
-    free(text_data);
-    free(h_X_time_major);
-    free(h_y_time_major);
-    free(h_y_onehot);
-    
-    cudaFree(d_X_bytes);
+    cudaFree(d_X_time_major);
+    cudaFree(d_y_time_major);
     cudaFree(d_X_embedded);
     cudaFree(d_layer1_output);
     cudaFree(d_layer2_output);
     cudaFree(d_layer3_output);
-    cudaFree(d_layer4_output);
-    cudaFree(d_y_onehot);
+    cudaFree(d_y_onehot_t);
     
     printf("\nTraining completed!\n");
     return 0;

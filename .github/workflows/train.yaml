@@ -6,7 +6,7 @@ on:
       epochs:
         description: 'Number of training epochs'
         required: true
-        default: '1000'
+        default: '10'
         type: string
 
 permissions:
@@ -33,7 +33,7 @@ jobs:
           cd $REPO_NAME
           
           # Set epochs in the SLM code
-          sed -i "s/int num_epochs = 1000;/int num_epochs = $EPOCHS;/" slm.c
+          sed -i "s/int num_epochs = 10;/int num_epochs = $EPOCHS;/" slm.c
           
           # Use the personal access token for authentication
           echo "$USER_PAT" > token.txt

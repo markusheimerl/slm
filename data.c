@@ -11,7 +11,7 @@
 #define MARKER "<|endoftext|>"
 #define MARKER_LEN 13
 #define PROGRESS_BAR_WIDTH 50
-#define MIN_LENGTH 500  // Minimum story length in characters
+#define MIN_LENGTH 1450  // Minimum story length in characters
 
 // Write callback for curl
 size_t write_callback(void *ptr, size_t size, size_t nmemb, FILE *stream) {
@@ -61,11 +61,11 @@ void print_progress_bar(long current, long total, const char* phase) {
     fflush(stdout);
 }
 
-// Function to trim leading/trailing whitespace
+// Function to trim leading/trailing whitespace (including newlines)
 void trim(char *str) {
     if (!str) return;
     
-    // Trim leading space
+    // Trim leading space and newlines
     char *start = str;
     while(isspace((unsigned char)*start)) start++;
     
@@ -75,7 +75,7 @@ void trim(char *str) {
         return;
     }
     
-    // Trim trailing space
+    // Trim trailing space and newlines
     char *end = str + strlen(str) - 1;
     while(end > start && isspace((unsigned char)*end)) end--;
     
@@ -85,6 +85,15 @@ void trim(char *str) {
     // Move if needed
     if (start != str) {
         memmove(str, start, strlen(start) + 1);
+    }
+}
+
+// Function to normalize whitespace in a story - convert all newlines/CR to spaces
+void normalize_whitespace(char *str, size_t length) {
+    for (size_t i = 0; i < length; i++) {
+        if (str[i] == '\n' || str[i] == '\r') {
+            str[i] = ' ';
+        }
     }
 }
 
@@ -192,17 +201,17 @@ int main() {
             // Terminate the story
             story[story_length] = '\0';
             
-            // Process the story
-            for (size_t i = 0; i < story_length; i++) {
-                if (story[i] == '\n' || story[i] == '\r') {
-                    story[i] = ' ';
-                }
-            }
+            // Process the story - first normalize whitespace
+            normalize_whitespace(story, story_length);
             
+            // Then trim all leading/trailing whitespace
             trim(story);
             
-            // Only write if the story is long enough
-            if (story_length >= MIN_LENGTH) {
+            // Get the actual length after trimming
+            size_t trimmed_length = strlen(story);
+            
+            // Only write if the trimmed story is long enough
+            if (trimmed_length >= MIN_LENGTH) {
                 fprintf(output, "%s\n", story);
                 stories_written++;
             } else {
@@ -210,9 +219,6 @@ int main() {
             }
             
             story_count++;
-            if (story_count % 10000 == 0) {
-                print_progress_bar(story_count, 3000000, "Processing");  // Estimate ~3M stories
-            }
             
             // Reset for the next story
             story_length = 0;
@@ -262,17 +268,17 @@ int main() {
     if (story_length > 0) {
         story[story_length] = '\0';
         
-        // Process the story
-        for (size_t i = 0; i < story_length; i++) {
-            if (story[i] == '\n' || story[i] == '\r') {
-                story[i] = ' ';
-            }
-        }
+        // Process the story - first normalize whitespace
+        normalize_whitespace(story, story_length);
         
+        // Then trim all leading/trailing whitespace
         trim(story);
         
-        // Only write if the story is long enough
-        if (story_length >= MIN_LENGTH) {
+        // Get the actual length after trimming
+        size_t trimmed_length = strlen(story);
+        
+        // Only write if the trimmed story is long enough
+        if (trimmed_length >= MIN_LENGTH) {
             fprintf(output, "%s\n", story);
             stories_written++;
         } else {
@@ -281,10 +287,6 @@ int main() {
         
         story_count++;
     }
-    
-    // Print final progress
-    print_progress_bar(story_count, story_count, "Processing");
-    printf("\n");
     
     // Clean up
     free(line);
