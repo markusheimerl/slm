@@ -339,7 +339,7 @@ int main(int argc, char *argv[]) {
             
             // Backward pass: embeddings
             zero_embedding_gradients(embeddings);
-            embeddings_backward(embeddings, layer1_ssm->d_B_grad, d_X_t, sample_count);
+            embeddings_backward(embeddings, layer1_ssm->d_error, d_X_t, sample_count);
             
             // Update weights
             update_weights(layer1_ssm, learning_rate);
@@ -371,12 +371,6 @@ int main(int argc, char *argv[]) {
     sprintf(layer3_fname, "%s_layer3.bin", model_time);
     sprintf(layer4_fname, "%s_layer4.bin", model_time);
     sprintf(embedding_fname, "%s_embeddings.bin", model_time);
-    
-    // For inference, we need batch_size=1
-    layer1_ssm->batch_size = 1;
-    layer2_ssm->batch_size = 1;
-    layer3_ssm->batch_size = 1;
-    layer4_ssm->batch_size = 1;
     
     save_ssm(layer1_ssm, layer1_fname);
     save_ssm(layer2_ssm, layer2_fname);
