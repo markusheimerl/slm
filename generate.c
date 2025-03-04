@@ -125,7 +125,7 @@ int main(int argc, char** argv) {
     printf("Max tokens: %d\n\n", max_tokens);
     
     // Load embeddings and models
-    Embeddings* embeddings = load_embeddings_inference(embedding_filename);
+    Embeddings* embeddings = load_embeddings(embedding_filename);
     SSM* layer1_ssm = load_ssm(layer1_filename);
     SSM* layer2_ssm = load_ssm(layer2_filename);
     SSM* layer3_ssm = load_ssm(layer3_filename);

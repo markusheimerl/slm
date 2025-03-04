@@ -295,50 +295,6 @@ Embeddings* load_embeddings(const char* filename) {
 }
 
 // ---------------------------------------------------------------------
-// Function: Load embeddings for inference only
-// A specialized version that only loads what's needed for inference
-// ---------------------------------------------------------------------
-Embeddings* load_embeddings_inference(const char* filename) {
-    FILE* file = fopen(filename, "rb");
-    if (!file) {
-        printf("Error opening file for reading: %s\n", filename);
-        return NULL;
-    }
-    
-    int vocab_size, embedding_dim;
-    fread(&vocab_size, sizeof(int), 1, file);
-    fread(&embedding_dim, sizeof(int), 1, file);
-    
-    printf("Loading embeddings: vocab_size=%d, embedding_dim=%d\n", 
-           vocab_size, embedding_dim);
-    
-    Embeddings* emb = (Embeddings*)malloc(sizeof(Embeddings));
-    emb->vocab_size = vocab_size;
-    emb->embedding_dim = embedding_dim;
-    
-    // Allocate host memory for embeddings
-    emb->h_embeddings = (float*)malloc(vocab_size * embedding_dim * sizeof(float));
-    
-    // Read embeddings from file to host memory
-    fread(emb->h_embeddings, sizeof(float), vocab_size * embedding_dim, file);
-    
-    // Allocate and copy to device memory
-    CHECK_CUDA(cudaMalloc(&emb->d_embeddings, vocab_size * embedding_dim * sizeof(float)));
-    CHECK_CUDA(cudaMemcpy(emb->d_embeddings, emb->h_embeddings, 
-                         vocab_size * embedding_dim * sizeof(float), 
-                         cudaMemcpyHostToDevice));
-    
-    // Set unused pointers to NULL
-    emb->d_embedding_grads = NULL;
-    emb->d_embedding_m = NULL;
-    emb->d_embedding_v = NULL;
-    
-    fclose(file);
-    printf("Embeddings loaded from %s\n", filename);
-    return emb;
-}
-
-// ---------------------------------------------------------------------
 // CUDA kernel: Softmax for probabilities output
 // ---------------------------------------------------------------------
 __global__ void softmax_kernel(float* logits, int batch_size, int vocab_size) {
