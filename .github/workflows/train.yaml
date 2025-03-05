@@ -8,6 +8,11 @@ on:
         required: true
         default: '10'
         type: string
+      batch_size:
+        description: 'Batch size for training'
+        required: true
+        default: '131072'
+        type: string
 
 permissions:
   contents: write
@@ -32,8 +37,9 @@ jobs:
           git clone --recursive https://github.com/$REPO_OWNER/$REPO_NAME.git
           cd $REPO_NAME
           
-          # Set epochs in the SLM code
+          # Set epochs and batch size in the SLM code
           sed -i "s/int num_epochs = 10;/int num_epochs = $EPOCHS;/" slm.c
+          sed -i "s/int max_samples = 131072;/int max_samples = $BATCH_SIZE;/" slm.c
           
           # Use the personal access token for authentication
           echo "$USER_PAT" > token.txt
@@ -95,6 +101,7 @@ jobs:
           ## Training Configuration
           - Current Epochs: $EPOCHS
           - Total Epochs: $TOTAL_EPOCHS
+          - Batch Size: $BATCH_SIZE
           
           ## Generation Sample Output
           
@@ -114,7 +121,7 @@ jobs:
           ENCODED_SCRIPT=$(base64 -w 0 setup_script.sh)
           
           # Create the command that will be run inside the pod
-          DOCKER_ARGS="bash -c 'echo $ENCODED_SCRIPT | base64 -d > /workspace/setup.sh && chmod +x /workspace/setup.sh && REPO_OWNER=${{ github.repository_owner }} REPO_NAME=${{ github.event.repository.name }} USER_PAT=${{ secrets.USER_PAT }} EPOCHS=${{ inputs.epochs }} /workspace/setup.sh'"
+          DOCKER_ARGS="bash -c 'echo $ENCODED_SCRIPT | base64 -d > /workspace/setup.sh && chmod +x /workspace/setup.sh && REPO_OWNER=${{ github.repository_owner }} REPO_NAME=${{ github.event.repository.name }} USER_PAT=${{ secrets.USER_PAT }} EPOCHS=${{ inputs.epochs }} BATCH_SIZE=${{ inputs.batch_size }} /workspace/setup.sh'"
 
           # Submit the pod creation request to RunPod
           RESPONSE=$(curl --request POST \
