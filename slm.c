@@ -279,7 +279,7 @@ int main(int argc, char *argv[]) {
             update_embeddings(embeddings, learning_rate, batch_size);
 
             // Print progress
-            if (t == 0 || t == seq_length - 1 || (t + 1) % 10 == 0) {
+            if (t == 0 || t == seq_length - 1 || (t + 1) % 500 == 0) {
                 printf("Epoch %d/%d, Step %d/%d, Average Loss: %f\n", epoch + 1, 
                     num_epochs, t + 1, seq_length, epoch_loss/(t+1));
             }
