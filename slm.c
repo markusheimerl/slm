@@ -183,6 +183,43 @@ int main(int argc, char *argv[]) {
         printf("Initialized new models\n");
     }
     
+    // Calculate and print total parameter count
+    long long total_params = 0;
+    
+    // Embedding parameters: vocab_size * embedding_dim
+    long long embedding_params = (long long)vocab_size * embedding_dim;
+    
+    // SSM parameters for each layer
+    long long layer1_params = (long long)state_dim * state_dim +  // A matrix
+                              state_dim * embedding_dim +         // B matrix
+                              layer1_dim * state_dim +            // C matrix
+                              layer1_dim * embedding_dim;         // D matrix
+    
+    long long layer2_params = (long long)state_dim * state_dim +  // A matrix
+                              state_dim * layer1_dim +            // B matrix
+                              layer2_dim * state_dim +            // C matrix
+                              layer2_dim * layer1_dim;            // D matrix
+    
+    long long layer3_params = (long long)state_dim * state_dim +  // A matrix
+                              state_dim * layer2_dim +            // B matrix
+                              layer3_dim * state_dim +            // C matrix
+                              layer3_dim * layer2_dim;            // D matrix
+    
+    long long layer4_params = (long long)state_dim * state_dim +  // A matrix
+                              state_dim * layer3_dim +            // B matrix
+                              vocab_size * state_dim +            // C matrix
+                              vocab_size * layer3_dim;            // D matrix
+    
+    total_params = embedding_params + layer1_params + layer2_params + layer3_params + layer4_params;
+    
+    printf("Model parameter count:\n");
+    printf("  Embeddings:  %lld parameters\n", embedding_params);
+    printf("  Layer 1 SSM: %lld parameters\n", layer1_params);
+    printf("  Layer 2 SSM: %lld parameters\n", layer2_params);
+    printf("  Layer 3 SSM: %lld parameters\n", layer3_params);
+    printf("  Layer 4 SSM: %lld parameters\n", layer4_params);
+    printf("  Total:       %lld parameters (%.2f million)\n", total_params, total_params / 1000000.0);
+
     // Allocate memory for embedded inputs and intermediate outputs
     float* d_X_embedded;
     float* d_layer1_output;
