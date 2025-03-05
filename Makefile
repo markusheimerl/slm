@@ -11,7 +11,7 @@ slm.out: slm.c
 	$(CC) $(CFLAGS) $(CUDAFLAGS) $< $(CUDALIBS) $(LDFLAGS) -o $@
 
 generate.out: generate.c
-	$(CC) $(CFLAGS) $< -lopenblas $(LDFLAGS) -o $@
+	$(CC) $(CFLAGS) $(CUDAFLAGS) $< $(CUDALIBS) $(LDFLAGS) -o $@
 
 data: data.out
 	@time ./data.out
