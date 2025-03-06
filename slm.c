@@ -63,16 +63,20 @@ int main(int argc, char *argv[]) {
     srand(time(NULL) ^ getpid());
     
     // Model parameters
-    int embedding_dim = 8;     // Embedding dimension
-    int layer1_dim = 128;      // Layer 1 dimension
-    int layer2_dim = 128;      // Layer 2 dimension
-    int layer3_dim = 128;      // Layer 3 dimension
-    int layer4_dim = 128;      // Layer 4 dimension
-    int state_dim = 2048;      // State dimension
-    int vocab_size = 256;      // One per possible byte value
-    float learning_rate = 0.00001; // Learning rate
-    int num_epochs = 10;        // Number of training epochs
-    int max_samples = 131072;   // Maximum number of samples to use
+    int embedding_dim = 24;
+    int layer1_dim = 96;
+    int layer2_dim = 160;
+    int layer3_dim = 224;
+    int layer4_dim = 320;
+    int layer5_dim = 320;
+    int layer6_dim = 224;
+    int layer7_dim = 160;
+    int layer8_dim = 320;
+    int state_dim = 896;
+    int vocab_size = 256;
+    float learning_rate = 0.0001;
+    int num_epochs = 10;
+    int max_samples = 131072;
     
     printf("=== SLM Training Configuration ===\n");
     printf("Vocabulary size: %d (byte values)\n", vocab_size);
@@ -81,6 +85,10 @@ int main(int argc, char *argv[]) {
     printf("Layer 2 dimension: %d\n", layer2_dim);
     printf("Layer 3 dimension: %d\n", layer3_dim);
     printf("Layer 4 dimension: %d\n", layer4_dim);
+    printf("Layer 5 dimension: %d\n", layer5_dim);
+    printf("Layer 6 dimension: %d\n", layer6_dim);
+    printf("Layer 7 dimension: %d\n", layer7_dim);
+    printf("Layer 8 dimension: %d\n", layer8_dim);
     printf("State dimension: %d\n", state_dim);
     printf("Learning rate: %.6f\n", learning_rate);
     printf("Training epochs: %d\n", num_epochs);
@@ -156,20 +164,32 @@ int main(int argc, char *argv[]) {
     SSM* layer2_ssm;
     SSM* layer3_ssm;
     SSM* layer4_ssm;
+    SSM* layer5_ssm;
+    SSM* layer6_ssm;
+    SSM* layer7_ssm;
+    SSM* layer8_ssm;
     
-    if (argc == 6) {
+    if (argc == 10) {
         // Load embeddings and models from files
         char* layer1_filename = argv[1];
         char* layer2_filename = argv[2];
         char* layer3_filename = argv[3];
         char* layer4_filename = argv[4];
-        char* embedding_filename = argv[5];
+        char* layer5_filename = argv[5];
+        char* layer6_filename = argv[6];
+        char* layer7_filename = argv[7];
+        char* layer8_filename = argv[8];
+        char* embedding_filename = argv[9];
 
         embeddings = load_embeddings(embedding_filename);
         layer1_ssm = load_ssm(layer1_filename, batch_size);
         layer2_ssm = load_ssm(layer2_filename, batch_size);
         layer3_ssm = load_ssm(layer3_filename, batch_size);
         layer4_ssm = load_ssm(layer4_filename, batch_size);
+        layer5_ssm = load_ssm(layer5_filename, batch_size);
+        layer6_ssm = load_ssm(layer6_filename, batch_size);
+        layer7_ssm = load_ssm(layer7_filename, batch_size);
+        layer8_ssm = load_ssm(layer8_filename, batch_size);
         
         printf("Successfully loaded pretrained models\n");
     } else {
@@ -178,7 +198,11 @@ int main(int argc, char *argv[]) {
         layer1_ssm = init_ssm(embedding_dim, state_dim, layer1_dim, batch_size);
         layer2_ssm = init_ssm(layer1_dim, state_dim, layer2_dim, batch_size);
         layer3_ssm = init_ssm(layer2_dim, state_dim, layer3_dim, batch_size);
-        layer4_ssm = init_ssm(layer3_dim, state_dim, vocab_size, batch_size);
+        layer4_ssm = init_ssm(layer3_dim, state_dim, layer4_dim, batch_size);
+        layer5_ssm = init_ssm(layer4_dim, state_dim, layer5_dim, batch_size);
+        layer6_ssm = init_ssm(layer5_dim, state_dim, layer6_dim, batch_size);
+        layer7_ssm = init_ssm(layer6_dim, state_dim, layer7_dim, batch_size);
+        layer8_ssm = init_ssm(layer7_dim, state_dim, vocab_size, batch_size);
         
         printf("Initialized new models\n");
     }
@@ -207,10 +231,31 @@ int main(int argc, char *argv[]) {
     
     long long layer4_params = (long long)state_dim * state_dim +  // A matrix
                               state_dim * layer3_dim +            // B matrix
-                              vocab_size * state_dim +            // C matrix
-                              vocab_size * layer3_dim;            // D matrix
+                              layer4_dim * state_dim +            // C matrix
+                              layer4_dim * layer3_dim;            // D matrix
     
-    total_params = embedding_params + layer1_params + layer2_params + layer3_params + layer4_params;
+    long long layer5_params = (long long)state_dim * state_dim +  // A matrix
+                              state_dim * layer4_dim +            // B matrix
+                              layer5_dim * state_dim +            // C matrix
+                              layer5_dim * layer4_dim;            // D matrix
+    
+    long long layer6_params = (long long)state_dim * state_dim +  // A matrix
+                              state_dim * layer5_dim +            // B matrix
+                              layer6_dim * state_dim +            // C matrix
+                              layer6_dim * layer5_dim;            // D matrix
+    
+    long long layer7_params = (long long)state_dim * state_dim +  // A matrix
+                              state_dim * layer6_dim +            // B matrix
+                              layer7_dim * state_dim +            // C matrix
+                              layer7_dim * layer6_dim;            // D matrix
+    
+    long long layer8_params = (long long)state_dim * state_dim +  // A matrix
+                              state_dim * layer7_dim +            // B matrix
+                              vocab_size * state_dim +            // C matrix
+                              vocab_size * layer7_dim;            // D matrix
+    
+    total_params = embedding_params + layer1_params + layer2_params + layer3_params + 
+                  layer4_params + layer5_params + layer6_params + layer7_params + layer8_params;
     
     printf("Model parameter count:\n");
     printf("  Embeddings:  %lld parameters\n", embedding_params);
@@ -218,6 +263,10 @@ int main(int argc, char *argv[]) {
     printf("  Layer 2 SSM: %lld parameters\n", layer2_params);
     printf("  Layer 3 SSM: %lld parameters\n", layer3_params);
     printf("  Layer 4 SSM: %lld parameters\n", layer4_params);
+    printf("  Layer 5 SSM: %lld parameters\n", layer5_params);
+    printf("  Layer 6 SSM: %lld parameters\n", layer6_params);
+    printf("  Layer 7 SSM: %lld parameters\n", layer7_params);
+    printf("  Layer 8 SSM: %lld parameters\n", layer8_params);
     printf("  Total:       %lld parameters (%.2f million)\n", total_params, total_params / 1000000.0);
 
     // Allocate memory for embedded inputs and intermediate outputs
@@ -225,11 +274,19 @@ int main(int argc, char *argv[]) {
     float* d_layer1_output;
     float* d_layer2_output;
     float* d_layer3_output;
+    float* d_layer4_output;
+    float* d_layer5_output;
+    float* d_layer6_output;
+    float* d_layer7_output;
 
     CHECK_CUDA(cudaMalloc(&d_X_embedded, batch_size * embedding_dim * sizeof(float)));
     CHECK_CUDA(cudaMalloc(&d_layer1_output, batch_size * layer1_dim * sizeof(float)));
     CHECK_CUDA(cudaMalloc(&d_layer2_output, batch_size * layer2_dim * sizeof(float)));
     CHECK_CUDA(cudaMalloc(&d_layer3_output, batch_size * layer3_dim * sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&d_layer4_output, batch_size * layer4_dim * sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&d_layer5_output, batch_size * layer5_dim * sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&d_layer6_output, batch_size * layer6_dim * sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&d_layer7_output, batch_size * layer7_dim * sizeof(float)));
     
     // Configure kernel launch parameters for one-hot encoding
     int threads_per_block = 256;
@@ -244,6 +301,10 @@ int main(int argc, char *argv[]) {
         CHECK_CUDA(cudaMemset(layer2_ssm->d_state, 0, batch_size * state_dim * sizeof(float)));
         CHECK_CUDA(cudaMemset(layer3_ssm->d_state, 0, batch_size * state_dim * sizeof(float)));
         CHECK_CUDA(cudaMemset(layer4_ssm->d_state, 0, batch_size * state_dim * sizeof(float)));
+        CHECK_CUDA(cudaMemset(layer5_ssm->d_state, 0, batch_size * state_dim * sizeof(float)));
+        CHECK_CUDA(cudaMemset(layer6_ssm->d_state, 0, batch_size * state_dim * sizeof(float)));
+        CHECK_CUDA(cudaMemset(layer7_ssm->d_state, 0, batch_size * state_dim * sizeof(float)));
+        CHECK_CUDA(cudaMemset(layer8_ssm->d_state, 0, batch_size * state_dim * sizeof(float)));
         
         float epoch_loss = 0.0f;
         
@@ -284,16 +345,60 @@ int main(int argc, char *argv[]) {
                               batch_size * layer3_dim * sizeof(float), 
                               cudaMemcpyDeviceToDevice));
             
-            // Forward pass: layer 4 SSM (output layer)
+            // Forward pass: layer 4 SSM
             forward_pass(layer4_ssm, d_layer3_output);
             
+            // Copy layer4 output for layer5 input
+            CHECK_CUDA(cudaMemcpy(d_layer4_output, layer4_ssm->d_predictions, 
+                              batch_size * layer4_dim * sizeof(float), 
+                              cudaMemcpyDeviceToDevice));
+            
+            // Forward pass: layer 5 SSM
+            forward_pass(layer5_ssm, d_layer4_output);
+            
+            // Copy layer5 output for layer6 input
+            CHECK_CUDA(cudaMemcpy(d_layer5_output, layer5_ssm->d_predictions, 
+                              batch_size * layer5_dim * sizeof(float), 
+                              cudaMemcpyDeviceToDevice));
+            
+            // Forward pass: layer 6 SSM
+            forward_pass(layer6_ssm, d_layer5_output);
+            
+            // Copy layer6 output for layer7 input
+            CHECK_CUDA(cudaMemcpy(d_layer6_output, layer6_ssm->d_predictions, 
+                              batch_size * layer6_dim * sizeof(float), 
+                              cudaMemcpyDeviceToDevice));
+            
+            // Forward pass: layer 7 SSM
+            forward_pass(layer7_ssm, d_layer6_output);
+            
+            // Copy layer7 output for layer8 input
+            CHECK_CUDA(cudaMemcpy(d_layer7_output, layer7_ssm->d_predictions, 
+                              batch_size * layer7_dim * sizeof(float), 
+                              cudaMemcpyDeviceToDevice));
+            
+            // Forward pass: layer 8 SSM (output layer)
+            forward_pass(layer8_ssm, d_layer7_output);
+            
             // Calculate loss
-            float loss = calculate_cross_entropy_loss(layer4_ssm, d_y_onehot_t);
+            float loss = calculate_cross_entropy_loss(layer8_ssm, d_y_onehot_t);
             epoch_loss += loss;
             
-            // Backward pass: layer 4 SSM (output layer)
-            zero_gradients(layer4_ssm);
-            backward_pass(layer4_ssm, d_layer3_output);
+            // Backward pass: layer 8 SSM (output layer)
+            zero_gradients(layer8_ssm);
+            backward_pass(layer8_ssm, d_layer7_output);
+            
+            // Backward pass: layer 7 SSM
+            backward_between_models(layer7_ssm, layer8_ssm, d_layer6_output);
+            
+            // Backward pass: layer 6 SSM
+            backward_between_models(layer6_ssm, layer7_ssm, d_layer5_output);
+            
+            // Backward pass: layer 5 SSM
+            backward_between_models(layer5_ssm, layer6_ssm, d_layer4_output);
+            
+            // Backward pass: layer 4 SSM
+            backward_between_models(layer4_ssm, layer5_ssm, d_layer3_output);
             
             // Backward pass: layer 3 SSM
             backward_between_models(layer3_ssm, layer4_ssm, d_layer2_output);
@@ -313,10 +418,14 @@ int main(int argc, char *argv[]) {
             update_weights(layer2_ssm, learning_rate);
             update_weights(layer3_ssm, learning_rate);
             update_weights(layer4_ssm, learning_rate);
-            update_embeddings(embeddings, learning_rate, batch_size);
+            update_weights(layer5_ssm, learning_rate);
+            update_weights(layer6_ssm, learning_rate);
+            update_weights(layer7_ssm, learning_rate);
+            update_weights(layer8_ssm, learning_rate);
+            update_embeddings(embeddings, learning_rate, batch_size);            
 
             // Print progress
-            if (t == 0 || t == seq_length - 1 || (t + 1) % 500 == 0) {
+            if (t == 0 || t == seq_length - 1 || (t + 1) % 20 == 0) {
                 printf("Epoch %d/%d, Step %d/%d, Average Loss: %f\n", epoch + 1, 
                     num_epochs, t + 1, seq_length, epoch_loss/(t+1));
             }
@@ -329,17 +438,28 @@ int main(int argc, char *argv[]) {
     struct tm *timeinfo = localtime(&now);
     strftime(model_time, sizeof(model_time), "%Y%m%d_%H%M%S", timeinfo);
     
-    char layer1_fname[64], layer2_fname[64], layer3_fname[64], layer4_fname[64], embedding_fname[64];
+    char layer1_fname[64], layer2_fname[64], layer3_fname[64], layer4_fname[64];
+    char layer5_fname[64], layer6_fname[64], layer7_fname[64], layer8_fname[64];
+    char embedding_fname[64];
+    
     sprintf(layer1_fname, "%s_layer1.bin", model_time);
     sprintf(layer2_fname, "%s_layer2.bin", model_time);
     sprintf(layer3_fname, "%s_layer3.bin", model_time);
     sprintf(layer4_fname, "%s_layer4.bin", model_time);
+    sprintf(layer5_fname, "%s_layer5.bin", model_time);
+    sprintf(layer6_fname, "%s_layer6.bin", model_time);
+    sprintf(layer7_fname, "%s_layer7.bin", model_time);
+    sprintf(layer8_fname, "%s_layer8.bin", model_time);
     sprintf(embedding_fname, "%s_embeddings.bin", model_time);
     
     save_ssm(layer1_ssm, layer1_fname);
     save_ssm(layer2_ssm, layer2_fname);
     save_ssm(layer3_ssm, layer3_fname);
     save_ssm(layer4_ssm, layer4_fname);
+    save_ssm(layer5_ssm, layer5_fname);
+    save_ssm(layer6_ssm, layer6_fname);
+    save_ssm(layer7_ssm, layer7_fname);
+    save_ssm(layer8_ssm, layer8_fname);
     save_embeddings(embeddings, embedding_fname);
 
     // Clean up
@@ -347,6 +467,10 @@ int main(int argc, char *argv[]) {
     free_ssm(layer2_ssm);
     free_ssm(layer3_ssm);
     free_ssm(layer4_ssm);
+    free_ssm(layer5_ssm);
+    free_ssm(layer6_ssm);
+    free_ssm(layer7_ssm);
+    free_ssm(layer8_ssm);
     free_embeddings(embeddings);
     
     cudaFree(d_X_time_major);
@@ -355,6 +479,10 @@ int main(int argc, char *argv[]) {
     cudaFree(d_layer1_output);
     cudaFree(d_layer2_output);
     cudaFree(d_layer3_output);
+    cudaFree(d_layer4_output);
+    cudaFree(d_layer5_output);
+    cudaFree(d_layer6_output);
+    cudaFree(d_layer7_output);
     cudaFree(d_y_onehot_t);
     
     printf("\nTraining completed!\n");

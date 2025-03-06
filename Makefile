@@ -25,6 +25,10 @@ cont: slm.out
 		$(shell ls -t *_layer2.bin | head -1) \
 		$(shell ls -t *_layer3.bin | head -1) \
 		$(shell ls -t *_layer4.bin | head -1) \
+		$(shell ls -t *_layer5.bin | head -1) \
+		$(shell ls -t *_layer6.bin | head -1) \
+		$(shell ls -t *_layer7.bin | head -1) \
+		$(shell ls -t *_layer8.bin | head -1) \
 		$(shell ls -t *_embeddings.bin | head -1)
 
 gen: generate.out
@@ -33,6 +37,10 @@ gen: generate.out
 		$(shell ls -t *_layer2.bin | head -1) \
 		$(shell ls -t *_layer3.bin | head -1) \
 		$(shell ls -t *_layer4.bin | head -1) \
+		$(shell ls -t *_layer5.bin | head -1) \
+		$(shell ls -t *_layer6.bin | head -1) \
+		$(shell ls -t *_layer7.bin | head -1) \
+		$(shell ls -t *_layer8.bin | head -1) \
 		$(shell ls -t *_embeddings.bin | head -1)
 
 clean:
