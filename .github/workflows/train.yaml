@@ -13,16 +13,6 @@ on:
         required: true
         default: '131072'
         type: string
-      learning_rate:
-        description: 'Learning rate'
-        required: true
-        default: '0.001'
-        type: string
-      grad_accum_steps:
-        description: 'Gradient accumulation steps'
-        required: true
-        default: '8'
-        type: string
 
 permissions:
   contents: write
@@ -47,11 +37,9 @@ jobs:
           git clone --recursive https://github.com/$REPO_OWNER/$REPO_NAME.git
           cd $REPO_NAME
           
-          # Set hyperparameters in the SLM code
+          # Set epochs and batch size in the SLM code
           sed -i "s/int num_epochs = 10;/int num_epochs = $EPOCHS;/" slm.c
           sed -i "s/int max_samples = 131072;/int max_samples = $BATCH_SIZE;/" slm.c
-          sed -i "s/float learning_rate = 0\.001;/float learning_rate = $LEARNING_RATE;/" slm.c
-          sed -i "s/int grad_accum_steps = 8;/int grad_accum_steps = $GRAD_ACCUM_STEPS;/" slm.c
           
           # Use the personal access token for authentication
           echo "$USER_PAT" > token.txt
@@ -106,7 +94,7 @@ jobs:
           MODEL_FILE_PREFIX=$(ls -t *_layer1.bin | head -1 | sed "s/_layer1.bin//")
           tar -czvf ${MODEL_FILE_PREFIX}_weights.tar.gz ${MODEL_FILE_PREFIX}_*.bin
           
-          # Prepare release notes with the generation output and hyperparameters
+          # Prepare release notes with the generation output
           cat > release_notes.md << EOF2
           Automatically trained SLM model weights.
           
@@ -114,8 +102,6 @@ jobs:
           - Current Epochs: $EPOCHS
           - Total Epochs: $TOTAL_EPOCHS
           - Batch Size: $BATCH_SIZE
-          - Learning Rate: $LEARNING_RATE
-          - Gradient Accumulation Steps: $GRAD_ACCUM_STEPS
           
           ## Generation Sample Output
           
@@ -135,7 +121,7 @@ jobs:
           ENCODED_SCRIPT=$(base64 -w 0 setup_script.sh)
           
           # Create the command that will be run inside the pod
-          DOCKER_ARGS="bash -c 'echo $ENCODED_SCRIPT | base64 -d > /workspace/setup.sh && chmod +x /workspace/setup.sh && REPO_OWNER=${{ github.repository_owner }} REPO_NAME=${{ github.event.repository.name }} USER_PAT=${{ secrets.USER_PAT }} EPOCHS=${{ inputs.epochs }} BATCH_SIZE=${{ inputs.batch_size }} LEARNING_RATE=${{ inputs.learning_rate }} GRAD_ACCUM_STEPS=${{ inputs.grad_accum_steps }} /workspace/setup.sh'"
+          DOCKER_ARGS="bash -c 'echo $ENCODED_SCRIPT | base64 -d > /workspace/setup.sh && chmod +x /workspace/setup.sh && REPO_OWNER=${{ github.repository_owner }} REPO_NAME=${{ github.event.repository.name }} USER_PAT=${{ secrets.USER_PAT }} EPOCHS=${{ inputs.epochs }} BATCH_SIZE=${{ inputs.batch_size }} /workspace/setup.sh'"
 
           # Submit the pod creation request to RunPod
           RESPONSE=$(curl --request POST \
@@ -181,8 +167,4 @@ jobs:
           echo "Created pod with ID: $POD_ID"
           echo "pod_id=$POD_ID" >> $GITHUB_OUTPUT
           
-          echo "Pod has been started with the following configuration:"
-          echo "- Epochs: ${{ inputs.epochs }}"
-          echo "- Batch Size: ${{ inputs.batch_size }}"
-          echo "- Learning Rate: ${{ inputs.learning_rate }}"
-          echo "- Gradient Accumulation Steps: ${{ inputs.grad_accum_steps }}"
+          echo "Pod has been started."
