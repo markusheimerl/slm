@@ -58,6 +58,21 @@ void backward_between_models(SSM* first_model, SSM* second_model, float* d_first
     backward_pass(first_model, d_first_model_input);
 }
 
+// ---------------------------------------------------------------------
+// Function: Get learning rate with cosine schedule
+// ---------------------------------------------------------------------
+float get_cosine_lr(float base_lr, int current_step, int total_steps, float min_lr_ratio) {
+    if (current_step >= total_steps) {
+        return base_lr * min_lr_ratio;
+    }
+    
+    float progress = (float)current_step / (float)total_steps;
+    float cosine_decay = 0.5f * (1.0f + cosf(M_PI * progress));
+    float decayed_lr = base_lr * ((1.0f - min_lr_ratio) * cosine_decay + min_lr_ratio);
+    
+    return decayed_lr;
+}
+
 int main(int argc, char *argv[]) {
     // Seed random number generator
     srand(time(NULL) ^ getpid());
@@ -77,6 +92,7 @@ int main(int argc, char *argv[]) {
     float learning_rate = 0.0001;
     int num_epochs = 10;
     int max_samples = 131072;
+    float lr_min_ratio = 0.01f;
     
     printf("=== SLM Training Configuration ===\n");
     printf("Vocabulary size: %d (byte values)\n", vocab_size);
@@ -90,7 +106,9 @@ int main(int argc, char *argv[]) {
     printf("Layer 7 dimension: %d\n", layer7_dim);
     printf("Layer 8 dimension: %d\n", layer8_dim);
     printf("State dimension: %d\n", state_dim);
-    printf("Learning rate: %.6f\n", learning_rate);
+    printf("Base learning rate: %.6f\n", learning_rate);
+    printf("Min learning rate: %.6f\n", learning_rate * lr_min_ratio);
+    printf("Learning rate schedule: Cosine decay\n");
     printf("Training epochs: %d\n", num_epochs);
     printf("Using first %d samples for training\n\n", max_samples);
     
@@ -294,6 +312,10 @@ int main(int argc, char *argv[]) {
     
     printf("\nStarting training for %d epochs with %d samples...\n", num_epochs, batch_size);
     
+    // Calculate total optimization steps for learning rate schedule
+    int total_steps = num_epochs * seq_length;
+    int current_step = 0;
+    
     // Training loop
     for (int epoch = 0; epoch < num_epochs; epoch++) {
         // Reset state at the beginning of each epoch
@@ -310,6 +332,10 @@ int main(int argc, char *argv[]) {
         
         // Process each timestep
         for (int t = 0; t < seq_length; t++) {
+            // Update current step and learning rate
+            current_step = epoch * seq_length + t;
+            float current_lr = get_cosine_lr(learning_rate, current_step, total_steps, lr_min_ratio);
+            
             // Get current timestep inputs
             unsigned char* d_X_t = d_X_time_major + t * batch_size;
             unsigned char* d_y_t = d_y_time_major + t * batch_size;
@@ -413,21 +439,21 @@ int main(int argc, char *argv[]) {
             zero_embedding_gradients(embeddings);
             embeddings_backward(embeddings, layer1_ssm->d_error, d_X_t, batch_size);
             
-            // Update weights
-            update_weights(layer1_ssm, learning_rate);
-            update_weights(layer2_ssm, learning_rate);
-            update_weights(layer3_ssm, learning_rate);
-            update_weights(layer4_ssm, learning_rate);
-            update_weights(layer5_ssm, learning_rate);
-            update_weights(layer6_ssm, learning_rate);
-            update_weights(layer7_ssm, learning_rate);
-            update_weights(layer8_ssm, learning_rate);
-            update_embeddings(embeddings, learning_rate, batch_size);            
+            // Update weights using current learning rate
+            update_weights(layer1_ssm, current_lr);
+            update_weights(layer2_ssm, current_lr);
+            update_weights(layer3_ssm, current_lr);
+            update_weights(layer4_ssm, current_lr);
+            update_weights(layer5_ssm, current_lr);
+            update_weights(layer6_ssm, current_lr);
+            update_weights(layer7_ssm, current_lr);
+            update_weights(layer8_ssm, current_lr);
+            update_embeddings(embeddings, current_lr, batch_size);            
 
             // Print progress
             if (t == 0 || t == seq_length - 1 || (t + 1) % 20 == 0) {
-                printf("Epoch %d/%d, Step %d/%d, Average Loss: %f\n", epoch + 1, 
-                    num_epochs, t + 1, seq_length, epoch_loss/(t+1));
+                printf("Epoch %d/%d, Step %d/%d, LR: %.7f, Average Loss: %f\n", epoch + 1, 
+                    num_epochs, t + 1, seq_length, current_lr, epoch_loss/(t+1));
             }
         }
     }
