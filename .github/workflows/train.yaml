@@ -16,7 +16,7 @@ on:
       learning_rate:
         description: 'Learning rate'
         required: true
-        default: '0.001'
+        default: '0.0001'
         type: string
       grad_accum_steps:
         description: 'Gradient accumulation steps'

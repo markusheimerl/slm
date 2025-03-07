@@ -71,7 +71,7 @@ int main(int argc, char *argv[]) {
     int layer8_dim = 320;
     int state_dim = 896;
     int vocab_size = 256;
-    float learning_rate = 0.001;
+    float learning_rate = 0.0001;
     int num_epochs = 10;
     int max_samples = 131072;
     int grad_accum_steps = 8;
@@ -421,7 +421,7 @@ int main(int argc, char *argv[]) {
                 update_weights(layer7_ssm, learning_rate);
                 update_weights(layer8_ssm, learning_rate);
                 update_embeddings(embeddings, learning_rate, batch_size);
-                
+
                 // Zero gradients after update
                 zero_gradients(layer1_ssm);
                 zero_gradients(layer2_ssm);
