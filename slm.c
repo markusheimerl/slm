@@ -31,9 +31,6 @@ __global__ void onehot_encode_timestep(const unsigned char* input, float* output
 // Function: Propagate gradients between stacked models
 // ---------------------------------------------------------------------
 void backward_between_models(SSM* first_model, SSM* second_model, float* d_first_model_input) {
-    // Zero gradients for first model
-    zero_gradients(first_model);
-    
     const float alpha = 1.0f, beta = 0.0f;
     
     // Compute gradient from state path: d_input_grad = B^T * state_error
@@ -74,9 +71,10 @@ int main(int argc, char *argv[]) {
     int layer8_dim = 320;
     int state_dim = 896;
     int vocab_size = 256;
-    float learning_rate = 0.0001;
+    float learning_rate = 0.001;
     int num_epochs = 10;
     int max_samples = 131072;
+    int grad_accum_steps = 8;
     
     printf("=== SLM Training Configuration ===\n");
     printf("Vocabulary size: %d (byte values)\n", vocab_size);
@@ -92,7 +90,8 @@ int main(int argc, char *argv[]) {
     printf("State dimension: %d\n", state_dim);
     printf("Learning rate: %.6f\n", learning_rate);
     printf("Training epochs: %d\n", num_epochs);
-    printf("Using first %d samples for training\n\n", max_samples);
+    printf("Using first %d samples for training\n", max_samples);
+    printf("Gradient accumulation steps: %d\n\n", grad_accum_steps);
     
     int batch_size = max_samples;
     int seq_length = 1024;
@@ -385,7 +384,6 @@ int main(int argc, char *argv[]) {
             epoch_loss += loss;
             
             // Backward pass: layer 8 SSM (output layer)
-            zero_gradients(layer8_ssm);
             backward_pass(layer8_ssm, d_layer7_output);
             
             // Backward pass: layer 7 SSM
@@ -410,19 +408,31 @@ int main(int argc, char *argv[]) {
             backward_between_models(layer1_ssm, layer2_ssm, d_X_embedded);
             
             // Backward pass: embeddings
-            zero_embedding_gradients(embeddings);
             embeddings_backward(embeddings, layer1_ssm->d_error, d_X_t, batch_size);
             
-            // Update weights
-            update_weights(layer1_ssm, learning_rate);
-            update_weights(layer2_ssm, learning_rate);
-            update_weights(layer3_ssm, learning_rate);
-            update_weights(layer4_ssm, learning_rate);
-            update_weights(layer5_ssm, learning_rate);
-            update_weights(layer6_ssm, learning_rate);
-            update_weights(layer7_ssm, learning_rate);
-            update_weights(layer8_ssm, learning_rate);
-            update_embeddings(embeddings, learning_rate, batch_size);            
+            // Update weights every grad_accum_steps or at the end of sequence
+            if ((t + 1) % grad_accum_steps == 0 || t == seq_length - 1) {
+                update_weights(layer1_ssm, learning_rate);
+                update_weights(layer2_ssm, learning_rate);
+                update_weights(layer3_ssm, learning_rate);
+                update_weights(layer4_ssm, learning_rate);
+                update_weights(layer5_ssm, learning_rate);
+                update_weights(layer6_ssm, learning_rate);
+                update_weights(layer7_ssm, learning_rate);
+                update_weights(layer8_ssm, learning_rate);
+                update_embeddings(embeddings, learning_rate, batch_size);
+                
+                // Zero gradients after update
+                zero_gradients(layer1_ssm);
+                zero_gradients(layer2_ssm);
+                zero_gradients(layer3_ssm);
+                zero_gradients(layer4_ssm);
+                zero_gradients(layer5_ssm);
+                zero_gradients(layer6_ssm);
+                zero_gradients(layer7_ssm);
+                zero_gradients(layer8_ssm);
+                zero_embedding_gradients(embeddings);
+            }
 
             // Print progress
             if (t == 0 || t == seq_length - 1 || (t + 1) % 20 == 0) {
