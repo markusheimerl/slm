@@ -90,9 +90,9 @@ int main(int argc, char *argv[]) {
     int state_dim = 896;
     int vocab_size = 256;
     float learning_rate = 0.0001;
-    int num_epochs = 10;
+    int num_epochs = 100;
     int max_samples = 131072;
-    float lr_min_ratio = 0.01f;
+    float lr_min_ratio = 0.001f;
     
     printf("=== SLM Training Configuration ===\n");
     printf("Vocabulary size: %d (byte values)\n", vocab_size);
