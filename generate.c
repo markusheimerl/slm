@@ -4,7 +4,7 @@
 #include <time.h>
 #include <unistd.h>
 #include <math.h>
-#include "gpu/ssm.h"
+#include "ssm/gpu/ssm.h"
 #include "gpu/embeddings.h"
 
 // ---------------------------------------------------------------------

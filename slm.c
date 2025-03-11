@@ -5,7 +5,7 @@
 #include <unistd.h>
 #include <math.h>
 #include <limits.h>
-#include "gpu/ssm.h"
+#include "ssm/gpu/ssm.h"
 #include "gpu/embeddings.h"
 
 // ---------------------------------------------------------------------
@@ -91,7 +91,7 @@ int main(int argc, char *argv[]) {
     int vocab_size = 256;
     float learning_rate = 0.0001;
     int num_epochs = 100;
-    int max_samples = 98304;
+    int max_samples = 131072;
     float lr_min_ratio = 0.001f;
     
     printf("=== SLM Training Configuration ===\n");
@@ -451,7 +451,7 @@ int main(int argc, char *argv[]) {
             update_embeddings(embeddings, current_lr, batch_size);            
 
             // Print progress
-            if (t == 0 || t == seq_length - 1 || (t + 1) % 1 == 0) {
+            if (t == 0 || t == seq_length - 1 || (t + 1) % 20 == 0) {
                 printf("Epoch %d/%d, Step %d/%d, LR: %.7f, Average Loss: %f\n", epoch + 1, 
                     num_epochs, t + 1, seq_length, current_lr, epoch_loss/(t+1));
             }
