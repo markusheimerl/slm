@@ -11,7 +11,7 @@ on:
       batch_size:
         description: 'Batch size for training'
         required: true
-        default: '98304'
+        default: '131072'
         type: string
       learning_rate:
         description: 'Base learning rate'
