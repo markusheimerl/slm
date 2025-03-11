@@ -32,7 +32,7 @@ __global__ void onehot_encode_timestep(const unsigned char* input, float* output
 // ---------------------------------------------------------------------
 void backward_between_models(SSM* first_model, SSM* second_model, float* d_first_model_input) {
     // Zero gradients for first model
-    zero_gradients(first_model);
+    zero_gradients_ssm(first_model);
     
     const float alpha = 1.0f, beta = 0.0f;
     
@@ -55,7 +55,7 @@ void backward_between_models(SSM* first_model, SSM* second_model, float* d_first
                            first_model->d_error, first_model->output_dim));
     
     // Now do the backward pass for the first model
-    backward_pass(first_model, d_first_model_input);
+    backward_pass_ssm(first_model, d_first_model_input);
 }
 
 // ---------------------------------------------------------------------
@@ -348,7 +348,7 @@ int main(int argc, char *argv[]) {
             embeddings_forward(embeddings, d_X_t, d_X_embedded, batch_size);
             
             // Forward pass: layer 1 SSM
-            forward_pass(layer1_ssm, d_X_embedded);
+            forward_pass_ssm(layer1_ssm, d_X_embedded);
             
             // Copy layer1 output for layer2 input
             CHECK_CUDA(cudaMemcpy(d_layer1_output, layer1_ssm->d_predictions, 
@@ -356,7 +356,7 @@ int main(int argc, char *argv[]) {
                               cudaMemcpyDeviceToDevice));
             
             // Forward pass: layer 2 SSM
-            forward_pass(layer2_ssm, d_layer1_output);
+            forward_pass_ssm(layer2_ssm, d_layer1_output);
             
             // Copy layer2 output for layer3 input
             CHECK_CUDA(cudaMemcpy(d_layer2_output, layer2_ssm->d_predictions, 
@@ -364,7 +364,7 @@ int main(int argc, char *argv[]) {
                               cudaMemcpyDeviceToDevice));
             
             // Forward pass: layer 3 SSM
-            forward_pass(layer3_ssm, d_layer2_output);
+            forward_pass_ssm(layer3_ssm, d_layer2_output);
             
             // Copy layer3 output for layer4 input
             CHECK_CUDA(cudaMemcpy(d_layer3_output, layer3_ssm->d_predictions, 
@@ -372,7 +372,7 @@ int main(int argc, char *argv[]) {
                               cudaMemcpyDeviceToDevice));
             
             // Forward pass: layer 4 SSM
-            forward_pass(layer4_ssm, d_layer3_output);
+            forward_pass_ssm(layer4_ssm, d_layer3_output);
             
             // Copy layer4 output for layer5 input
             CHECK_CUDA(cudaMemcpy(d_layer4_output, layer4_ssm->d_predictions, 
@@ -380,7 +380,7 @@ int main(int argc, char *argv[]) {
                               cudaMemcpyDeviceToDevice));
             
             // Forward pass: layer 5 SSM
-            forward_pass(layer5_ssm, d_layer4_output);
+            forward_pass_ssm(layer5_ssm, d_layer4_output);
             
             // Copy layer5 output for layer6 input
             CHECK_CUDA(cudaMemcpy(d_layer5_output, layer5_ssm->d_predictions, 
@@ -388,7 +388,7 @@ int main(int argc, char *argv[]) {
                               cudaMemcpyDeviceToDevice));
             
             // Forward pass: layer 6 SSM
-            forward_pass(layer6_ssm, d_layer5_output);
+            forward_pass_ssm(layer6_ssm, d_layer5_output);
             
             // Copy layer6 output for layer7 input
             CHECK_CUDA(cudaMemcpy(d_layer6_output, layer6_ssm->d_predictions, 
@@ -396,7 +396,7 @@ int main(int argc, char *argv[]) {
                               cudaMemcpyDeviceToDevice));
             
             // Forward pass: layer 7 SSM
-            forward_pass(layer7_ssm, d_layer6_output);
+            forward_pass_ssm(layer7_ssm, d_layer6_output);
             
             // Copy layer7 output for layer8 input
             CHECK_CUDA(cudaMemcpy(d_layer7_output, layer7_ssm->d_predictions, 
@@ -404,15 +404,15 @@ int main(int argc, char *argv[]) {
                               cudaMemcpyDeviceToDevice));
             
             // Forward pass: layer 8 SSM (output layer)
-            forward_pass(layer8_ssm, d_layer7_output);
+            forward_pass_ssm(layer8_ssm, d_layer7_output);
             
             // Calculate loss
             float loss = calculate_cross_entropy_loss(layer8_ssm, d_y_onehot_t);
             epoch_loss += loss;
             
             // Backward pass: layer 8 SSM (output layer)
-            zero_gradients(layer8_ssm);
-            backward_pass(layer8_ssm, d_layer7_output);
+            zero_gradients_ssm(layer8_ssm);
+            backward_pass_ssm(layer8_ssm, d_layer7_output);
             
             // Backward pass: layer 7 SSM
             backward_between_models(layer7_ssm, layer8_ssm, d_layer6_output);
@@ -440,14 +440,14 @@ int main(int argc, char *argv[]) {
             embeddings_backward(embeddings, layer1_ssm->d_error, d_X_t, batch_size);
             
             // Update weights using current learning rate
-            update_weights(layer1_ssm, current_lr);
-            update_weights(layer2_ssm, current_lr);
-            update_weights(layer3_ssm, current_lr);
-            update_weights(layer4_ssm, current_lr);
-            update_weights(layer5_ssm, current_lr);
-            update_weights(layer6_ssm, current_lr);
-            update_weights(layer7_ssm, current_lr);
-            update_weights(layer8_ssm, current_lr);
+            update_weights_ssm(layer1_ssm, current_lr);
+            update_weights_ssm(layer2_ssm, current_lr);
+            update_weights_ssm(layer3_ssm, current_lr);
+            update_weights_ssm(layer4_ssm, current_lr);
+            update_weights_ssm(layer5_ssm, current_lr);
+            update_weights_ssm(layer6_ssm, current_lr);
+            update_weights_ssm(layer7_ssm, current_lr);
+            update_weights_ssm(layer8_ssm, current_lr);
             update_embeddings(embeddings, current_lr, batch_size);            
 
             // Print progress

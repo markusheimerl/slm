@@ -196,28 +196,28 @@ int main(int argc, char** argv) {
         embeddings_forward(embeddings, d_input_byte, d_input_embedded, 1);
         
         // Forward pass through all layers
-        forward_pass(layer1_ssm, d_input_embedded);
+        forward_pass_ssm(layer1_ssm, d_input_embedded);
         CHECK_CUDA(cudaMemcpy(d_layer1_output, layer1_ssm->d_predictions, layer1_ssm->output_dim * sizeof(float), cudaMemcpyDeviceToDevice));
         
-        forward_pass(layer2_ssm, d_layer1_output);
+        forward_pass_ssm(layer2_ssm, d_layer1_output);
         CHECK_CUDA(cudaMemcpy(d_layer2_output, layer2_ssm->d_predictions, layer2_ssm->output_dim * sizeof(float), cudaMemcpyDeviceToDevice));
         
-        forward_pass(layer3_ssm, d_layer2_output);
+        forward_pass_ssm(layer3_ssm, d_layer2_output);
         CHECK_CUDA(cudaMemcpy(d_layer3_output, layer3_ssm->d_predictions, layer3_ssm->output_dim * sizeof(float), cudaMemcpyDeviceToDevice));
         
-        forward_pass(layer4_ssm, d_layer3_output);
+        forward_pass_ssm(layer4_ssm, d_layer3_output);
         CHECK_CUDA(cudaMemcpy(d_layer4_output, layer4_ssm->d_predictions, layer4_ssm->output_dim * sizeof(float), cudaMemcpyDeviceToDevice));
         
-        forward_pass(layer5_ssm, d_layer4_output);
+        forward_pass_ssm(layer5_ssm, d_layer4_output);
         CHECK_CUDA(cudaMemcpy(d_layer5_output, layer5_ssm->d_predictions, layer5_ssm->output_dim * sizeof(float), cudaMemcpyDeviceToDevice));
         
-        forward_pass(layer6_ssm, d_layer5_output);
+        forward_pass_ssm(layer6_ssm, d_layer5_output);
         CHECK_CUDA(cudaMemcpy(d_layer6_output, layer6_ssm->d_predictions, layer6_ssm->output_dim * sizeof(float), cudaMemcpyDeviceToDevice));
         
-        forward_pass(layer7_ssm, d_layer6_output);
+        forward_pass_ssm(layer7_ssm, d_layer6_output);
         CHECK_CUDA(cudaMemcpy(d_layer7_output, layer7_ssm->d_predictions, layer7_ssm->output_dim * sizeof(float), cudaMemcpyDeviceToDevice));
         
-        forward_pass(layer8_ssm, d_layer7_output);
+        forward_pass_ssm(layer8_ssm, d_layer7_output);
     }
     
     // Generate tokens
@@ -245,28 +245,28 @@ int main(int argc, char** argv) {
         // Forward pass through all layers
         embeddings_forward(embeddings, d_input_byte, d_input_embedded, 1);
         
-        forward_pass(layer1_ssm, d_input_embedded);
+        forward_pass_ssm(layer1_ssm, d_input_embedded);
         CHECK_CUDA(cudaMemcpy(d_layer1_output, layer1_ssm->d_predictions, layer1_ssm->output_dim * sizeof(float), cudaMemcpyDeviceToDevice));
         
-        forward_pass(layer2_ssm, d_layer1_output);
+        forward_pass_ssm(layer2_ssm, d_layer1_output);
         CHECK_CUDA(cudaMemcpy(d_layer2_output, layer2_ssm->d_predictions, layer2_ssm->output_dim * sizeof(float), cudaMemcpyDeviceToDevice));
         
-        forward_pass(layer3_ssm, d_layer2_output);
+        forward_pass_ssm(layer3_ssm, d_layer2_output);
         CHECK_CUDA(cudaMemcpy(d_layer3_output, layer3_ssm->d_predictions, layer3_ssm->output_dim * sizeof(float), cudaMemcpyDeviceToDevice));
         
-        forward_pass(layer4_ssm, d_layer3_output);
+        forward_pass_ssm(layer4_ssm, d_layer3_output);
         CHECK_CUDA(cudaMemcpy(d_layer4_output, layer4_ssm->d_predictions, layer4_ssm->output_dim * sizeof(float), cudaMemcpyDeviceToDevice));
         
-        forward_pass(layer5_ssm, d_layer4_output);
+        forward_pass_ssm(layer5_ssm, d_layer4_output);
         CHECK_CUDA(cudaMemcpy(d_layer5_output, layer5_ssm->d_predictions, layer5_ssm->output_dim * sizeof(float), cudaMemcpyDeviceToDevice));
         
-        forward_pass(layer6_ssm, d_layer5_output);
+        forward_pass_ssm(layer6_ssm, d_layer5_output);
         CHECK_CUDA(cudaMemcpy(d_layer6_output, layer6_ssm->d_predictions, layer6_ssm->output_dim * sizeof(float), cudaMemcpyDeviceToDevice));
         
-        forward_pass(layer7_ssm, d_layer6_output);
+        forward_pass_ssm(layer7_ssm, d_layer6_output);
         CHECK_CUDA(cudaMemcpy(d_layer7_output, layer7_ssm->d_predictions, layer7_ssm->output_dim * sizeof(float), cudaMemcpyDeviceToDevice));
         
-        forward_pass(layer8_ssm, d_layer7_output);
+        forward_pass_ssm(layer8_ssm, d_layer7_output);
     }
     
     printf("\n\n[Generation complete - reached token limit]\n");
