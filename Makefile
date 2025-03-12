@@ -29,6 +29,22 @@ cont: slm.out
 		$(shell ls -t *_layer6.bin | head -1) \
 		$(shell ls -t *_layer7.bin | head -1) \
 		$(shell ls -t *_layer8.bin | head -1) \
+		$(shell ls -t *_layer9.bin | head -1) \
+		$(shell ls -t *_layer10.bin | head -1) \
+		$(shell ls -t *_layer11.bin | head -1) \
+		$(shell ls -t *_layer12.bin | head -1) \
+		$(shell ls -t *_layer13.bin | head -1) \
+		$(shell ls -t *_layer14.bin | head -1) \
+		$(shell ls -t *_layer15.bin | head -1) \
+		$(shell ls -t *_layer16.bin | head -1) \
+		$(shell ls -t *_layer17.bin | head -1) \
+		$(shell ls -t *_layer18.bin | head -1) \
+		$(shell ls -t *_layer19.bin | head -1) \
+		$(shell ls -t *_layer20.bin | head -1) \
+		$(shell ls -t *_layer21.bin | head -1) \
+		$(shell ls -t *_layer22.bin | head -1) \
+		$(shell ls -t *_layer23.bin | head -1) \
+		$(shell ls -t *_layer24.bin | head -1) \
 		$(shell ls -t *_embeddings.bin | head -1)
 
 gen: generate.out
@@ -41,6 +57,22 @@ gen: generate.out
 		$(shell ls -t *_layer6.bin | head -1) \
 		$(shell ls -t *_layer7.bin | head -1) \
 		$(shell ls -t *_layer8.bin | head -1) \
+		$(shell ls -t *_layer9.bin | head -1) \
+		$(shell ls -t *_layer10.bin | head -1) \
+		$(shell ls -t *_layer11.bin | head -1) \
+		$(shell ls -t *_layer12.bin | head -1) \
+		$(shell ls -t *_layer13.bin | head -1) \
+		$(shell ls -t *_layer14.bin | head -1) \
+		$(shell ls -t *_layer15.bin | head -1) \
+		$(shell ls -t *_layer16.bin | head -1) \
+		$(shell ls -t *_layer17.bin | head -1) \
+		$(shell ls -t *_layer18.bin | head -1) \
+		$(shell ls -t *_layer19.bin | head -1) \
+		$(shell ls -t *_layer20.bin | head -1) \
+		$(shell ls -t *_layer21.bin | head -1) \
+		$(shell ls -t *_layer22.bin | head -1) \
+		$(shell ls -t *_layer23.bin | head -1) \
+		$(shell ls -t *_layer24.bin | head -1) \
 		$(shell ls -t *_embeddings.bin | head -1)
 
 clean:

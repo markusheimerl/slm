@@ -90,94 +90,52 @@ int main(int argc, char** argv) {
     // Seed random generator
     srand(time(NULL));
     
-    // Files for stacked models
-    char* layer1_filename = NULL;
-    char* layer2_filename = NULL;
-    char* layer3_filename = NULL;
-    char* layer4_filename = NULL;
-    char* layer5_filename = NULL;
-    char* layer6_filename = NULL;
-    char* layer7_filename = NULL;
-    char* layer8_filename = NULL;
-    char* embedding_filename = NULL;
-    
     // Generation parameters
     float temperature = 0.8f;
     float top_p = 0.9f;
     int max_tokens = 512;
     
     // Parse command line arguments
-    if (argc >= 10) {
-        layer1_filename = argv[1];
-        layer2_filename = argv[2];
-        layer3_filename = argv[3];
-        layer4_filename = argv[4];
-        layer5_filename = argv[5];
-        layer6_filename = argv[6];
-        layer7_filename = argv[7];
-        layer8_filename = argv[8];
-        embedding_filename = argv[9];
-    } else {
-        fprintf(stderr, "Usage: %s <layer1_model> <layer2_model> <layer3_model> <layer4_model> <layer5_model> <layer6_model> <layer7_model> <layer8_model> <embeddings_file>\n", argv[0]);
+    if (argc < 26) {
+        fprintf(stderr, "Usage: %s <layer1_model> <layer2_model> ... <layer24_model> <embeddings_file>\n", argv[0]);
         return EXIT_FAILURE;
     }
     
-    printf("=== SLM Generation with Stacked SSM ===\n");
-    printf("Layer 1 model: %s\n", layer1_filename);
-    printf("Layer 2 model: %s\n", layer2_filename);
-    printf("Layer 3 model: %s\n", layer3_filename);
-    printf("Layer 4 model: %s\n", layer4_filename);
-    printf("Layer 5 model: %s\n", layer5_filename);
-    printf("Layer 6 model: %s\n", layer6_filename);
-    printf("Layer 7 model: %s\n", layer7_filename);
-    printf("Layer 8 model: %s\n", layer8_filename);
-    printf("Embeddings file: %s\n", embedding_filename);
+    printf("=== SLM Generation with 24-Layer SSM ===\n");
+    for (int i = 0; i < 24; i++) {
+        printf("Layer %2d model: %s\n", i+1, argv[i+1]);
+    }
+    printf("Embeddings file: %s\n", argv[25]);
     printf("Temperature: %.2f\n", temperature);
     printf("Top-p: %.2f\n", top_p);
     printf("Max tokens: %d\n\n", max_tokens);
     
     // Load embeddings and models
-    Embeddings* embeddings = load_embeddings(embedding_filename);
-    SSM* layer1_ssm = load_ssm(layer1_filename, 1);
-    SSM* layer2_ssm = load_ssm(layer2_filename, 1);
-    SSM* layer3_ssm = load_ssm(layer3_filename, 1);
-    SSM* layer4_ssm = load_ssm(layer4_filename, 1);
-    SSM* layer5_ssm = load_ssm(layer5_filename, 1);
-    SSM* layer6_ssm = load_ssm(layer6_filename, 1);
-    SSM* layer7_ssm = load_ssm(layer7_filename, 1);
-    SSM* layer8_ssm = load_ssm(layer8_filename, 1);
+    Embeddings* embeddings = load_embeddings(argv[25]);
+    SSM* layers[24];
+    
+    for (int i = 0; i < 24; i++) {
+        layers[i] = load_ssm(argv[i+1], 1);
+    }
     
     // Reset SSM states
-    CHECK_CUDA(cudaMemset(layer1_ssm->d_state, 0, layer1_ssm->batch_size * layer1_ssm->state_dim * sizeof(float)));
-    CHECK_CUDA(cudaMemset(layer2_ssm->d_state, 0, layer2_ssm->batch_size * layer2_ssm->state_dim * sizeof(float)));
-    CHECK_CUDA(cudaMemset(layer3_ssm->d_state, 0, layer3_ssm->batch_size * layer3_ssm->state_dim * sizeof(float)));
-    CHECK_CUDA(cudaMemset(layer4_ssm->d_state, 0, layer4_ssm->batch_size * layer4_ssm->state_dim * sizeof(float)));
-    CHECK_CUDA(cudaMemset(layer5_ssm->d_state, 0, layer5_ssm->batch_size * layer5_ssm->state_dim * sizeof(float)));
-    CHECK_CUDA(cudaMemset(layer6_ssm->d_state, 0, layer6_ssm->batch_size * layer6_ssm->state_dim * sizeof(float)));
-    CHECK_CUDA(cudaMemset(layer7_ssm->d_state, 0, layer7_ssm->batch_size * layer7_ssm->state_dim * sizeof(float)));
-    CHECK_CUDA(cudaMemset(layer8_ssm->d_state, 0, layer8_ssm->batch_size * layer8_ssm->state_dim * sizeof(float)));
+    for (int i = 0; i < 24; i++) {
+        CHECK_CUDA(cudaMemset(layers[i]->d_state, 0, 
+                             layers[i]->batch_size * layers[i]->state_dim * sizeof(float)));
+    }
     
     // Allocate memory for byte inputs and intermediate data
     unsigned char* d_input_byte;
     float* d_input_embedded;
-    float* d_layer1_output;
-    float* d_layer2_output;
-    float* d_layer3_output;
-    float* d_layer4_output;
-    float* d_layer5_output;
-    float* d_layer6_output;
-    float* d_layer7_output;
+    float* d_layer_outputs[24];
     float* h_output_probs = (float*)malloc(embeddings->vocab_size * sizeof(float));
     
     CHECK_CUDA(cudaMalloc(&d_input_byte, sizeof(unsigned char)));
     CHECK_CUDA(cudaMalloc(&d_input_embedded, embeddings->embedding_dim * sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&d_layer1_output, layer1_ssm->output_dim * sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&d_layer2_output, layer2_ssm->output_dim * sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&d_layer3_output, layer3_ssm->output_dim * sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&d_layer4_output, layer4_ssm->output_dim * sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&d_layer5_output, layer5_ssm->output_dim * sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&d_layer6_output, layer6_ssm->output_dim * sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&d_layer7_output, layer7_ssm->output_dim * sizeof(float)));
+    
+    for (int i = 0; i < 24; i++) {
+        CHECK_CUDA(cudaMalloc(&d_layer_outputs[i], layers[i]->output_dim * sizeof(float)));
+    }
     
     // Start with the prompt
     const char* prompt = "Once upon a time";
@@ -196,37 +154,28 @@ int main(int argc, char** argv) {
         embeddings_forward(embeddings, d_input_byte, d_input_embedded, 1);
         
         // Forward pass through all layers
-        forward_pass_ssm(layer1_ssm, d_input_embedded);
-        CHECK_CUDA(cudaMemcpy(d_layer1_output, layer1_ssm->d_predictions, layer1_ssm->output_dim * sizeof(float), cudaMemcpyDeviceToDevice));
+        forward_pass_ssm(layers[0], d_input_embedded);
+        CHECK_CUDA(cudaMemcpy(d_layer_outputs[0], layers[0]->d_predictions, 
+                           layers[0]->output_dim * sizeof(float), 
+                           cudaMemcpyDeviceToDevice));
         
-        forward_pass_ssm(layer2_ssm, d_layer1_output);
-        CHECK_CUDA(cudaMemcpy(d_layer2_output, layer2_ssm->d_predictions, layer2_ssm->output_dim * sizeof(float), cudaMemcpyDeviceToDevice));
-        
-        forward_pass_ssm(layer3_ssm, d_layer2_output);
-        CHECK_CUDA(cudaMemcpy(d_layer3_output, layer3_ssm->d_predictions, layer3_ssm->output_dim * sizeof(float), cudaMemcpyDeviceToDevice));
-        
-        forward_pass_ssm(layer4_ssm, d_layer3_output);
-        CHECK_CUDA(cudaMemcpy(d_layer4_output, layer4_ssm->d_predictions, layer4_ssm->output_dim * sizeof(float), cudaMemcpyDeviceToDevice));
-        
-        forward_pass_ssm(layer5_ssm, d_layer4_output);
-        CHECK_CUDA(cudaMemcpy(d_layer5_output, layer5_ssm->d_predictions, layer5_ssm->output_dim * sizeof(float), cudaMemcpyDeviceToDevice));
-        
-        forward_pass_ssm(layer6_ssm, d_layer5_output);
-        CHECK_CUDA(cudaMemcpy(d_layer6_output, layer6_ssm->d_predictions, layer6_ssm->output_dim * sizeof(float), cudaMemcpyDeviceToDevice));
-        
-        forward_pass_ssm(layer7_ssm, d_layer6_output);
-        CHECK_CUDA(cudaMemcpy(d_layer7_output, layer7_ssm->d_predictions, layer7_ssm->output_dim * sizeof(float), cudaMemcpyDeviceToDevice));
-        
-        forward_pass_ssm(layer8_ssm, d_layer7_output);
+        for (int j = 1; j < 24; j++) {
+            forward_pass_ssm(layers[j], d_layer_outputs[j-1]);
+            if (j < 23) {  // Don't need to copy for the last layer
+                CHECK_CUDA(cudaMemcpy(d_layer_outputs[j], layers[j]->d_predictions, 
+                                   layers[j]->output_dim * sizeof(float), 
+                                   cudaMemcpyDeviceToDevice));
+            }
+        }
     }
     
     // Generate tokens
     for (int i = 0; i < max_tokens; i++) {
         // Apply softmax to get probabilities
-        softmax_kernel<<<1, 1>>>(layer8_ssm->d_predictions, 1, embeddings->vocab_size);
+        softmax_kernel<<<1, 1>>>(layers[23]->d_predictions, 1, embeddings->vocab_size);
         
         // Copy probabilities to host
-        CHECK_CUDA(cudaMemcpy(h_output_probs, layer8_ssm->d_predictions, 
+        CHECK_CUDA(cudaMemcpy(h_output_probs, layers[23]->d_predictions, 
                              embeddings->vocab_size * sizeof(float), 
                              cudaMemcpyDeviceToHost));
         
@@ -245,28 +194,19 @@ int main(int argc, char** argv) {
         // Forward pass through all layers
         embeddings_forward(embeddings, d_input_byte, d_input_embedded, 1);
         
-        forward_pass_ssm(layer1_ssm, d_input_embedded);
-        CHECK_CUDA(cudaMemcpy(d_layer1_output, layer1_ssm->d_predictions, layer1_ssm->output_dim * sizeof(float), cudaMemcpyDeviceToDevice));
+        forward_pass_ssm(layers[0], d_input_embedded);
+        CHECK_CUDA(cudaMemcpy(d_layer_outputs[0], layers[0]->d_predictions, 
+                           layers[0]->output_dim * sizeof(float), 
+                           cudaMemcpyDeviceToDevice));
         
-        forward_pass_ssm(layer2_ssm, d_layer1_output);
-        CHECK_CUDA(cudaMemcpy(d_layer2_output, layer2_ssm->d_predictions, layer2_ssm->output_dim * sizeof(float), cudaMemcpyDeviceToDevice));
-        
-        forward_pass_ssm(layer3_ssm, d_layer2_output);
-        CHECK_CUDA(cudaMemcpy(d_layer3_output, layer3_ssm->d_predictions, layer3_ssm->output_dim * sizeof(float), cudaMemcpyDeviceToDevice));
-        
-        forward_pass_ssm(layer4_ssm, d_layer3_output);
-        CHECK_CUDA(cudaMemcpy(d_layer4_output, layer4_ssm->d_predictions, layer4_ssm->output_dim * sizeof(float), cudaMemcpyDeviceToDevice));
-        
-        forward_pass_ssm(layer5_ssm, d_layer4_output);
-        CHECK_CUDA(cudaMemcpy(d_layer5_output, layer5_ssm->d_predictions, layer5_ssm->output_dim * sizeof(float), cudaMemcpyDeviceToDevice));
-        
-        forward_pass_ssm(layer6_ssm, d_layer5_output);
-        CHECK_CUDA(cudaMemcpy(d_layer6_output, layer6_ssm->d_predictions, layer6_ssm->output_dim * sizeof(float), cudaMemcpyDeviceToDevice));
-        
-        forward_pass_ssm(layer7_ssm, d_layer6_output);
-        CHECK_CUDA(cudaMemcpy(d_layer7_output, layer7_ssm->d_predictions, layer7_ssm->output_dim * sizeof(float), cudaMemcpyDeviceToDevice));
-        
-        forward_pass_ssm(layer8_ssm, d_layer7_output);
+        for (int j = 1; j < 24; j++) {
+            forward_pass_ssm(layers[j], d_layer_outputs[j-1]);
+            if (j < 23) {  // Don't need to copy for the last layer
+                CHECK_CUDA(cudaMemcpy(d_layer_outputs[j], layers[j]->d_predictions, 
+                                   layers[j]->output_dim * sizeof(float), 
+                                   cudaMemcpyDeviceToDevice));
+            }
+        }
     }
     
     printf("\n\n[Generation complete - reached token limit]\n");
@@ -274,23 +214,14 @@ int main(int argc, char** argv) {
     // Clean up
     free(h_output_probs);
     free_embeddings(embeddings);
-    free_ssm(layer1_ssm);
-    free_ssm(layer2_ssm);
-    free_ssm(layer3_ssm);
-    free_ssm(layer4_ssm);
-    free_ssm(layer5_ssm);
-    free_ssm(layer6_ssm);
-    free_ssm(layer7_ssm);
-    free_ssm(layer8_ssm);
+    
+    for (int i = 0; i < 24; i++) {
+        free_ssm(layers[i]);
+        cudaFree(d_layer_outputs[i]);
+    }
+    
     cudaFree(d_input_byte);
     cudaFree(d_input_embedded);
-    cudaFree(d_layer1_output);
-    cudaFree(d_layer2_output);
-    cudaFree(d_layer3_output);
-    cudaFree(d_layer4_output);
-    cudaFree(d_layer5_output);
-    cudaFree(d_layer6_output);
-    cudaFree(d_layer7_output);
     
     return 0;
 }

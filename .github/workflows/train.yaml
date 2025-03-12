@@ -11,7 +11,7 @@ on:
       batch_size:
         description: 'Batch size for training'
         required: true
-        default: '131072'
+        default: '32768'
         type: string
       learning_rate:
         description: 'Base learning rate'
@@ -44,7 +44,7 @@ jobs:
           
           # Set epochs, batch size, and learning rate in the SLM code
           sed -i "s/int num_epochs = 100;/int num_epochs = $EPOCHS;/" slm.c
-          sed -i "s/int max_samples = 131072;/int max_samples = $BATCH_SIZE;/" slm.c
+          sed -i "s/int max_samples = 32768;/int max_samples = $BATCH_SIZE;/" slm.c
           sed -i "s/float learning_rate = 0.0001;/float learning_rate = $LEARNING_RATE;/" slm.c
           
           # Use the personal access token for authentication
