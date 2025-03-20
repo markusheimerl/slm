@@ -5,99 +5,98 @@
 #include <ctype.h>
 #include <unistd.h>
 
-#define DATASET_URL "https://huggingface.co/datasets/roneneldan/TinyStories/resolve/main/TinyStoriesV2-GPT4-train.txt"
-#define TEMP_FILE "tinystories_raw.txt"
-#define OUTPUT_FILE "data.txt"
-#define MARKER "<|endoftext|>"
-#define MARKER_LEN 13
-#define PROGRESS_BAR_WIDTH 50
-#define MIN_LENGTH 1450  // Minimum story length in characters
+/*
+ * Configuration settings
+ */
+typedef struct {
+    const char* dataset_url;
+    const char* temp_file;
+    const char* output_file;
+    const char* marker;
+    int marker_length;
+    int progress_bar_width;
+    int min_story_length;
+} Config;
 
+static const Config config = {
+    .dataset_url = "https://huggingface.co/datasets/roneneldan/TinyStories/resolve/main/TinyStoriesV2-GPT4-train.txt",
+    .temp_file = "tinystories_raw.txt",
+    .output_file = "data.txt",
+    .marker = "<|endoftext|>",
+    .marker_length = 13,
+    .progress_bar_width = 50,
+    .min_story_length = 1450  // Minimum story length in characters
+};
+
+/*
+ * Dynamic text buffer implementation
+ */
 typedef struct {
     char* data;
     size_t length;
     size_t capacity;
 } Buffer;
 
-// Initialize an empty buffer
-Buffer* buffer_init(size_t initial_capacity) {
+Buffer* buffer_create(size_t initial_capacity) {
     Buffer* buffer = malloc(sizeof(Buffer));
+    if (!buffer) return NULL;
+    
     buffer->data = malloc(initial_capacity);
+    if (!buffer->data) {
+        free(buffer);
+        return NULL;
+    }
+    
     buffer->length = 0;
     buffer->capacity = initial_capacity;
     return buffer;
 }
 
-// Ensure buffer has enough space for new data
-void buffer_ensure_capacity(Buffer* buffer, size_t additional) {
-    if (buffer->length + additional > buffer->capacity) {
-        size_t new_capacity = buffer->capacity * 2 + additional;
-        buffer->data = realloc(buffer->data, new_capacity);
+void buffer_append(Buffer* buffer, const char* data, size_t length) {
+    if (buffer->length + length + 1 > buffer->capacity) {
+        size_t new_capacity = buffer->capacity * 2 + length;
+        char* new_data = realloc(buffer->data, new_capacity);
+        if (!new_data) return;
+        
+        buffer->data = new_data;
         buffer->capacity = new_capacity;
     }
-}
-
-// Append data to buffer
-void buffer_append(Buffer* buffer, const char* data, size_t length) {
-    buffer_ensure_capacity(buffer, length);
+    
     memcpy(buffer->data + buffer->length, data, length);
     buffer->length += length;
+    buffer->data[buffer->length] = '\0';
 }
 
-// Free buffer
+void buffer_clear(Buffer* buffer) {
+    buffer->length = 0;
+    if (buffer->capacity > 0) {
+        buffer->data[0] = '\0';
+    }
+}
+
 void buffer_free(Buffer* buffer) {
-    free(buffer->data);
-    free(buffer);
-}
-
-// Write callback for curl
-size_t write_callback(void *ptr, size_t size, size_t nmemb, FILE *stream) {
-    return fwrite(ptr, size, nmemb, stream);
-}
-
-// Progress callback for curl
-int progress_callback(void *clientp, curl_off_t dltotal, curl_off_t dlnow, curl_off_t ultotal, curl_off_t ulnow) {
-    (void)clientp; (void)ultotal; (void)ulnow;
-    
-    if (dltotal <= 0) return 0;
-    
-    double percentage = (double)dlnow / (double)dltotal;
-    int filled_width = (int)(PROGRESS_BAR_WIDTH * percentage);
-    
-    printf("\rDownloading: [");
-    for (int i = 0; i < PROGRESS_BAR_WIDTH; ++i) {
-        printf(i < filled_width ? "=" : " ");
+    if (buffer) {
+        free(buffer->data);
+        free(buffer);
     }
-    printf("] %.1f%% (%.2f/%.2f MB)", 
-           percentage * 100, 
-           (double)dlnow / 1048576, 
-           (double)dltotal / 1048576);
-    
-    fflush(stdout);
-    return 0;
 }
 
-// Print a progress bar
-void print_progress(long current, long total, const char* phase) {
-    double percentage = (double)current / (double)total;
-    percentage = percentage > 1.0 ? 1.0 : percentage;
-    
-    int filled_width = (int)(PROGRESS_BAR_WIDTH * percentage);
-    
-    printf("\r%s: [", phase);
-    for (int i = 0; i < PROGRESS_BAR_WIDTH; ++i) {
-        printf(i < filled_width ? "=" : " ");
+/*
+ * String manipulation utilities
+ */
+void normalize_whitespace(char* str, size_t length) {
+    for (size_t i = 0; i < length; i++) {
+        if (str[i] == '\n' || str[i] == '\r') {
+            str[i] = ' ';
+        }
     }
-    printf("] %.1f%% (%ld/%ld)", percentage * 100, current, total);
-    fflush(stdout);
 }
 
-// Trim leading/trailing whitespace
-void trim(char *str) {
+void trim_whitespace(char* str) {
     if (!str) return;
     
-    // Trim leading space
-    char *start = str;
+    // Trim leading spaces
+    char* start = str;
     while (isspace((unsigned char)*start)) start++;
     
     // All spaces?
@@ -106,8 +105,8 @@ void trim(char *str) {
         return;
     }
     
-    // Trim trailing space
-    char *end = str + strlen(str) - 1;
+    // Trim trailing spaces
+    char* end = str + strlen(str) - 1;
     while (end > start && isspace((unsigned char)*end)) end--;
     *(end + 1) = 0;
     
@@ -117,44 +116,75 @@ void trim(char *str) {
     }
 }
 
-// Normalize whitespace in a story
-void normalize_whitespace(char *str, size_t length) {
-    for (size_t i = 0; i < length; i++) {
-        if (str[i] == '\n' || str[i] == '\r') {
-            str[i] = ' ';
-        }
+/*
+ * Progress display utilities
+ */
+void display_progress_bar(const char* label, double percentage) {
+    percentage = percentage > 1.0 ? 1.0 : percentage;
+    
+    int filled_width = (int)(config.progress_bar_width * percentage);
+    
+    printf("\r%s: [", label);
+    for (int i = 0; i < config.progress_bar_width; i++) {
+        printf(i < filled_width ? "=" : " ");
     }
+    printf("] %.1f%%", percentage * 100);
+    fflush(stdout);
 }
 
-// Download dataset from URL
-int download_dataset() {
-    CURL *curl = curl_easy_init();
+/*
+ * CURL callback functions
+ */
+size_t write_data_callback(void* ptr, size_t size, size_t nmemb, FILE* stream) {
+    return fwrite(ptr, size, nmemb, stream);
+}
+
+int download_progress_callback(void* clientp, curl_off_t dltotal, curl_off_t dlnow, 
+                              curl_off_t ultotal, curl_off_t ulnow) {
+    (void)clientp; (void)ultotal; (void)ulnow;
+    
+    if (dltotal <= 0) return 0;
+    
+    double percentage = (double)dlnow / (double)dltotal;
+    display_progress_bar("Downloading", percentage);
+    
+    printf(" (%.2f/%.2f MB)", 
+           (double)dlnow / 1048576, 
+           (double)dltotal / 1048576);
+    
+    return 0;
+}
+
+/*
+ * Dataset handling functions
+ */
+int download_dataset(void) {
+    CURL* curl = curl_easy_init();
     if (!curl) {
         fprintf(stderr, "Failed to initialize curl\n");
         return 0;
     }
     
-    FILE *fp = fopen(TEMP_FILE, "wb");
-    if (!fp) {
-        fprintf(stderr, "Failed to open file for writing\n");
+    FILE* file = fopen(config.temp_file, "wb");
+    if (!file) {
+        fprintf(stderr, "Failed to open file for writing: %s\n", config.temp_file);
         curl_easy_cleanup(curl);
         return 0;
     }
     
-    curl_easy_setopt(curl, CURLOPT_URL, DATASET_URL);
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_callback);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, fp);
+    curl_easy_setopt(curl, CURLOPT_URL, config.dataset_url);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_data_callback);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, file);
     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
     curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
-    curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, progress_callback);
-    curl_easy_setopt(curl, CURLOPT_XFERINFODATA, NULL);
+    curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, download_progress_callback);
     
-    CURLcode res = curl_easy_perform(curl);
-    fclose(fp);
+    CURLcode result = curl_easy_perform(curl);
+    fclose(file);
     curl_easy_cleanup(curl);
     
-    if (res != CURLE_OK) {
-        fprintf(stderr, "\nDownload failed: %s\n", curl_easy_strerror(res));
+    if (result != CURLE_OK) {
+        fprintf(stderr, "\nDownload failed: %s\n", curl_easy_strerror(result));
         return 0;
     }
     
@@ -162,121 +192,121 @@ int download_dataset() {
     return 1;
 }
 
-// Process dataset and extract stories
-int process_dataset() {
+void process_story(FILE* output_file, Buffer* story, long* stories_written, long* stories_filtered) {
+    if (story->length == 0) return;
+    
+    normalize_whitespace(story->data, story->length);
+    trim_whitespace(story->data);
+    
+    size_t trimmed_length = strlen(story->data);
+    if (trimmed_length >= config.min_story_length) {
+        fprintf(output_file, "%s\n", story->data);
+        (*stories_written)++;
+    } else {
+        (*stories_filtered)++;
+    }
+}
+
+int process_dataset(void) {
     printf("Processing stories...\n");
     
-    FILE *input = fopen(TEMP_FILE, "r");
-    if (!input) {
-        fprintf(stderr, "Failed to open downloaded file\n");
+    FILE* input_file = fopen(config.temp_file, "r");
+    if (!input_file) {
+        fprintf(stderr, "Failed to open downloaded file: %s\n", config.temp_file);
         return 0;
     }
     
-    FILE *output = fopen(OUTPUT_FILE, "w");
-    if (!output) {
-        fprintf(stderr, "Failed to open output file\n");
-        fclose(input);
+    FILE* output_file = fopen(config.output_file, "w");
+    if (!output_file) {
+        fprintf(stderr, "Failed to open output file: %s\n", config.output_file);
+        fclose(input_file);
         return 0;
     }
     
-    Buffer* story = buffer_init(4096);
-    char *line = NULL;
-    size_t line_cap = 0;
-    ssize_t line_len;
+    Buffer* story = buffer_create(4096);
+    if (!story) {
+        fprintf(stderr, "Failed to allocate memory for story buffer\n");
+        fclose(input_file);
+        fclose(output_file);
+        return 0;
+    }
+    
+    char* line = NULL;
+    size_t line_capacity = 0;
+    ssize_t line_length;
     
     long story_count = 0;
     long stories_written = 0;
     long stories_filtered = 0;
     
-    while ((line_len = getline(&line, &line_cap, input)) != -1) {
-        char *marker_pos = strstr(line, MARKER);
+    while ((line_length = getline(&line, &line_capacity, input_file)) != -1) {
+        char* marker_pos = strstr(line, config.marker);
         
         if (marker_pos) {
-            // Process content before marker
+            // Append content before marker to current story
             size_t before_marker = marker_pos - line;
             if (before_marker > 0) {
                 buffer_append(story, line, before_marker);
             }
             
-            // Process current story
-            if (story->length > 0) {
-                story->data[story->length] = '\0';
-                normalize_whitespace(story->data, story->length);
-                trim(story->data);
-                
-                size_t trimmed_length = strlen(story->data);
-                if (trimmed_length >= MIN_LENGTH) {
-                    fprintf(output, "%s\n", story->data);
-                    stories_written++;
-                } else {
-                    stories_filtered++;
-                }
-                
-                story_count++;
-            }
+            // Process the completed story
+            process_story(output_file, story, &stories_written, &stories_filtered);
+            story_count++;
             
             // Reset for next story
-            story->length = 0;
+            buffer_clear(story);
             
-            // Process content after marker
-            char *next_story_start = marker_pos + MARKER_LEN;
-            size_t remaining = line_len - (next_story_start - line);
+            // Process content after marker (start of next story)
+            char* next_story_start = marker_pos + config.marker_length;
+            size_t remaining = line_length - (next_story_start - line);
             
             if (remaining > 0) {
                 buffer_append(story, next_story_start, remaining);
             }
         } else {
             // Append to current story
-            buffer_append(story, line, line_len);
+            buffer_append(story, line, line_length);
         }
     }
     
     // Process final story if present
     if (story->length > 0) {
-        story->data[story->length] = '\0';
-        normalize_whitespace(story->data, story->length);
-        trim(story->data);
-        
-        size_t trimmed_length = strlen(story->data);
-        if (trimmed_length >= MIN_LENGTH) {
-            fprintf(output, "%s\n", story->data);
-            stories_written++;
-        } else {
-            stories_filtered++;
-        }
-        
+        process_story(output_file, story, &stories_written, &stories_filtered);
         story_count++;
     }
     
+    // Clean up resources
     buffer_free(story);
     free(line);
-    fclose(input);
-    fclose(output);
+    fclose(input_file);
+    fclose(output_file);
     
+    // Report results
     printf("\nProcessing complete:\n");
     printf("- Total stories found: %ld\n", story_count);
-    printf("- Stories under %d characters (filtered out): %ld\n", MIN_LENGTH, stories_filtered);
+    printf("- Stories under %d characters (filtered out): %ld\n", 
+           config.min_story_length, stories_filtered);
     printf("- Stories kept: %ld\n", stories_written);
-    printf("- Output written to %s\n", OUTPUT_FILE);
+    printf("- Output written to %s\n", config.output_file);
     
     return 1;
 }
 
-int main() {
+/*
+ * Main program
+ */
+int main(void) {
     curl_global_init(CURL_GLOBAL_ALL);
     
-    printf("Downloading dataset...\n");
-    if (!download_dataset()) {
-        curl_global_cleanup();
-        return 1;
+    printf("Starting dataset download and processing...\n");
+    
+    int success = download_dataset() && process_dataset();
+    
+    // Clean up
+    if (success) {
+        remove(config.temp_file);
     }
     
-    if (!process_dataset()) {
-        curl_global_cleanup();
-        return 1;
-    }
-    
-    remove(TEMP_FILE);
     curl_global_cleanup();
-    return 0;
+    return success ? 0 : 1;
 }
