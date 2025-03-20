@@ -51,4 +51,4 @@ Module.symvers
 Mkfile.old
 dkms.conf
 
-data.txt
+*.txt
