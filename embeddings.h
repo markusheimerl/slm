@@ -390,35 +390,4 @@ __global__ void cross_entropy_loss_kernel(float* loss,
     }
 }
 
-// ---------------------------------------------------------------------
-// Function: Calculate cross-entropy loss
-// ---------------------------------------------------------------------
-float calculate_cross_entropy_loss(SSM* ssm, float* d_y) {
-    // Apply softmax to get probabilities
-    softmax_kernel<<<ssm->batch_size, 1>>>(ssm->d_predictions, 
-                                          ssm->batch_size, 
-                                          ssm->output_dim);
-    
-    // Initialize loss to zero
-    float h_loss = 0.0f;
-    float* d_loss;
-    CHECK_CUDA(cudaMalloc(&d_loss, sizeof(float)));
-    CHECK_CUDA(cudaMemset(d_loss, 0, sizeof(float)));
-    
-    // Compute cross-entropy loss and gradients
-    cross_entropy_loss_kernel<<<ssm->batch_size, 1>>>(d_loss, 
-                                                     ssm->d_error, 
-                                                     ssm->d_predictions, 
-                                                     d_y, 
-                                                     ssm->batch_size, 
-                                                     ssm->output_dim);
-    
-    // Copy loss back to host
-    CHECK_CUDA(cudaMemcpy(&h_loss, d_loss, sizeof(float), cudaMemcpyDeviceToHost));
-    CHECK_CUDA(cudaFree(d_loss));
-    
-    // Return average loss per batch item
-    return h_loss / ssm->batch_size;
-}
-
 #endif // EMBEDDINGS_H
