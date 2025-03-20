@@ -10,34 +10,11 @@ data.out: data.c
 slm.out: slm.c
 	$(CC) $(CFLAGS) $(CUDAFLAGS) $< $(CUDALIBS) $(LDFLAGS) -o $@
 
-generate.out: generate.c
-	$(CC) $(CFLAGS) $(CUDAFLAGS) $< $(CUDALIBS) $(LDFLAGS) -o $@
-
 data: data.out
 	@time ./data.out
 
 run: slm.out
 	@time ./slm.out
-
-cont: slm.out
-	@time ./slm.out \
-		$(shell ls -t *_embeddings.bin | head -1) \
-		$(shell ls -t *_layer1.bin | head -1) \
-		$(shell ls -t *_layer2.bin | head -1) \
-		$(shell ls -t *_layer3.bin | head -1) \
-		$(shell ls -t *_layer4.bin | head -1) \
-		$(shell ls -t *_layer5.bin | head -1) \
-		$(shell ls -t *_layer6.bin | head -1)
-
-gen: generate.out
-	@time ./generate.out \
-		$(shell ls -t *_embeddings.bin | head -1) \
-		$(shell ls -t *_layer1.bin | head -1) \
-		$(shell ls -t *_layer2.bin | head -1) \
-		$(shell ls -t *_layer3.bin | head -1) \
-		$(shell ls -t *_layer4.bin | head -1) \
-		$(shell ls -t *_layer5.bin | head -1) \
-		$(shell ls -t *_layer6.bin | head -1)
 
 clean:
 	rm -f *.out *.bin
