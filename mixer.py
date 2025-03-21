@@ -203,11 +203,6 @@ def generate_text(model, tokenizer, seed_text, max_length=100, device='cpu', tem
     return tokenizer.decode(generated)
 
 def train(model, dataloader, optimizer, tokenizer, device, epochs=5, generate_every=200, seed_texts=None):
-    if seed_texts is None:
-        seed_texts = ["it is a truth universally acknowledged",
-                      "in the beginning",
-                      "once upon a time"]
-    
     model.train()
     start_time = time.time()
     total_batches = 0
