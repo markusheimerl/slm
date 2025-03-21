@@ -11,37 +11,6 @@ import time
 import math
 import random
 
-# Custom implementation of nn.Linear
-class Linear(nn.Module):
-    def __init__(self, in_features, out_features, bias=True):
-        super().__init__()
-        self.weight = nn.Parameter(torch.randn(out_features, in_features) / math.sqrt(in_features))
-        if bias:
-            self.bias = nn.Parameter(torch.zeros(out_features))
-        else:
-            self.register_parameter('bias', None)
-    
-    def forward(self, x):
-        if self.bias is not None:
-            return F.linear(x, self.weight, self.bias)
-        else:
-            return F.linear(x, self.weight)
-
-# Custom implementation of LayerNorm
-class LayerNorm(nn.Module):
-    def __init__(self, normalized_shape, eps=1e-5):
-        super().__init__()
-        self.weight = nn.Parameter(torch.ones(normalized_shape))
-        self.bias = nn.Parameter(torch.zeros(normalized_shape))
-        self.eps = eps
-        
-    def forward(self, x):
-        mean = x.mean(dim=-1, keepdim=True)
-        var = x.var(dim=-1, unbiased=False, keepdim=True)
-        x_norm = (x - mean) / torch.sqrt(var + self.eps)
-        return self.weight * x_norm + self.bias
-
-# Custom implementation of nn.Embedding
 class Embedding(nn.Module):
     def __init__(self, num_embeddings, embedding_dim):
         super().__init__()
@@ -50,7 +19,6 @@ class Embedding(nn.Module):
     def forward(self, x):
         return F.embedding(x, self.weight)
 
-# Download a text from Project Gutenberg
 def download_gutenberg(url, save_path):
     if os.path.exists(save_path):
         with open(save_path, 'r', encoding='utf-8', errors='replace') as f:
@@ -64,7 +32,6 @@ def download_gutenberg(url, save_path):
     
     return text
 
-# Download multiple Gutenberg texts and concatenate them
 def get_combined_corpus():
     if not os.path.exists('gutenberg_texts'):
         os.makedirs('gutenberg_texts')
@@ -97,7 +64,6 @@ def get_combined_corpus():
     
     return combined_text
 
-# Byte-level tokenization
 class ByteTokenizer:
     def __init__(self):
         self.vocab_size = 256
@@ -112,7 +78,6 @@ class ByteTokenizer:
         except:
             return ''.join([chr(min(i, 127)) for i in indices])
 
-# Dataset for sequence modeling
 class TextDataset(Dataset):
     def __init__(self, text, tokenizer, seq_length=64):
         self.tokenizer = tokenizer
@@ -134,87 +99,57 @@ class TextDataset(Dataset):
         start_idx = random.randint(0, len(self.text) - char_length - 1)
         return self.text[start_idx:start_idx + char_length]
 
-# --- NEW: A learnable causal masked linear layer ---
-# This layer is designed so that for an input vector of length L (the sequence length)
-# the iᵗʰ output is computed only from input indices j ≤ i.
-class CausalMaskedLinear(nn.Module):
-    def __init__(self, features, bias=True):
-        super().__init__()
-        self.features = features
-        self.weight = nn.Parameter(torch.randn(features, features) / math.sqrt(features))
-        if bias:
-            self.bias = nn.Parameter(torch.zeros(features))
-        else:
-            self.register_parameter('bias', None)
-        # Create a lower-triangular mask (of shape [features, features])
-        mask = torch.tril(torch.ones(features, features))
-        self.register_buffer('mask', mask)
-    
-    def forward(self, x):
-        masked_weight = self.weight * self.mask
-        return F.linear(x, masked_weight, self.bias)
-
-# --- NEW: Causal Token Mixing MLP using the masked linear layers ---
-# (Note: Here we require the input and output size to be equal to the sequence length.)
 class CausalTokenMixingMLP(nn.Module):
     def __init__(self, seq_length):
         super().__init__()
-        self.fc1 = CausalMaskedLinear(seq_length)
-        self.fc2 = CausalMaskedLinear(seq_length)
+        self.weight1 = nn.Parameter(torch.randn(seq_length, seq_length) / math.sqrt(seq_length))
+        self.weight2 = nn.Parameter(torch.randn(seq_length, seq_length) / math.sqrt(seq_length))
+        mask = torch.tril(torch.ones(seq_length, seq_length))
+        self.register_buffer('mask', mask)
     
     def forward(self, x):
-        # x shape: (batch_size * embed_dim, seq_length)
-        x = self.fc1(x)
-        x = F.gelu(x)
-        x = self.fc2(x)
+        masked_weight1 = self.weight1 * self.mask
+        x = F.linear(x, masked_weight1)
+        x = x * torch.sigmoid(x)
+        masked_weight2 = self.weight2 * self.mask
+        x = F.linear(x, masked_weight2)
         return x
 
-# Channel Mixing MLP (unchanged)
 class ChannelMixingMLP(nn.Module):
     def __init__(self, embed_dim, hidden_dim):
         super().__init__()
-        self.fc1 = Linear(embed_dim, hidden_dim)
-        self.fc2 = Linear(hidden_dim, embed_dim)
+        self.weight1 = nn.Parameter(torch.randn(hidden_dim, embed_dim) / math.sqrt(embed_dim))
+        self.weight2 = nn.Parameter(torch.randn(embed_dim, hidden_dim) / math.sqrt(hidden_dim))
     
     def forward(self, x):
-        x = self.fc1(x)
-        x = F.gelu(x)
-        x = self.fc2(x)
+        x = F.linear(x, self.weight1)
+        x = x * torch.sigmoid(x)
+        x = F.linear(x, self.weight2)
         return x
 
-# Mixer Block with alternating token mixing (now causal) and channel mixing
 class MixerBlock(nn.Module):
     def __init__(self, embed_dim, seq_length, hidden_dim_channel):
         super().__init__()
         self.embed_dim = embed_dim
         self.seq_length = seq_length
         
-        # Token mixing branch with causal masking.
-        # NOTE: For causality we force the token-mixing branch to be of size [seq_length -> seq_length].
-        self.token_norm = LayerNorm(embed_dim)
         self.token_mixing = CausalTokenMixingMLP(seq_length)
-        
-        # Channel mixing branch (applied positionwise)
-        self.channel_norm = LayerNorm(embed_dim)
         self.channel_mixing = ChannelMixingMLP(embed_dim, hidden_dim_channel)
     
     def forward(self, x):
-        # x shape: (batch_size, seq_len, embed_dim)
         batch_size = x.shape[0]
         
         # Token mixing
         residual = x
-        x = self.token_norm(x)
-        x = x.transpose(1, 2)  # (batch_size, embed_dim, seq_len)
+        x = x.transpose(1, 2)
         x_flat = x.reshape(batch_size * self.embed_dim, self.seq_length)
-        x_mixed = self.token_mixing(x_flat)  # causal mixing over tokens
+        x_mixed = self.token_mixing(x_flat)
         x = x_mixed.reshape(batch_size, self.embed_dim, self.seq_length)
-        x = x.transpose(1, 2)  # (batch_size, seq_len, embed_dim)
+        x = x.transpose(1, 2)
         x = x + residual
         
         # Channel mixing
         residual = x
-        x = self.channel_norm(x)
         x_flat = x.reshape(batch_size * self.seq_length, self.embed_dim)
         x_mixed = self.channel_mixing(x_flat)
         x = x_mixed.reshape(batch_size, self.seq_length, self.embed_dim)
@@ -222,35 +157,25 @@ class MixerBlock(nn.Module):
         
         return x
 
-# Complete Mixer Model
 class MixerModel(nn.Module):
     def __init__(self, vocab_size, embed_dim=128, hidden_dim=256, num_layers=4, seq_length=64):
         super().__init__()
         self.embed_dim = embed_dim
         self.seq_length = seq_length
         
-        # Embedding layer
         self.embedding = Embedding(vocab_size, embed_dim)
-        
-        # Mixer blocks. (Note: the token mixing branch now uses causal mixing so no hidden dim for it.)
         self.blocks = nn.ModuleList([
             MixerBlock(embed_dim=embed_dim, seq_length=seq_length, hidden_dim_channel=hidden_dim)
             for _ in range(num_layers)
         ])
-        
-        # Final layer norm and output projection
-        self.ln = LayerNorm(embed_dim)
-        self.out_proj = Linear(embed_dim, vocab_size)
+        self.out_proj_weight = nn.Parameter(torch.randn(vocab_size, embed_dim) / math.sqrt(embed_dim))
     
     def forward(self, x):
-        # x shape: (batch_size, seq_len)
-        x = self.embedding(x)  # (batch_size, seq_len, embed_dim)
+        x = self.embedding(x)
         for block in self.blocks:
             x = block(x)
-        x = self.ln(x)
-        return self.out_proj(x)
+        return F.linear(x, self.out_proj_weight)
 
-# Utility: Count model parameters
 def count_parameters(model):
     total_params = sum(p.numel() for p in model.parameters())
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -258,7 +183,6 @@ def count_parameters(model):
     print(f"Trainable parameters: {trainable_params:,}")
     return total_params
 
-# Text generation function
 def generate_text(model, tokenizer, seed_text, max_length=100, device='cpu', temperature=0.7):
     model.eval()
     tokens = tokenizer.encode(seed_text)[-model.seq_length:]
@@ -278,7 +202,6 @@ def generate_text(model, tokenizer, seed_text, max_length=100, device='cpu', tem
     
     return tokenizer.decode(generated)
 
-# Training routine with periodic text generation every 200 batches only
 def train(model, dataloader, optimizer, tokenizer, device, epochs=5, generate_every=200, seed_texts=None):
     if seed_texts is None:
         seed_texts = ["it is a truth universally acknowledged",
@@ -296,7 +219,7 @@ def train(model, dataloader, optimizer, tokenizer, device, epochs=5, generate_ev
         for batch_idx, (data, target) in enumerate(dataloader):
             data, target = data.to(device), target.to(device)
             optimizer.zero_grad()
-            output = model(data)  # (batch_size, seq_len, vocab_size)
+            output = model(data)
             output = output.view(-1, output.size(-1))
             target = target.view(-1)
             loss = F.cross_entropy(output, target)
@@ -324,7 +247,6 @@ def train(model, dataloader, optimizer, tokenizer, device, epochs=5, generate_ev
         avg_loss = total_loss / epoch_batches
         print(f'Epoch: {epoch+1}, Average Loss: {avg_loss:.4f}')
     
-# Main execution
 def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
@@ -332,9 +254,7 @@ def main():
     text = get_combined_corpus()
     tokenizer = ByteTokenizer()
     
-    # For demonstration we use a much shorter sequence length;
-    # note that our causal token mixing requires the token dimension to be preserved.
-    seq_length = 1024  # (Using 4096 will create huge weight matrices!)
+    seq_length = 1024
     dataset = TextDataset(text, tokenizer, seq_length=seq_length)
     dataloader = DataLoader(dataset, batch_size=64, shuffle=True)
     
