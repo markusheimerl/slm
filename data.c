@@ -5,70 +5,75 @@
 #include <curl/curl.h>
 
 // Structure to store memory for curl callbacks
-struct MemoryStruct {
-    char *memory;
+typedef struct {
+    char *data;
     size_t size;
-};
+} MemoryBuffer;
 
 // Callback function for curl to write received data
 static size_t WriteMemoryCallback(void *contents, size_t size, size_t nmemb, void *userp) {
     size_t realsize = size * nmemb;
-    struct MemoryStruct *mem = (struct MemoryStruct *)userp;
+    MemoryBuffer *mem = (MemoryBuffer *)userp;
     
-    char *ptr = realloc(mem->memory, mem->size + realsize + 1);
+    char *ptr = realloc(mem->data, mem->size + realsize + 1);
     if (!ptr) {
-        printf("Error: Not enough memory\n");
+        fprintf(stderr, "Error: Memory allocation failed\n");
         return 0;
     }
     
-    mem->memory = ptr;
-    memcpy(&(mem->memory[mem->size]), contents, realsize);
+    mem->data = ptr;
+    memcpy(&(mem->data[mem->size]), contents, realsize);
     mem->size += realsize;
-    mem->memory[mem->size] = 0;
+    mem->data[mem->size] = 0;
+    
     return realsize;
+}
+
+// Read file content into a buffer
+char* read_file(const char* path) {
+    FILE *file = fopen(path, "r");
+    if (!file) {
+        fprintf(stderr, "Error: Could not open file %s\n", path);
+        return NULL;
+    }
+    
+    // Get file size
+    fseek(file, 0, SEEK_END);
+    long fileSize = ftell(file);
+    fseek(file, 0, SEEK_SET);
+    
+    // Allocate memory for the file content
+    char *buffer = malloc(fileSize + 1);
+    if (!buffer) {
+        fprintf(stderr, "Error: Memory allocation failed\n");
+        fclose(file);
+        return NULL;
+    }
+    
+    // Read the file content
+    size_t bytesRead = fread(buffer, 1, fileSize, file);
+    buffer[bytesRead] = '\0';
+    fclose(file);
+    
+    return buffer;
 }
 
 // Download text from a URL
 char* download_gutenberg(const char* url, const char* save_path) {
-    FILE *file;
     struct stat file_info;
     
     // Check if file already exists
     if (stat(save_path, &file_info) == 0) {
         printf("File %s already exists, reading from disk...\n", save_path);
-        file = fopen(save_path, "r");
-        if (!file) {
-            printf("Error: Could not open file %s\n", save_path);
-            return NULL;
-        }
-        
-        // Get file size
-        fseek(file, 0, SEEK_END);
-        long fileSize = ftell(file);
-        fseek(file, 0, SEEK_SET);
-        
-        // Allocate memory for the file content
-        char *buffer = malloc(fileSize + 1);
-        if (!buffer) {
-            printf("Error: Memory allocation failed\n");
-            fclose(file);
-            return NULL;
-        }
-        
-        // Read the file content
-        size_t bytesRead = fread(buffer, 1, fileSize, file);
-        buffer[bytesRead] = '\0';
-        fclose(file);
-        
-        return buffer;
+        return read_file(save_path);
     }
 
     // File doesn't exist, download it
     CURL *curl_handle;
     CURLcode res;
-    struct MemoryStruct chunk;
+    MemoryBuffer chunk = {0};
     
-    chunk.memory = malloc(1);
+    chunk.data = malloc(1);
     chunk.size = 0;
     
     curl_global_init(CURL_GLOBAL_ALL);
@@ -76,38 +81,41 @@ char* download_gutenberg(const char* url, const char* save_path) {
     
     printf("Downloading %s...\n", url);
     
-    if (curl_handle) {
-        curl_easy_setopt(curl_handle, CURLOPT_URL, url);
-        curl_easy_setopt(curl_handle, CURLOPT_WRITEFUNCTION, WriteMemoryCallback);
-        curl_easy_setopt(curl_handle, CURLOPT_WRITEDATA, (void *)&chunk);
-        curl_easy_setopt(curl_handle, CURLOPT_USERAGENT, "libcurl-agent/1.0");
-        
-        res = curl_easy_perform(curl_handle);
-        
-        if (res != CURLE_OK) {
-            printf("Error: curl_easy_perform() failed: %s\n", curl_easy_strerror(res));
-            free(chunk.memory);
-            curl_easy_cleanup(curl_handle);
-            curl_global_cleanup();
-            return NULL;
-        }
-        
-        // Save the downloaded text to a file
-        file = fopen(save_path, "w");
-        if (file) {
-            fwrite(chunk.memory, 1, chunk.size, file);
-            fclose(file);
-            printf("File saved to %s\n", save_path);
-        } else {
-            printf("Error: Could not open file %s for writing\n", save_path);
-        }
-        
-        curl_easy_cleanup(curl_handle);
+    if (!curl_handle) {
+        fprintf(stderr, "Error: Failed to initialize curl\n");
+        free(chunk.data);
+        curl_global_cleanup();
+        return NULL;
     }
     
+    curl_easy_setopt(curl_handle, CURLOPT_URL, url);
+    curl_easy_setopt(curl_handle, CURLOPT_WRITEFUNCTION, WriteMemoryCallback);
+    curl_easy_setopt(curl_handle, CURLOPT_WRITEDATA, (void *)&chunk);
+    curl_easy_setopt(curl_handle, CURLOPT_USERAGENT, "libcurl-agent/1.0");
+    
+    res = curl_easy_perform(curl_handle);
+    
+    if (res != CURLE_OK) {
+        fprintf(stderr, "Error: curl_easy_perform() failed: %s\n", curl_easy_strerror(res));
+        free(chunk.data);
+        curl_easy_cleanup(curl_handle);
+        curl_global_cleanup();
+        return NULL;
+    }
+    
+    // Save the downloaded text to a file
+    FILE *file = fopen(save_path, "w");
+    if (file) {
+        fwrite(chunk.data, 1, chunk.size, file);
+        fclose(file);
+    } else {
+        fprintf(stderr, "Error: Could not open file %s for writing\n", save_path);
+    }
+    
+    curl_easy_cleanup(curl_handle);
     curl_global_cleanup();
     
-    return chunk.memory;
+    return chunk.data;
 }
 
 // Get combined corpus from multiple Gutenberg texts
@@ -147,9 +155,9 @@ char* get_combined_corpus() {
     // Allocate memory for combined corpus
     char* combined_text = malloc(total_size + 1);
     if (!combined_text) {
-        printf("Error: Memory allocation failed for combined corpus\n");
+        fprintf(stderr, "Error: Memory allocation failed for combined corpus\n");
         for (int i = 0; i < num_books; i++) {
-            if (texts[i]) free(texts[i]);
+            free(texts[i]);
         }
         free(texts);
         return NULL;
@@ -175,7 +183,7 @@ char* get_combined_corpus() {
         fclose(file);
         printf("Combined corpus saved to gutenberg_texts/combined_corpus.txt\n");
     } else {
-        printf("Error: Could not save combined corpus\n");
+        fprintf(stderr, "Error: Could not save combined corpus\n");
     }
     
     printf("Combined corpus size: %zu characters\n", strlen(combined_text));
@@ -190,50 +198,21 @@ char* load_data(const char* filepath) {
     // Check if combined corpus already exists
     if (stat(filepath, &file_info) == 0) {
         printf("Combined corpus already exists, loading from %s\n", filepath);
-        FILE* file = fopen(filepath, "r");
-        if (!file) {
-            printf("Error: Could not open %s\n", filepath);
-            return NULL;
-        }
-        
-        // Get file size
-        fseek(file, 0, SEEK_END);
-        long fileSize = ftell(file);
-        fseek(file, 0, SEEK_SET);
-        
-        // Allocate memory for the file content
-        char* buffer = malloc(fileSize + 1);
-        if (!buffer) {
-            printf("Error: Memory allocation failed\n");
-            fclose(file);
-            return NULL;
-        }
-        
-        // Read the file content
-        size_t bytesRead = fread(buffer, 1, fileSize, file);
-        buffer[bytesRead] = '\0';
-        fclose(file);
-        
-        printf("Loaded %zu bytes from %s\n", bytesRead, filepath);
-        return buffer;
+        return read_file(filepath);
     } else {
         // File doesn't exist, download the corpus
         return get_combined_corpus();
     }
 }
 
-// Entry point for data loading (to be called from other files)
-char* prepare_training_data() {
-    return load_data("gutenberg_texts/combined_corpus.txt");
-}
-
 int main() {
-    char* corpus = prepare_training_data();
+    char* corpus = load_data("gutenberg_texts/combined_corpus.txt");
     if (corpus) {
         printf("Successfully loaded/downloaded corpus of %zu bytes\n", strlen(corpus));
         free(corpus);
+        return 0;
     } else {
-        printf("Failed to load/download corpus\n");
+        fprintf(stderr, "Failed to load/download corpus\n");
+        return 1;
     }
-    return 0;
 }
