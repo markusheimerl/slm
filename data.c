@@ -1,312 +1,239 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <curl/curl.h>
-#include <ctype.h>
-#include <unistd.h>
 
-/*
- * Configuration settings
- */
-typedef struct {
-    const char* dataset_url;
-    const char* temp_file;
-    const char* output_file;
-    const char* marker;
-    int marker_length;
-    int progress_bar_width;
-    int min_story_length;
-} Config;
-
-static const Config config = {
-    .dataset_url = "https://huggingface.co/datasets/roneneldan/TinyStories/resolve/main/TinyStoriesV2-GPT4-train.txt",
-    .temp_file = "tinystories_raw.txt",
-    .output_file = "data.txt",
-    .marker = "<|endoftext|>",
-    .marker_length = 13,
-    .progress_bar_width = 50,
-    .min_story_length = 1450  // Minimum story length in characters
+// Structure to store memory for curl callbacks
+struct MemoryStruct {
+    char *memory;
+    size_t size;
 };
 
-/*
- * Dynamic text buffer implementation
- */
-typedef struct {
-    char* data;
-    size_t length;
-    size_t capacity;
-} Buffer;
-
-Buffer* buffer_create(size_t initial_capacity) {
-    Buffer* buffer = malloc(sizeof(Buffer));
-    if (!buffer) return NULL;
+// Callback function for curl to write received data
+static size_t WriteMemoryCallback(void *contents, size_t size, size_t nmemb, void *userp) {
+    size_t realsize = size * nmemb;
+    struct MemoryStruct *mem = (struct MemoryStruct *)userp;
     
-    buffer->data = malloc(initial_capacity);
-    if (!buffer->data) {
-        free(buffer);
-        return NULL;
+    char *ptr = realloc(mem->memory, mem->size + realsize + 1);
+    if (!ptr) {
+        printf("Error: Not enough memory\n");
+        return 0;
     }
     
-    buffer->length = 0;
-    buffer->capacity = initial_capacity;
-    return buffer;
+    mem->memory = ptr;
+    memcpy(&(mem->memory[mem->size]), contents, realsize);
+    mem->size += realsize;
+    mem->memory[mem->size] = 0;
+    return realsize;
 }
 
-void buffer_append(Buffer* buffer, const char* data, size_t length) {
-    if (buffer->length + length + 1 > buffer->capacity) {
-        size_t new_capacity = buffer->capacity * 2 + length;
-        char* new_data = realloc(buffer->data, new_capacity);
-        if (!new_data) return;
-        
-        buffer->data = new_data;
-        buffer->capacity = new_capacity;
-    }
+// Download text from a URL
+char* download_gutenberg(const char* url, const char* save_path) {
+    FILE *file;
+    struct stat file_info;
     
-    memcpy(buffer->data + buffer->length, data, length);
-    buffer->length += length;
-    buffer->data[buffer->length] = '\0';
-}
-
-void buffer_clear(Buffer* buffer) {
-    buffer->length = 0;
-    if (buffer->capacity > 0) {
-        buffer->data[0] = '\0';
-    }
-}
-
-void buffer_free(Buffer* buffer) {
-    if (buffer) {
-        free(buffer->data);
-        free(buffer);
-    }
-}
-
-/*
- * String manipulation utilities
- */
-void normalize_whitespace(char* str, size_t length) {
-    for (size_t i = 0; i < length; i++) {
-        if (str[i] == '\n' || str[i] == '\r') {
-            str[i] = ' ';
+    // Check if file already exists
+    if (stat(save_path, &file_info) == 0) {
+        printf("File %s already exists, reading from disk...\n", save_path);
+        file = fopen(save_path, "r");
+        if (!file) {
+            printf("Error: Could not open file %s\n", save_path);
+            return NULL;
         }
-    }
-}
-
-void trim_whitespace(char* str) {
-    if (!str) return;
-    
-    // Trim leading spaces
-    char* start = str;
-    while (isspace((unsigned char)*start)) start++;
-    
-    // All spaces?
-    if (*start == 0) {
-        *str = 0;
-        return;
-    }
-    
-    // Trim trailing spaces
-    char* end = str + strlen(str) - 1;
-    while (end > start && isspace((unsigned char)*end)) end--;
-    *(end + 1) = 0;
-    
-    // Move if needed
-    if (start != str) {
-        memmove(str, start, strlen(start) + 1);
-    }
-}
-
-/*
- * Progress display utilities
- */
-void display_progress_bar(const char* label, double percentage) {
-    percentage = percentage > 1.0 ? 1.0 : percentage;
-    
-    int filled_width = (int)(config.progress_bar_width * percentage);
-    
-    printf("\r%s: [", label);
-    for (int i = 0; i < config.progress_bar_width; i++) {
-        printf(i < filled_width ? "=" : " ");
-    }
-    printf("] %.1f%%", percentage * 100);
-    fflush(stdout);
-}
-
-/*
- * CURL callback functions
- */
-size_t write_data_callback(void* ptr, size_t size, size_t nmemb, FILE* stream) {
-    return fwrite(ptr, size, nmemb, stream);
-}
-
-int download_progress_callback(void* clientp, curl_off_t dltotal, curl_off_t dlnow, 
-                              curl_off_t ultotal, curl_off_t ulnow) {
-    (void)clientp; (void)ultotal; (void)ulnow;
-    
-    if (dltotal <= 0) return 0;
-    
-    double percentage = (double)dlnow / (double)dltotal;
-    display_progress_bar("Downloading", percentage);
-    
-    printf(" (%.2f/%.2f MB)", 
-           (double)dlnow / 1048576, 
-           (double)dltotal / 1048576);
-    
-    return 0;
-}
-
-/*
- * Dataset handling functions
- */
-int download_dataset(void) {
-    CURL* curl = curl_easy_init();
-    if (!curl) {
-        fprintf(stderr, "Failed to initialize curl\n");
-        return 0;
-    }
-    
-    FILE* file = fopen(config.temp_file, "wb");
-    if (!file) {
-        fprintf(stderr, "Failed to open file for writing: %s\n", config.temp_file);
-        curl_easy_cleanup(curl);
-        return 0;
-    }
-    
-    curl_easy_setopt(curl, CURLOPT_URL, config.dataset_url);
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_data_callback);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, file);
-    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
-    curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
-    curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, download_progress_callback);
-    
-    CURLcode result = curl_easy_perform(curl);
-    fclose(file);
-    curl_easy_cleanup(curl);
-    
-    if (result != CURLE_OK) {
-        fprintf(stderr, "\nDownload failed: %s\n", curl_easy_strerror(result));
-        return 0;
-    }
-    
-    printf("\nDownload complete.\n");
-    return 1;
-}
-
-void process_story(FILE* output_file, Buffer* story, long* stories_written, long* stories_filtered) {
-    if (story->length == 0) return;
-    
-    normalize_whitespace(story->data, story->length);
-    trim_whitespace(story->data);
-    
-    size_t trimmed_length = strlen(story->data);
-    if (trimmed_length >= config.min_story_length) {
-        fprintf(output_file, "%s\n", story->data);
-        (*stories_written)++;
-    } else {
-        (*stories_filtered)++;
-    }
-}
-
-int process_dataset(void) {
-    printf("Processing stories...\n");
-    
-    FILE* input_file = fopen(config.temp_file, "r");
-    if (!input_file) {
-        fprintf(stderr, "Failed to open downloaded file: %s\n", config.temp_file);
-        return 0;
-    }
-    
-    FILE* output_file = fopen(config.output_file, "w");
-    if (!output_file) {
-        fprintf(stderr, "Failed to open output file: %s\n", config.output_file);
-        fclose(input_file);
-        return 0;
-    }
-    
-    Buffer* story = buffer_create(4096);
-    if (!story) {
-        fprintf(stderr, "Failed to allocate memory for story buffer\n");
-        fclose(input_file);
-        fclose(output_file);
-        return 0;
-    }
-    
-    char* line = NULL;
-    size_t line_capacity = 0;
-    ssize_t line_length;
-    
-    long story_count = 0;
-    long stories_written = 0;
-    long stories_filtered = 0;
-    
-    while ((line_length = getline(&line, &line_capacity, input_file)) != -1) {
-        char* marker_pos = strstr(line, config.marker);
         
-        if (marker_pos) {
-            // Append content before marker to current story
-            size_t before_marker = marker_pos - line;
-            if (before_marker > 0) {
-                buffer_append(story, line, before_marker);
-            }
-            
-            // Process the completed story
-            process_story(output_file, story, &stories_written, &stories_filtered);
-            story_count++;
-            
-            // Reset for next story
-            buffer_clear(story);
-            
-            // Process content after marker (start of next story)
-            char* next_story_start = marker_pos + config.marker_length;
-            size_t remaining = line_length - (next_story_start - line);
-            
-            if (remaining > 0) {
-                buffer_append(story, next_story_start, remaining);
-            }
-        } else {
-            // Append to current story
-            buffer_append(story, line, line_length);
+        // Get file size
+        fseek(file, 0, SEEK_END);
+        long fileSize = ftell(file);
+        fseek(file, 0, SEEK_SET);
+        
+        // Allocate memory for the file content
+        char *buffer = malloc(fileSize + 1);
+        if (!buffer) {
+            printf("Error: Memory allocation failed\n");
+            fclose(file);
+            return NULL;
         }
+        
+        // Read the file content
+        size_t bytesRead = fread(buffer, 1, fileSize, file);
+        buffer[bytesRead] = '\0';
+        fclose(file);
+        
+        return buffer;
     }
-    
-    // Process final story if present
-    if (story->length > 0) {
-        process_story(output_file, story, &stories_written, &stories_filtered);
-        story_count++;
-    }
-    
-    // Clean up resources
-    buffer_free(story);
-    free(line);
-    fclose(input_file);
-    fclose(output_file);
-    
-    // Report results
-    printf("\nProcessing complete:\n");
-    printf("- Total stories found: %ld\n", story_count);
-    printf("- Stories under %d characters (filtered out): %ld\n", 
-           config.min_story_length, stories_filtered);
-    printf("- Stories kept: %ld\n", stories_written);
-    printf("- Output written to %s\n", config.output_file);
-    
-    return 1;
-}
 
-/*
- * Main program
- */
-int main(void) {
+    // File doesn't exist, download it
+    CURL *curl_handle;
+    CURLcode res;
+    struct MemoryStruct chunk;
+    
+    chunk.memory = malloc(1);
+    chunk.size = 0;
+    
     curl_global_init(CURL_GLOBAL_ALL);
+    curl_handle = curl_easy_init();
     
-    printf("Starting dataset download and processing...\n");
+    printf("Downloading %s...\n", url);
     
-    int success = download_dataset() && process_dataset();
-    
-    // Clean up
-    if (success) {
-        remove(config.temp_file);
+    if (curl_handle) {
+        curl_easy_setopt(curl_handle, CURLOPT_URL, url);
+        curl_easy_setopt(curl_handle, CURLOPT_WRITEFUNCTION, WriteMemoryCallback);
+        curl_easy_setopt(curl_handle, CURLOPT_WRITEDATA, (void *)&chunk);
+        curl_easy_setopt(curl_handle, CURLOPT_USERAGENT, "libcurl-agent/1.0");
+        
+        res = curl_easy_perform(curl_handle);
+        
+        if (res != CURLE_OK) {
+            printf("Error: curl_easy_perform() failed: %s\n", curl_easy_strerror(res));
+            free(chunk.memory);
+            curl_easy_cleanup(curl_handle);
+            curl_global_cleanup();
+            return NULL;
+        }
+        
+        // Save the downloaded text to a file
+        file = fopen(save_path, "w");
+        if (file) {
+            fwrite(chunk.memory, 1, chunk.size, file);
+            fclose(file);
+            printf("File saved to %s\n", save_path);
+        } else {
+            printf("Error: Could not open file %s for writing\n", save_path);
+        }
+        
+        curl_easy_cleanup(curl_handle);
     }
     
     curl_global_cleanup();
-    return success ? 0 : 1;
+    
+    return chunk.memory;
+}
+
+// Get combined corpus from multiple Gutenberg texts
+char* get_combined_corpus() {
+    // Create directory for Gutenberg texts if it doesn't exist
+    mkdir("gutenberg_texts", 0755);
+    
+    // Define the books to download
+    const char* books[][2] = {
+        {"https://www.gutenberg.org/files/1342/1342-0.txt", "gutenberg_texts/pride_and_prejudice.txt"},
+        {"https://www.gutenberg.org/files/84/84-0.txt", "gutenberg_texts/frankenstein.txt"},
+        {"https://www.gutenberg.org/files/1661/1661-0.txt", "gutenberg_texts/sherlock_holmes.txt"},
+        {"https://www.gutenberg.org/files/2701/2701-0.txt", "gutenberg_texts/moby_dick.txt"},
+        {"https://www.gutenberg.org/files/98/98-0.txt", "gutenberg_texts/tale_of_two_cities.txt"},
+        {"https://www.gutenberg.org/files/1400/1400-0.txt", "gutenberg_texts/great_expectations.txt"},
+        {"https://www.gutenberg.org/files/345/345-0.txt", "gutenberg_texts/dracula.txt"},
+        {"https://www.gutenberg.org/files/174/174-0.txt", "gutenberg_texts/dorian_gray.txt"},
+        {"https://www.gutenberg.org/files/16/16-0.txt", "gutenberg_texts/peter_pan.txt"},
+        {"https://www.gutenberg.org/files/768/768-0.txt", "gutenberg_texts/wuthering_heights.txt"},
+        {"https://www.gutenberg.org/files/45/45-0.txt", "gutenberg_texts/anne_of_green_gables.txt"},
+        {"https://www.gutenberg.org/files/1260/1260-0.txt", "gutenberg_texts/jane_eyre.txt"}
+    };
+    
+    int num_books = sizeof(books) / sizeof(books[0]);
+    char** texts = malloc(num_books * sizeof(char*));
+    size_t total_size = 0;
+    
+    // Download each book and calculate total size
+    for (int i = 0; i < num_books; i++) {
+        printf("Processing %s...\n", books[i][1]);
+        texts[i] = download_gutenberg(books[i][0], books[i][1]);
+        if (texts[i]) {
+            total_size += strlen(texts[i]) + 2; // +2 for the newlines
+        }
+    }
+    
+    // Allocate memory for combined corpus
+    char* combined_text = malloc(total_size + 1);
+    if (!combined_text) {
+        printf("Error: Memory allocation failed for combined corpus\n");
+        for (int i = 0; i < num_books; i++) {
+            if (texts[i]) free(texts[i]);
+        }
+        free(texts);
+        return NULL;
+    }
+    
+    combined_text[0] = '\0';
+    
+    // Combine all texts
+    for (int i = 0; i < num_books; i++) {
+        if (texts[i]) {
+            strcat(combined_text, texts[i]);
+            strcat(combined_text, "\n\n");
+            free(texts[i]);
+        }
+    }
+    
+    free(texts);
+    
+    // Save combined corpus
+    FILE* file = fopen("gutenberg_texts/combined_corpus.txt", "w");
+    if (file) {
+        fprintf(file, "%s", combined_text);
+        fclose(file);
+        printf("Combined corpus saved to gutenberg_texts/combined_corpus.txt\n");
+    } else {
+        printf("Error: Could not save combined corpus\n");
+    }
+    
+    printf("Combined corpus size: %zu characters\n", strlen(combined_text));
+    
+    return combined_text;
+}
+
+// Function to load data from file or download if it doesn't exist
+char* load_data(const char* filepath) {
+    struct stat file_info;
+    
+    // Check if combined corpus already exists
+    if (stat(filepath, &file_info) == 0) {
+        printf("Combined corpus already exists, loading from %s\n", filepath);
+        FILE* file = fopen(filepath, "r");
+        if (!file) {
+            printf("Error: Could not open %s\n", filepath);
+            return NULL;
+        }
+        
+        // Get file size
+        fseek(file, 0, SEEK_END);
+        long fileSize = ftell(file);
+        fseek(file, 0, SEEK_SET);
+        
+        // Allocate memory for the file content
+        char* buffer = malloc(fileSize + 1);
+        if (!buffer) {
+            printf("Error: Memory allocation failed\n");
+            fclose(file);
+            return NULL;
+        }
+        
+        // Read the file content
+        size_t bytesRead = fread(buffer, 1, fileSize, file);
+        buffer[bytesRead] = '\0';
+        fclose(file);
+        
+        printf("Loaded %zu bytes from %s\n", bytesRead, filepath);
+        return buffer;
+    } else {
+        // File doesn't exist, download the corpus
+        return get_combined_corpus();
+    }
+}
+
+// Entry point for data loading (to be called from other files)
+char* prepare_training_data() {
+    return load_data("gutenberg_texts/combined_corpus.txt");
+}
+
+int main() {
+    char* corpus = prepare_training_data();
+    if (corpus) {
+        printf("Successfully loaded/downloaded corpus of %zu bytes\n", strlen(corpus));
+        free(corpus);
+    } else {
+        printf("Failed to load/download corpus\n");
+    }
+    return 0;
 }
