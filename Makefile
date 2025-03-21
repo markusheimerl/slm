@@ -8,7 +8,7 @@ data.out: data.c
 	$(CC) $(CFLAGS) $< -lcurl $(LDFLAGS) -o $@
 
 slm.out: slm.c
-	$(CC) $(CFLAGS) $(CUDAFLAGS) $< $(CUDALIBS) $(LDFLAGS) -o $@
+	$(CC) $(CFLAGS) $< -lopenblas -lcurl $(LDFLAGS) -o $@
 
 data: data.out
 	@time ./data.out
