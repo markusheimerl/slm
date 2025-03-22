@@ -292,7 +292,7 @@ void apply_embedding(MixerModel* model, int* input_tokens) {
            model->batch_size * model->seq_length * model->embed_dim * sizeof(float));
 }
 
-// Forward pass through a MixerBlock - FIXED VERSION
+// Forward pass through a MixerBlock with optimized CBLAS for channel mixing
 void mixer_block_forward(MixerBlock* block, float* input, float* output, int batch_size) {
     // Store input for backward pass
     memcpy(block->input_buffer, input, batch_size * block->seq_length * block->embed_dim * sizeof(float));
@@ -362,19 +362,27 @@ void mixer_block_forward(MixerBlock* block, float* input, float* output, int bat
     // Save output as residual for channel mixing
     memcpy(block->residual, output, batch_size * block->seq_length * block->embed_dim * sizeof(float));
     
-    // Channel mixing - using manual matrix multiplication
-    for (int b = 0; b < batch_size; b++) {
-        for (int s = 0; s < block->seq_length; s++) {
-            for (int e_out = 0; e_out < block->embed_dim; e_out++) {
-                block->channel_mixed[b * block->seq_length * block->embed_dim + s * block->embed_dim + e_out] = 0.0f;
-                for (int e_in = 0; e_in < block->embed_dim; e_in++) {
-                    block->channel_mixed[b * block->seq_length * block->embed_dim + s * block->embed_dim + e_out] +=
-                        output[b * block->seq_length * block->embed_dim + s * block->embed_dim + e_in] * 
-                        block->channel_mixing_weight[e_out * block->embed_dim + e_in];
-                }
-            }
-        }
-    }
+    // Channel mixing - using optimized CBLAS GEMM
+    // Treat batch_size * seq_length as a single batch dimension
+    int combined_batch = batch_size * block->seq_length; // Number of vectors to process
+    
+    // y = alpha * A * x + beta * y
+    // Using GEMM: output = 1.0 * batch_inputs * W^T + 0.0 * output
+    // Where batch_inputs is (combined_batch x embed_dim) and W is (embed_dim x embed_dim)
+    cblas_sgemm(CblasRowMajor,         // Layout (row-major)
+                CblasNoTrans,          // No transpose for input matrix
+                CblasTrans,            // Transpose weight matrix (for compatibility with row-major layout)
+                combined_batch,        // Number of rows in input matrix (combined batch)
+                block->embed_dim,      // Number of columns in weight matrix
+                block->embed_dim,      // Number of columns in input matrix
+                1.0f,                  // Alpha
+                output,                // Input matrix (combined batch)
+                block->embed_dim,      // Leading dimension of input matrix
+                block->channel_mixing_weight, // Weight matrix
+                block->embed_dim,      // Leading dimension of weight matrix
+                0.0f,                  // Beta
+                block->channel_mixed,  // Output matrix
+                block->embed_dim);     // Leading dimension of output matrix
     
     // Apply SiLU activation
     for (int i = 0; i < batch_size * block->seq_length * block->embed_dim; i++) {
@@ -512,7 +520,7 @@ void output_projection_backward(MixerModel* model) {
     }
 }
 
-// Backward pass through a MixerBlock
+// Backward pass through a MixerBlock with optimized CBLAS for channel mixing
 void mixer_block_backward(MixerBlock* block, float* d_output, float* d_input, int batch_size) {
     // Initialize gradients for this block
     memset(block->token_mixing_weight_grad, 0, block->seq_length * block->seq_length * sizeof(float));
@@ -532,31 +540,42 @@ void mixer_block_backward(MixerBlock* block, float* d_output, float* d_input, in
         block->d_channel_mixed[i] = d_channel_activated[i] * silu_derivative(block->channel_mixed[i]);
     }
     
-    // Gradient w.r.t. channel mixing weights and inputs
-    for (int b = 0; b < batch_size; b++) {
-        for (int s = 0; s < block->seq_length; s++) {
-            float* d_mixed = &block->d_channel_mixed[b * block->seq_length * block->embed_dim + s * block->embed_dim];
-            float* input_slice = &block->residual[b * block->seq_length * block->embed_dim + s * block->embed_dim];
-            
-            // Gradient w.r.t. channel mixing weights
-            for (int e_out = 0; e_out < block->embed_dim; e_out++) {
-                for (int e_in = 0; e_in < block->embed_dim; e_in++) {
-                    block->channel_mixing_weight_grad[e_out * block->embed_dim + e_in] += 
-                        d_mixed[e_out] * input_slice[e_in];
-                }
-            }
-            
-            // Gradient w.r.t. input (to pass back)
-            float* d_input_slice = &d_input[b * block->seq_length * block->embed_dim + s * block->embed_dim];
-            for (int e_in = 0; e_in < block->embed_dim; e_in++) {
-                float sum = 0.0f;
-                for (int e_out = 0; e_out < block->embed_dim; e_out++) {
-                    sum += d_mixed[e_out] * block->channel_mixing_weight[e_out * block->embed_dim + e_in];
-                }
-                d_input_slice[e_in] = sum;
-            }
-        }
-    }
+    // Channel mixing backward - optimized using CBLAS GEMM
+    int combined_batch = batch_size * block->seq_length;
+    
+    // Gradient w.r.t. weights: W_grad = inputs^T * gradients
+    // Using GEMM: W_grad = alpha * inputs^T * gradients + beta * W_grad
+    cblas_sgemm(CblasRowMajor,         // Layout (row-major)
+                CblasTrans,            // Transpose inputs
+                CblasNoTrans,          // No transpose for gradients
+                block->embed_dim,      // Number of rows in input^T matrix
+                block->embed_dim,      // Number of columns in gradient matrix
+                combined_batch,        // Number of columns in input^T matrix (= number of rows in gradient matrix)
+                1.0f,                  // Alpha
+                block->residual,       // Input matrix (saved during forward pass)
+                block->embed_dim,      // Leading dimension of input matrix
+                block->d_channel_mixed, // Gradient matrix
+                block->embed_dim,      // Leading dimension of gradient matrix
+                1.0f,                  // Beta (add to existing gradients)
+                block->channel_mixing_weight_grad, // Weight gradient matrix
+                block->embed_dim);     // Leading dimension of weight gradient matrix
+    
+    // Gradient w.r.t. inputs: d_input = gradients * W
+    // Using GEMM: d_input = alpha * gradients * W + beta * d_input
+    cblas_sgemm(CblasRowMajor,         // Layout (row-major)
+                CblasNoTrans,          // No transpose for gradients
+                CblasNoTrans,          // No transpose for weights
+                combined_batch,        // Number of rows in gradient matrix
+                block->embed_dim,      // Number of columns in weight matrix
+                block->embed_dim,      // Number of columns in gradient matrix (= number of rows in weight matrix)
+                1.0f,                  // Alpha
+                block->d_channel_mixed, // Gradient matrix
+                block->embed_dim,      // Leading dimension of gradient matrix
+                block->channel_mixing_weight, // Weight matrix
+                block->embed_dim,      // Leading dimension of weight matrix
+                0.0f,                  // Beta (overwrite d_input)
+                d_input,               // Input gradient matrix
+                block->embed_dim);     // Leading dimension of input gradient matrix
     
     // Add the residual gradient
     for (int i = 0; i < batch_size * block->seq_length * block->embed_dim; i++) {
