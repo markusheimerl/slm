@@ -12,6 +12,7 @@
 #define NUM_LAYERS 8
 #define BATCH_SIZE 64
 #define TEMPERATURE 0.7f
+#define THREADS_PER_BLOCK 256
 
 // MixerBlock structure – all pointers refer to device memory.
 typedef struct {
@@ -80,6 +81,16 @@ typedef struct {
     // Backward pass buffers
     float* d_logits;       // [batch, seq, vocab_size]
     float* d_block_outputs;// same layout as block_outputs
+    
+    // Persistent device buffers for training
+    int* d_input_tokens;
+    int* d_target_tokens;
+    float* d_loss_buffer;
+    
+    // Persistent CPU buffers for training
+    float* h_loss_buffer;
+    float* h_out_proj_weight;
+    float* h_embedding_weight;
     
     // Additional preallocated buffer for softmax (on host)
     float* softmax_probs;  // [vocab_size]
@@ -179,7 +190,7 @@ __global__ void kernel_add(float* a, const float* b, int N) {
     }
 }
 
-// Kernel: device–device copy from src to dst
+// Kernel: device-device copy from src to dst
 __global__ void kernel_copy(const float* src, float* dst, int N) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if(idx < N) {
@@ -201,22 +212,82 @@ __global__ void kernel_apply_embedding(const int* input_tokens, const float* emb
     }
 }
 
+// Kernel for Adam weight update
+__global__ void kernel_adam_update(float* weight, const float* grad, float* m, float* v,
+                                  float alpha_t, float beta1, float beta2, float epsilon,
+                                  float weight_decay, float lr, int N, float scale) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if(idx < N) {
+        float g = grad[idx] / scale;
+        float m_new = beta1 * m[idx] + (1.0f - beta1) * g;
+        float v_new = beta2 * v[idx] + (1.0f - beta2) * g * g;
+        m[idx] = m_new;
+        v[idx] = v_new;
+        float update = alpha_t * m_new / (sqrtf(v_new) + epsilon);
+        weight[idx] = weight[idx] * (1.0f - lr * weight_decay) - update;
+    }
+}
+
+// Kernel to compute softmax and cross-entropy loss
+__global__ void kernel_softmax_cross_entropy(const float* logits, const int* targets,
+                                           float* d_logits, float* loss_buffer,
+                                           int batch_size, int seq_length, int vocab_size) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < batch_size * seq_length) {
+        int b = idx / seq_length;
+        int s = idx % seq_length;
+        int target = targets[idx];
+        
+        // Find max for numerical stability
+        float max_val = logits[idx * vocab_size];
+        for (int v = 1; v < vocab_size; v++) {
+            float val = logits[idx * vocab_size + v];
+            max_val = (val > max_val) ? val : max_val;
+        }
+        
+        // Compute softmax
+        float sum_exp = 0.0f;
+        float probs[MAX_VOCAB_SIZE];  // Using MAX_VOCAB_SIZE assuming it's reasonable
+        for (int v = 0; v < vocab_size; v++) {
+            probs[v] = expf(logits[idx * vocab_size + v] - max_val);
+            sum_exp += probs[v];
+        }
+        
+        // Normalize and compute loss
+        float loss = 0.0f;
+        for (int v = 0; v < vocab_size; v++) {
+            probs[v] /= sum_exp;
+            // Set gradient (softmax - one_hot)
+            d_logits[idx * vocab_size + v] = probs[v];
+            
+            // If this is the target token, subtract 1 for gradient and compute log loss
+            if (v == target) {
+                d_logits[idx * vocab_size + v] -= 1.0f;
+                loss = -logf(probs[v] + 1e-10f);
+            }
+        }
+        
+        // Store loss for this sample
+        loss_buffer[idx] = loss;
+    }
+}
+
 ////////////////////////////////////////////////////////////////////////////////
-// Row–major GEMM wrapper using cuBLAS.
+// Row-major GEMM wrapper using cuBLAS.
 void gemm_rm(cublasHandle_t handle, int m, int n, int k,
              const float *A, const float *B, float *C,
              bool transA, bool transB) {
     float alpha = 1.0f, beta = 0.0f;
     // In this wrapper, the convention is as follows:
-    // To compute C = A * B in row–major order (where A is m x k, B is k x n) you should call:
+    // To compute C = A * B in row-major order (where A is m x k, B is k x n) you should call:
     //    gemm_rm(handle, m, n, k, A, B, C, true, false);
     // This gives no transpose on A (transA=true => opA = CUBLAS_OP_N) and a transpose on B (transB=false => opB = CUBLAS_OP_T),
-    // so that cuBLAS computes: C = (B^T) * A in column–major which is equivalent to A * B in row–major.
+    // so that cuBLAS computes: C = (B^T) * A in column-major which is equivalent to A * B in row-major.
     cublasOperation_t opA = transA ? CUBLAS_OP_N : CUBLAS_OP_T;
     cublasOperation_t opB = transB ? CUBLAS_OP_N : CUBLAS_OP_T;
     int lda = transA ? k : m;
     int ldb = transB ? n : k;
-    // Note: Since cuBLAS assumes column–major storage, we swap the order of multiplication.
+    // Note: Since cuBLAS assumes column-major storage, we swap the order of multiplication.
     cublasSgemm(handle, opB, opA,
                 n, m, k,
                 &alpha,
@@ -263,6 +334,9 @@ MixerBlock* init_mixer_block(int embed_dim, int seq_length) {
     cudaMemcpy(block->token_mixing_mask, h_token_mixing_mask, size_tok, cudaMemcpyHostToDevice);
     free(h_token_mixing_mask);
     
+    // Pre-allocate masked_weights buffer
+    cudaMalloc((void**)&block->masked_weights, size_tok);
+    
     // Channel mixing weights.
     size_t size_channel = embed_dim * embed_dim * sizeof(float);
     float* h_channel_mixing_weight = (float*)malloc(size_channel);
@@ -299,7 +373,6 @@ MixerBlock* init_mixer_block(int embed_dim, int seq_length) {
     cudaMalloc((void**)&block->d_input, tensor_size);
     
     // Additional buffers.
-    cudaMalloc((void**)&block->masked_weights, size_tok);
     cudaMalloc((void**)&block->d_channel_activated, tensor_size);
     cudaMalloc((void**)&block->d_output_transposed, tensor_size_trans);
     cudaMalloc((void**)&block->d_input_transposed, tensor_size_trans);
@@ -365,7 +438,9 @@ MixerModel* init_mixer_model(int vocab_size, int embed_dim, int num_layers, int 
     }
     cudaMalloc((void**)&model->embedding_weight, embed_matrix_size);
     cudaMemcpy(model->embedding_weight, h_embedding_weight, embed_matrix_size, cudaMemcpyHostToDevice);
-    free(h_embedding_weight);
+    
+    // Keep a CPU copy for quick parameter access
+    model->h_embedding_weight = h_embedding_weight;
     
     cudaMalloc((void**)&model->embedding_weight_grad, embed_matrix_size);
     cudaMemset(model->embedding_weight_grad, 0, embed_matrix_size);
@@ -381,7 +456,9 @@ MixerModel* init_mixer_model(int vocab_size, int embed_dim, int num_layers, int 
         h_out_proj_weight[i] = (((float)rand()/(float)RAND_MAX * 2.0f - 1.0f) * scale_embed);
     }
     cudaMemcpy(model->out_proj_weight, h_out_proj_weight, embed_matrix_size, cudaMemcpyHostToDevice);
-    free(h_out_proj_weight);
+    
+    // Keep a CPU copy for quick parameter access
+    model->h_out_proj_weight = h_out_proj_weight;
     
     cudaMalloc((void**)&model->out_proj_weight_grad, embed_matrix_size);
     cudaMemset(model->out_proj_weight_grad, 0, embed_matrix_size);
@@ -407,7 +484,15 @@ MixerModel* init_mixer_model(int vocab_size, int embed_dim, int num_layers, int 
     cudaMalloc((void**)&model->d_logits, logits_size);
     cudaMalloc((void**)&model->d_block_outputs, (num_layers+1) * tensor_size);
     
-    // softmax_probs on CPU.
+    // Allocate persistent device buffers for training
+    cudaMalloc((void**)&model->d_input_tokens, batch_size * seq_length * sizeof(int));
+    cudaMalloc((void**)&model->d_target_tokens, batch_size * seq_length * sizeof(int));
+    cudaMalloc((void**)&model->d_loss_buffer, batch_size * seq_length * sizeof(float));
+    
+    // Allocate persistent host buffers for loss computation
+    model->h_loss_buffer = (float*)malloc(batch_size * seq_length * sizeof(float));
+    
+    // softmax_probs on CPU
     model->softmax_probs = (float*)malloc(vocab_size * sizeof(float));
     
     return model;
@@ -436,7 +521,16 @@ void free_mixer_model(MixerModel* model) {
     cudaFree(model->d_logits);
     cudaFree(model->d_block_outputs);
     
+    // Free persistent buffers
+    cudaFree(model->d_input_tokens);
+    cudaFree(model->d_target_tokens);
+    cudaFree(model->d_loss_buffer);
+    
+    free(model->h_loss_buffer);
+    free(model->h_embedding_weight);
+    free(model->h_out_proj_weight);
     free(model->softmax_probs);
+    
     free(model);
 }
 
@@ -451,54 +545,49 @@ void mixer_block_forward(cublasHandle_t handle, MixerBlock* block, float* input,
     int total_trans = batch_size * embed * seq;
     
     // Save input for backward.
-    cudaMemcpy(block->input_buffer, input, total * sizeof(float), cudaMemcpyDeviceToDevice);
-    cudaMemcpy(block->residual, input, total * sizeof(float), cudaMemcpyDeviceToDevice);
+    cudaMemcpyAsync(block->input_buffer, input, total * sizeof(float), cudaMemcpyDeviceToDevice);
+    cudaMemcpyAsync(block->residual, input, total * sizeof(float), cudaMemcpyDeviceToDevice);
     
     // Transpose input: [batch, seq, embed] -> [batch, embed, seq]
-    int threads = 256;
-    int nthreads = total;
-    int nblocks = (nthreads + threads - 1) / threads;
+    int threads = THREADS_PER_BLOCK;
+    int nblocks = (total + threads - 1) / threads;
     kernel_transpose_BSE_to_BES<<<nblocks, threads>>>(input, block->transposed, batch_size, seq, embed);
     
-    // Create masked token mixing weights.
-    nthreads = seq * seq;
-    nblocks = (nthreads + threads - 1) / threads;
-    kernel_apply_mask<<<nblocks, threads>>>(block->token_mixing_weight, block->token_mixing_mask, block->masked_weights, seq * seq);
+    // Apply masking to the token mixing weights
+    int mask_blocks = (seq * seq + threads - 1) / threads;
+    kernel_apply_mask<<<mask_blocks, threads>>>(block->token_mixing_weight, block->token_mixing_mask, block->masked_weights, seq * seq);
     
     // Token mixing GEMM:
     // Compute: token_mixed = transposed * (masked_weights)^T.
     int combined_batch_embed = batch_size * embed;
     gemm_rm(handle, combined_batch_embed, seq, seq, block->transposed, block->masked_weights, block->token_mixed, true, false);
-    // Note: For forward, passing (transA=true, transB=false) makes opA = CUBLAS_OP_N and opB = CUBLAS_OP_T, yielding the desired product.
     
     // Apply SiLU activation.
-    nthreads = total_trans;
-    nblocks = (nthreads + threads - 1) / threads;
+    nblocks = (total_trans + threads - 1) / threads;
     kernel_silu<<<nblocks, threads>>>(block->token_mixed, block->token_mix_activated, total_trans);
     
     // Transpose back: [batch, embed, seq] -> [batch, seq, embed]
-    nthreads = total;
-    nblocks = (nthreads + threads - 1) / threads;
+    nblocks = (total + threads - 1) / threads;
     kernel_transpose_BES_to_BSE<<<nblocks, threads>>>(block->token_mix_activated, output, batch_size, embed, seq);
     
     // Add residual.
-    nthreads = total;
-    nblocks = (nthreads + threads - 1) / threads;
+    nblocks = (total + threads - 1) / threads;
     kernel_add<<<nblocks, threads>>>(output, block->residual, total);
     
     // --- Channel Mixing ---
     // Save current output as residual.
-    cudaMemcpy(block->residual, output, total * sizeof(float), cudaMemcpyDeviceToDevice);
+    cudaMemcpyAsync(block->residual, output, total * sizeof(float), cudaMemcpyDeviceToDevice);
     
     // Channel mixing GEMM: channel_mixed = output * (channel_mixing_weight)^T.
     int combined_batch = batch_size * seq;
     gemm_rm(handle, combined_batch, embed, embed, output, block->channel_mixing_weight, block->channel_mixed, true, false);
+    
     // Apply SiLU activation.
-    nthreads = total;
-    nblocks = (nthreads + threads - 1) / threads;
+    nblocks = (total + threads - 1) / threads;
     kernel_silu<<<nblocks, threads>>>(block->channel_mixed, block->channel_mix_activated, total);
+    
     // Copy activated output and add residual.
-    cudaMemcpy(output, block->channel_mix_activated, total * sizeof(float), cudaMemcpyDeviceToDevice);
+    cudaMemcpyAsync(output, block->channel_mix_activated, total * sizeof(float), cudaMemcpyDeviceToDevice);
     kernel_add<<<nblocks, threads>>>(output, block->residual, total);
 }
 
@@ -511,14 +600,14 @@ void mixer_model_forward(cublasHandle_t handle, MixerModel* model, int* d_input_
     int total = batch * seq;
     
     // Embedding lookup.
-    int threads = 256;
+    int threads = THREADS_PER_BLOCK;
     int nblocks = (total + threads - 1) / threads;
     kernel_apply_embedding<<<nblocks, threads>>>(d_input_tokens, model->embedding_weight, model->embeddings,
-                                                   batch, seq, embed, model->vocab_size);
+                                                 batch, seq, embed, model->vocab_size);
     
     // Copy embeddings to first block_outputs buffer.
     int tensor_elements = total * embed;
-    cudaMemcpy(model->block_outputs, model->embeddings, tensor_elements * sizeof(float), cudaMemcpyDeviceToDevice);
+    cudaMemcpyAsync(model->block_outputs, model->embeddings, tensor_elements * sizeof(float), cudaMemcpyDeviceToDevice);
     
     // Forward through each MixerBlock.
     for (int i = 0; i < model->num_layers; i++) {
@@ -530,54 +619,34 @@ void mixer_model_forward(cublasHandle_t handle, MixerModel* model, int* d_input_
     // Output projection: logits = final_output * (out_proj_weight)^T.
     float* final_output = model->block_outputs + model->num_layers * tensor_elements;
     int combined_batch_seq = batch * seq;
-    // For output projection we want no transpose on final_output and a transpose on out_proj_weight.
     gemm_rm(handle, combined_batch_seq, model->vocab_size, embed, final_output, model->out_proj_weight, model->logits, true, false);
 }
 
 ////////////////////////////////////////////////////////////////////////////////
-// On–CPU: Compute cross–entropy loss and gradients.
-// This function copies logits from device to host, computes softmax and loss, and writes the gradient (softmax - one–hot) into model->d_logits.
-float compute_loss_and_gradients(MixerModel* model, int* h_target_tokens) {
+// Compute cross-entropy loss and gradients directly on GPU
+float compute_loss_and_gradients_gpu(MixerModel* model, int* d_target_tokens) {
     int batch = model->batch_size;
     int seq = model->seq_length;
     int vocab = model->vocab_size;
-    int total_logits = batch * seq * vocab;
     
-    float* h_logits = (float*)malloc(total_logits * sizeof(float));
-    cudaMemcpy(h_logits, model->logits, total_logits * sizeof(float), cudaMemcpyDeviceToHost);
+    // Launch kernel to compute softmax, loss, and gradients in one go
+    int threads = THREADS_PER_BLOCK;
+    int blocks = (batch * seq + threads - 1) / threads;
+    kernel_softmax_cross_entropy<<<blocks, threads>>>(
+        model->logits, d_target_tokens,
+        model->d_logits, model->d_loss_buffer,
+        batch, seq, vocab
+    );
     
-    float* h_d_logits = (float*)malloc(total_logits * sizeof(float));
-    memset(h_d_logits, 0, total_logits * sizeof(float));
+    // Retrieve loss values
+    cudaMemcpyAsync(model->h_loss_buffer, model->d_loss_buffer, batch * seq * sizeof(float), cudaMemcpyDeviceToHost);
     
+    // Sum up the loss on CPU
     float total_loss = 0.0f;
-    for (int b = 0; b < batch; b++) {
-        for (int s = 0; s < seq; s++) {
-            int idx = (b * seq + s) * vocab;
-            float max_logit = h_logits[idx];
-            for (int v = 1; v < vocab; v++) {
-                if (h_logits[idx + v] > max_logit)
-                    max_logit = h_logits[idx + v];
-            }
-            float sum_exp = 0.0f;
-            for (int v = 0; v < vocab; v++) {
-                model->softmax_probs[v] = expf(h_logits[idx + v] - max_logit);
-                sum_exp += model->softmax_probs[v];
-            }
-            for (int v = 0; v < vocab; v++) {
-                model->softmax_probs[v] /= sum_exp;
-            }
-            int target = h_target_tokens[b * seq + s];
-            total_loss += -logf(model->softmax_probs[target] + 1e-10f);
-            for (int v = 0; v < vocab; v++) {
-                h_d_logits[idx + v] = model->softmax_probs[v];
-            }
-            h_d_logits[idx + target] -= 1.0f;
-        }
+    for (int i = 0; i < batch * seq; i++) {
+        total_loss += model->h_loss_buffer[i];
     }
-    cudaMemcpy(model->d_logits, h_d_logits, total_logits * sizeof(float), cudaMemcpyHostToDevice);
     
-    free(h_logits);
-    free(h_d_logits);
     return total_loss / (batch * seq);
 }
 
@@ -592,20 +661,18 @@ void output_projection_backward(cublasHandle_t handle, MixerModel* model) {
     
     float* final_output = model->block_outputs + model->num_layers * (batch * seq * embed);
     float* d_final_output = model->d_block_outputs + model->num_layers * (batch * seq * embed);
-    cudaMemset(d_final_output, 0, combined_batch_seq * embed * sizeof(float));
+    cudaMemsetAsync(d_final_output, 0, combined_batch_seq * embed * sizeof(float));
     
     // Gradient w.r.t. output projection weights:
     // We want: out_proj_weight_grad = (d_logits)^T * final_output.
-    // In our wrapper, use flags to mimic CblasTrans on d_logits and no transpose on final_output.
     gemm_rm(handle, vocab, embed, combined_batch_seq, model->d_logits, final_output, model->out_proj_weight_grad, false, true);
+    
     // Gradient w.r.t. final_output: d_final_output = d_logits * out_proj_weight.
-    // For no transposition on both, we pass true flags.
     gemm_rm(handle, combined_batch_seq, embed, vocab, model->d_logits, model->out_proj_weight, d_final_output, true, true);
 }
 
 //
 // Backward pass through one MixerBlock.
-// (Note: The backward steps here closely mirror the CPU version.)
 void mixer_block_backward(cublasHandle_t handle, MixerBlock* block, float* d_output, float* d_input, int batch_size) {
     int seq = block->seq_length;
     int embed = block->embed_dim;
@@ -613,190 +680,160 @@ void mixer_block_backward(cublasHandle_t handle, MixerBlock* block, float* d_out
     int total_trans = batch_size * embed * seq;
     int combined_batch = batch_size * seq;
     int combined_batch_embed = batch_size * embed;
-    int threads = 256;
-    int nblocks = (total + threads - 1) / threads;
+    int threads = THREADS_PER_BLOCK;
+    int nblocks;
     
     // --- Channel Mixing Backward ---
-    cudaMemcpy(block->d_output, d_output, total * sizeof(float), cudaMemcpyDeviceToDevice);
-    cudaMemcpy(block->d_channel_activated, block->d_output, total * sizeof(float), cudaMemcpyDeviceToDevice);
+    cudaMemcpyAsync(block->d_output, d_output, total * sizeof(float), cudaMemcpyDeviceToDevice);
+    cudaMemcpyAsync(block->d_channel_activated, block->d_output, total * sizeof(float), cudaMemcpyDeviceToDevice);
     nblocks = (total + threads - 1) / threads;
     kernel_silu_deriv_mult<<<nblocks, threads>>>(block->channel_mixed, block->d_channel_activated, block->d_channel_mixed, total);
     
-    // Gradient w.r.t. channel mixing weights: use (residual)^T * d_channel_mixed.
-    // For CPU, that was CblasTrans on residual and no transpose on d_channel_mixed.
-    // In our wrapper, pass transA=false, transB=true.
+    // Gradient w.r.t. channel mixing weights
     gemm_rm(handle, embed, embed, combined_batch, block->residual, block->d_channel_mixed, block->channel_mixing_weight_grad, false, true);
-    // Gradient w.r.t. inputs: d_input = d_channel_mixed * channel_mixing_weight.
-    // No transposition on both: pass true, true.
+    
+    // Gradient w.r.t. inputs
     gemm_rm(handle, combined_batch, embed, embed, block->d_channel_mixed, block->channel_mixing_weight, d_input, true, true);
     kernel_add<<<nblocks, threads>>>(d_input, block->d_output, total);
     
     // --- Token Mixing Backward ---
-    cudaMemcpy(block->d_output, d_input, total * sizeof(float), cudaMemcpyDeviceToDevice);
+    cudaMemcpyAsync(block->d_output, d_input, total * sizeof(float), cudaMemcpyDeviceToDevice);
     nblocks = (total_trans + threads - 1) / threads;
     kernel_transpose_BSE_to_BES<<<nblocks, threads>>>(d_input, block->d_output_transposed, batch_size, seq, embed);
     nblocks = (total_trans + threads - 1) / threads;
     kernel_silu_deriv_mult<<<nblocks, threads>>>(block->token_mixed, block->d_output_transposed, block->d_token_mixed, total_trans);
     
-    // Gradient w.r.t. token mixing weights:
-    // We need to compute: temp_grad = (d_token_mixed)^T * transposed.
-    // CPU version calls for CblasTrans on d_token_mixed and no transpose on transposed.
-    // Here, call gemm_rm with transA = false (to get transpose) and transB = true (to use matrix as is).
+    // Gradient w.r.t. token mixing weights
     gemm_rm(handle, seq, seq, combined_batch_embed, block->d_token_mixed, block->transposed, block->temp_grad, false, true);
     nblocks = ((seq * seq) + threads - 1) / threads;
     kernel_apply_mask<<<nblocks, threads>>>(block->temp_grad, block->token_mixing_mask, block->temp_grad, seq * seq);
     kernel_add<<<nblocks, threads>>>(block->token_mixing_weight_grad, block->temp_grad, seq * seq);
     
-    // Gradient w.r.t. input from token mixing:
-    // We want: d_input_transposed = d_token_mixed * masked_weights (no transposition on either).
-    // So pass transA = true and transB = true.
+    // Gradient w.r.t. input from token mixing
     gemm_rm(handle, combined_batch_embed, seq, seq, block->d_token_mixed, block->masked_weights, block->d_input_transposed, true, true);
     nblocks = (total + threads - 1) / threads;
     kernel_transpose_BES_to_BSE<<<nblocks, threads>>>(block->d_input_transposed, d_input, batch_size, embed, seq);
     kernel_add<<<nblocks, threads>>>(d_input, block->d_output, total);
 }
 
-//
-// Backward pass through the embedding layer.
-// For each input token, accumulate the corresponding gradient from the first block output.
-void embedding_backward(MixerModel* model, int* h_input_tokens) {
-    int batch = model->batch_size;
-    int seq = model->seq_length;
-    int embed = model->embed_dim;
-    int total = batch * seq * embed;
-    float* h_d_embeddings = (float*)malloc(total * sizeof(float));
-    cudaMemcpy(h_d_embeddings, model->d_block_outputs, total * sizeof(float), cudaMemcpyDeviceToHost);
-    float* h_grad = (float*)calloc(model->vocab_size * embed, sizeof(float));
-    for (int b = 0; b < batch; b++) {
-        for (int s = 0; s < seq; s++) {
-            int token = h_input_tokens[b * seq + s];
-            for (int e = 0; e < embed; e++) {
-                h_grad[token * embed + e] += h_d_embeddings[b * seq * embed + s * embed + e];
+// CUDA kernel for embedding backward
+__global__ void kernel_embedding_backward(const int* input_tokens, const float* d_embeddings,
+                                        float* embedding_grad, int batch_size, int seq_length,
+                                        int embed_dim, int vocab_size) {
+    // Use atomicAdd for safe concurrent updates to the same embedding vectors
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < batch_size * seq_length) {
+        int b = idx / seq_length;
+        int s = idx % seq_length;
+        int token = input_tokens[b * seq_length + s];
+        if (token >= 0 && token < vocab_size) {
+            for (int e = 0; e < embed_dim; e++) {
+                atomicAdd(&embedding_grad[token * embed_dim + e], 
+                         d_embeddings[b * seq_length * embed_dim + s * embed_dim + e]);
             }
         }
     }
-    cudaMemcpy(model->embedding_weight_grad, h_grad, model->vocab_size * embed * sizeof(float), cudaMemcpyHostToDevice);
-    free(h_grad);
-    free(h_d_embeddings);
+}
+
+// GPU-based embedding backward
+void embedding_backward_gpu(MixerModel* model, int* d_input_tokens) {
+    int batch = model->batch_size;
+    int seq = model->seq_length;
+    int embed = model->embed_dim;
+    
+    // Zero out the embedding gradient first
+    cudaMemsetAsync(model->embedding_weight_grad, 0, model->vocab_size * embed * sizeof(float));
+    
+    // Launch kernel to compute gradients
+    int threads = THREADS_PER_BLOCK;
+    int blocks = (batch * seq + threads - 1) / threads;
+    kernel_embedding_backward<<<blocks, threads>>>(
+        d_input_tokens, model->d_block_outputs,
+        model->embedding_weight_grad, batch, seq, embed, model->vocab_size
+    );
 }
 
 //
 // Backward pass through the entire model.
-void mixer_model_backward(cublasHandle_t handle, MixerModel* model, int* h_input_tokens, int* h_target_tokens) {
-    // Compute loss and its gradients.
-    compute_loss_and_gradients(model, h_target_tokens);
+void mixer_model_backward(cublasHandle_t handle, MixerModel* model) {
+    // Compute loss gradients (already done in compute_loss_and_gradients_gpu)
     output_projection_backward(handle, model);
+    
     int batch = model->batch_size;
     int seq = model->seq_length;
     int embed = model->embed_dim;
     int total = batch * seq * embed;
+    
     for (int i = model->num_layers - 1; i >= 0; i--) {
         float* d_output = model->d_block_outputs + (i + 1) * total;
         float* d_input = model->d_block_outputs + i * total;
         mixer_block_backward(handle, model->blocks[i], d_output, d_input, batch);
     }
-    embedding_backward(model, h_input_tokens);
+    
+    embedding_backward_gpu(model, model->d_input_tokens);
 }
 
 //
-// Update weights using AdamW optimizer.
-// (For simplicity, gradients are copied back to the host, updated and then pushed back to device.)
-void update_weights_adamw(MixerModel* model, float learning_rate) {
+// Update weights using AdamW optimizer - GPU based version
+void update_weights_adamw_gpu(MixerModel* model, float learning_rate) {
     model->t++;  // Increment time step.
     float beta1_t = powf(model->beta1, model->t);
     float beta2_t = powf(model->beta2, model->t);
     float alpha_t = learning_rate * sqrtf(1.0f - beta2_t) / (1.0f - beta1_t);
+    float scale = model->batch_size * model->seq_length; // For normalization
     
-    // Update embedding weights.
+    // Update embedding weights
+    int threads = THREADS_PER_BLOCK;
+    int blocks;
     int embed = model->embed_dim;
     int vocab = model->vocab_size;
-    int num_elements = vocab * embed;
-    float* h_grad = (float*)malloc(num_elements * sizeof(float));
-    float* h_weight = (float*)malloc(num_elements * sizeof(float));
-    float* h_m = (float*)malloc(num_elements * sizeof(float));
-    float* h_v = (float*)malloc(num_elements * sizeof(float));
-    cudaMemcpy(h_grad, model->embedding_weight_grad, num_elements * sizeof(float), cudaMemcpyDeviceToHost);
-    cudaMemcpy(h_weight, model->embedding_weight, num_elements * sizeof(float), cudaMemcpyDeviceToHost);
-    cudaMemcpy(h_m, model->embedding_m, num_elements * sizeof(float), cudaMemcpyDeviceToHost);
-    cudaMemcpy(h_v, model->embedding_v, num_elements * sizeof(float), cudaMemcpyDeviceToHost);
-    for (int i = 0; i < num_elements; i++) {
-        float grad = h_grad[i] / (model->batch_size * model->seq_length);
-        h_m[i] = model->beta1 * h_m[i] + (1.0f - model->beta1) * grad;
-        h_v[i] = model->beta2 * h_v[i] + (1.0f - model->beta2) * grad * grad;
-        float update = alpha_t * h_m[i] / (sqrtf(h_v[i]) + model->epsilon);
-        h_weight[i] = h_weight[i] * (1.0f - learning_rate * model->weight_decay) - update;
-    }
-    cudaMemcpy(model->embedding_weight, h_weight, num_elements * sizeof(float), cudaMemcpyHostToDevice);
-    cudaMemcpy(model->embedding_m, h_m, num_elements * sizeof(float), cudaMemcpyHostToDevice);
-    cudaMemcpy(model->embedding_v, h_v, num_elements * sizeof(float), cudaMemcpyHostToDevice);
-    free(h_grad); free(h_weight); free(h_m); free(h_v);
     
-    // Update output projection weights.
-    num_elements = vocab * embed;
-    h_grad = (float*)malloc(num_elements * sizeof(float));
-    h_weight = (float*)malloc(num_elements * sizeof(float));
-    h_m = (float*)malloc(num_elements * sizeof(float));
-    h_v = (float*)malloc(num_elements * sizeof(float));
-    cudaMemcpy(h_grad, model->out_proj_weight_grad, num_elements * sizeof(float), cudaMemcpyDeviceToHost);
-    cudaMemcpy(h_weight, model->out_proj_weight, num_elements * sizeof(float), cudaMemcpyDeviceToHost);
-    cudaMemcpy(h_m, model->out_proj_m, num_elements * sizeof(float), cudaMemcpyDeviceToHost);
-    cudaMemcpy(h_v, model->out_proj_v, num_elements * sizeof(float), cudaMemcpyDeviceToHost);
-    for (int i = 0; i < num_elements; i++) {
-        float grad = h_grad[i] / (model->batch_size * model->seq_length);
-        h_m[i] = model->beta1 * h_m[i] + (1.0f - model->beta1) * grad;
-        h_v[i] = model->beta2 * h_v[i] + (1.0f - model->beta2) * grad * grad;
-        float update = alpha_t * h_m[i] / (sqrtf(h_v[i]) + model->epsilon);
-        h_weight[i] = h_weight[i] * (1.0f - learning_rate * model->weight_decay) - update;
-    }
-    cudaMemcpy(model->out_proj_weight, h_weight, num_elements * sizeof(float), cudaMemcpyHostToDevice);
-    cudaMemcpy(model->out_proj_m, h_m, num_elements * sizeof(float), cudaMemcpyHostToDevice);
-    cudaMemcpy(model->out_proj_v, h_v, num_elements * sizeof(float), cudaMemcpyHostToDevice);
-    free(h_grad); free(h_weight); free(h_m); free(h_v);
+    blocks = (vocab * embed + threads - 1) / threads;
+    kernel_adam_update<<<blocks, threads>>>(
+        model->embedding_weight, model->embedding_weight_grad,
+        model->embedding_m, model->embedding_v,
+        alpha_t, model->beta1, model->beta2, model->epsilon,
+        model->weight_decay, learning_rate, vocab * embed, scale
+    );
     
-    // Update MixerBlock weights.
+    // Update output projection weights
+    blocks = (vocab * embed + threads - 1) / threads;
+    kernel_adam_update<<<blocks, threads>>>(
+        model->out_proj_weight, model->out_proj_weight_grad,
+        model->out_proj_m, model->out_proj_v,
+        alpha_t, model->beta1, model->beta2, model->epsilon,
+        model->weight_decay, learning_rate, vocab * embed, scale
+    );
+    
+    // Update MixerBlock weights
     for (int l = 0; l < model->num_layers; l++) {
         MixerBlock* block = model->blocks[l];
         int size_tok = block->seq_length * block->seq_length;
-        float* h_grad_tok = (float*)malloc(size_tok * sizeof(float));
-        float* h_weight_tok = (float*)malloc(size_tok * sizeof(float));
-        float* h_m_tok = (float*)malloc(size_tok * sizeof(float));
-        float* h_v_tok = (float*)malloc(size_tok * sizeof(float));
-        cudaMemcpy(h_grad_tok, block->token_mixing_weight_grad, size_tok * sizeof(float), cudaMemcpyDeviceToHost);
-        cudaMemcpy(h_weight_tok, block->token_mixing_weight, size_tok * sizeof(float), cudaMemcpyDeviceToHost);
-        cudaMemcpy(h_m_tok, block->token_mixing_m, size_tok * sizeof(float), cudaMemcpyDeviceToHost);
-        cudaMemcpy(h_v_tok, block->token_mixing_v, size_tok * sizeof(float), cudaMemcpyDeviceToHost);
-        for (int i = 0; i < size_tok; i++) {
-            float grad = h_grad_tok[i] / (model->batch_size * model->seq_length);
-            h_m_tok[i] = model->beta1 * h_m_tok[i] + (1.0f - model->beta1) * grad;
-            h_v_tok[i] = model->beta2 * h_v_tok[i] + (1.0f - model->beta2) * grad * grad;
-            float update = alpha_t * h_m_tok[i] / (sqrtf(h_v_tok[i]) + model->epsilon);
-            h_weight_tok[i] = h_weight_tok[i] * (1.0f - learning_rate * model->weight_decay) - update;
-        }
-        cudaMemcpy(block->token_mixing_weight, h_weight_tok, size_tok * sizeof(float), cudaMemcpyHostToDevice);
-        cudaMemcpy(block->token_mixing_m, h_m_tok, size_tok * sizeof(float), cudaMemcpyHostToDevice);
-        cudaMemcpy(block->token_mixing_v, h_v_tok, size_tok * sizeof(float), cudaMemcpyHostToDevice);
-        free(h_grad_tok); free(h_weight_tok); free(h_m_tok); free(h_v_tok);
-        
         int size_channel = block->embed_dim * block->embed_dim;
-        float* h_grad_chan = (float*)malloc(size_channel * sizeof(float));
-        float* h_weight_chan = (float*)malloc(size_channel * sizeof(float));
-        float* h_m_chan = (float*)malloc(size_channel * sizeof(float));
-        float* h_v_chan = (float*)malloc(size_channel * sizeof(float));
-        cudaMemcpy(h_grad_chan, block->channel_mixing_weight_grad, size_channel * sizeof(float), cudaMemcpyDeviceToHost);
-        cudaMemcpy(h_weight_chan, block->channel_mixing_weight, size_channel * sizeof(float), cudaMemcpyDeviceToHost);
-        cudaMemcpy(h_m_chan, block->channel_mixing_m, size_channel * sizeof(float), cudaMemcpyDeviceToHost);
-        cudaMemcpy(h_v_chan, block->channel_mixing_v, size_channel * sizeof(float), cudaMemcpyDeviceToHost);
-        for (int i = 0; i < size_channel; i++) {
-            float grad = h_grad_chan[i] / (model->batch_size * model->seq_length);
-            h_m_chan[i] = model->beta1 * h_m_chan[i] + (1.0f - model->beta1) * grad;
-            h_v_chan[i] = model->beta2 * h_v_chan[i] + (1.0f - model->beta2) * grad * grad;
-            float update = alpha_t * h_m_chan[i] / (sqrtf(h_v_chan[i]) + model->epsilon);
-            h_weight_chan[i] = h_weight_chan[i] * (1.0f - learning_rate * model->weight_decay) - update;
-        }
-        cudaMemcpy(block->channel_mixing_weight, h_weight_chan, size_channel * sizeof(float), cudaMemcpyHostToDevice);
-        cudaMemcpy(block->channel_mixing_m, h_m_chan, size_channel * sizeof(float), cudaMemcpyHostToDevice);
-        cudaMemcpy(block->channel_mixing_v, h_v_chan, size_channel * sizeof(float), cudaMemcpyHostToDevice);
-        free(h_grad_chan); free(h_weight_chan); free(h_m_chan); free(h_v_chan);
+        
+        // Token mixing weights
+        blocks = (size_tok + threads - 1) / threads;
+        kernel_adam_update<<<blocks, threads>>>(
+            block->token_mixing_weight, block->token_mixing_weight_grad,
+            block->token_mixing_m, block->token_mixing_v,
+            alpha_t, model->beta1, model->beta2, model->epsilon,
+            model->weight_decay, learning_rate, size_tok, scale
+        );
+        
+        // Update masked weights - important to preserve the masking structure
+        kernel_apply_mask<<<blocks, threads>>>(
+            block->token_mixing_weight, block->token_mixing_mask, 
+            block->masked_weights, size_tok
+        );
+        
+        // Channel mixing weights
+        blocks = (size_channel + threads - 1) / threads;
+        kernel_adam_update<<<blocks, threads>>>(
+            block->channel_mixing_weight, block->channel_mixing_weight_grad,
+            block->channel_mixing_m, block->channel_mixing_v,
+            alpha_t, model->beta1, model->beta2, model->epsilon,
+            model->weight_decay, learning_rate, size_channel, scale
+        );
     }
 }
 
@@ -806,14 +843,14 @@ void zero_gradients(MixerModel* model) {
     int embed = model->embed_dim;
     int vocab = model->vocab_size;
     size_t size = vocab * embed * sizeof(float);
-    cudaMemset(model->embedding_weight_grad, 0, size);
-    cudaMemset(model->out_proj_weight_grad, 0, size);
+    cudaMemsetAsync(model->embedding_weight_grad, 0, size);
+    cudaMemsetAsync(model->out_proj_weight_grad, 0, size);
     for (int l = 0; l < model->num_layers; l++) {
         MixerBlock* block = model->blocks[l];
         size_t size_tok = block->seq_length * block->seq_length * sizeof(float);
         size_t size_chan = block->embed_dim * block->embed_dim * sizeof(float);
-        cudaMemset(block->token_mixing_weight_grad, 0, size_tok);
-        cudaMemset(block->channel_mixing_weight_grad, 0, size_chan);
+        cudaMemsetAsync(block->token_mixing_weight_grad, 0, size_tok);
+        cudaMemsetAsync(block->channel_mixing_weight_grad, 0, size_chan);
     }
 }
 
@@ -866,8 +903,6 @@ void decode_tokens(const int* tokens, int num_tokens, char* output, int max_leng
 
 ////////////////////////////////////////////////////////////////////////////////
 // Generate text from the model.
-// We run inference from a seed string, always using the logits for the last token
-// of the first example in the batch.
 void generate_text(cublasHandle_t handle, MixerModel* model, const char* seed_text, int max_length, char* output, int output_size) {
     int* h_seed_tokens = (int*)malloc(model->seq_length * sizeof(int));
     int* h_input_batch = (int*)malloc(model->batch_size * model->seq_length * sizeof(int));
@@ -896,11 +931,11 @@ void generate_text(cublasHandle_t handle, MixerModel* model, const char* seed_te
     
     for (int i = 0; i < max_length; i++) {
         mixer_model_forward(handle, model, d_input_batch);
+        
         // Get logits for the last token of the first example.
         int seq = model->seq_length;
         int vocab = model->vocab_size;
         float* h_logits = (float*)malloc(vocab * sizeof(float));
-        cudaDeviceSynchronize();
         cudaMemcpy(h_logits, model->logits + ((0 * seq + (seq-1)) * vocab), vocab * sizeof(float), cudaMemcpyDeviceToHost);
         softmax_cpu(h_logits, h_probs, vocab);
         int next_token = sample_from_distribution_cpu(h_probs, vocab);
@@ -994,29 +1029,32 @@ void save_model(MixerModel* model, const char* filename) {
     fwrite(&model->seq_length, sizeof(int), 1, file);
     fwrite(&model->batch_size, sizeof(int), 1, file);
     
+    // Update host copies from device
     int vocab = model->vocab_size, embed = model->embed_dim;
-    float* h_embedding_weight = (float*)malloc(vocab * embed * sizeof(float));
-    cudaMemcpy(h_embedding_weight, model->embedding_weight, vocab * embed * sizeof(float), cudaMemcpyDeviceToHost);
-    fwrite(h_embedding_weight, sizeof(float), vocab * embed, file);
-    free(h_embedding_weight);
+    cudaMemcpy(model->h_embedding_weight, model->embedding_weight, 
+               vocab * embed * sizeof(float), cudaMemcpyDeviceToHost);
+    cudaMemcpy(model->h_out_proj_weight, model->out_proj_weight, 
+               vocab * embed * sizeof(float), cudaMemcpyDeviceToHost);
     
-    float* h_out_proj_weight = (float*)malloc(vocab * embed * sizeof(float));
-    cudaMemcpy(h_out_proj_weight, model->out_proj_weight, vocab * embed * sizeof(float), cudaMemcpyDeviceToHost);
-    fwrite(h_out_proj_weight, sizeof(float), vocab * embed, file);
-    free(h_out_proj_weight);
+    // Write from host copies
+    fwrite(model->h_embedding_weight, sizeof(float), vocab * embed, file);
+    fwrite(model->h_out_proj_weight, sizeof(float), vocab * embed, file);
     
+    // For each mixer block, copy weights to host and write
     for (int i = 0; i < model->num_layers; i++) {
         MixerBlock* block = model->blocks[i];
         int seq = block->seq_length, embed = block->embed_dim;
         int size_tok = seq * seq;
         float* h_token_mixing_weight = (float*)malloc(size_tok * sizeof(float));
-        cudaMemcpy(h_token_mixing_weight, block->token_mixing_weight, size_tok * sizeof(float), cudaMemcpyDeviceToHost);
+        cudaMemcpy(h_token_mixing_weight, block->token_mixing_weight, 
+                   size_tok * sizeof(float), cudaMemcpyDeviceToHost);
         fwrite(h_token_mixing_weight, sizeof(float), size_tok, file);
         free(h_token_mixing_weight);
         
         int size_channel = embed * embed;
         float* h_channel_mixing_weight = (float*)malloc(size_channel * sizeof(float));
-        cudaMemcpy(h_channel_mixing_weight, block->channel_mixing_weight, size_channel * sizeof(float), cudaMemcpyDeviceToHost);
+        cudaMemcpy(h_channel_mixing_weight, block->channel_mixing_weight, 
+                   size_channel * sizeof(float), cudaMemcpyDeviceToHost);
         fwrite(h_channel_mixing_weight, sizeof(float), size_channel, file);
         free(h_channel_mixing_weight);
     }
@@ -1042,29 +1080,38 @@ MixerModel* load_model(const char* filename) {
     
     MixerModel* model = init_mixer_model(vocab_size, embed_dim, num_layers, seq_length, batch_size);
     
-    int vocab = model->vocab_size, embed = model->embed_dim;
-    float* h_embedding_weight = (float*)malloc(vocab * embed * sizeof(float));
-    fread(h_embedding_weight, sizeof(float), vocab * embed, file);
-    cudaMemcpy(model->embedding_weight, h_embedding_weight, vocab * embed * sizeof(float), cudaMemcpyHostToDevice);
-    free(h_embedding_weight);
+    // Read directly into host buffers
+    fread(model->h_embedding_weight, sizeof(float), vocab_size * embed_dim, file);
+    fread(model->h_out_proj_weight, sizeof(float), vocab_size * embed_dim, file);
     
-    float* h_out_proj_weight = (float*)malloc(vocab * embed * sizeof(float));
-    fread(h_out_proj_weight, sizeof(float), vocab * embed, file);
-    cudaMemcpy(model->out_proj_weight, h_out_proj_weight, vocab * embed * sizeof(float), cudaMemcpyHostToDevice);
-    free(h_out_proj_weight);
+    // Copy from host to device
+    cudaMemcpy(model->embedding_weight, model->h_embedding_weight, 
+               vocab_size * embed_dim * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(model->out_proj_weight, model->h_out_proj_weight, 
+               vocab_size * embed_dim * sizeof(float), cudaMemcpyHostToDevice);
     
+    // For each layer, read weights and upload to device
     for (int i = 0; i < model->num_layers; i++) {
         MixerBlock* block = model->blocks[i];
         int size_tok = seq_length * seq_length;
         float* h_token_mixing_weight = (float*)malloc(size_tok * sizeof(float));
         fread(h_token_mixing_weight, sizeof(float), size_tok, file);
-        cudaMemcpy(block->token_mixing_weight, h_token_mixing_weight, size_tok * sizeof(float), cudaMemcpyHostToDevice);
+        cudaMemcpy(block->token_mixing_weight, h_token_mixing_weight, 
+                   size_tok * sizeof(float), cudaMemcpyHostToDevice);
+                   
+        // Update masked weights
+        int threads = THREADS_PER_BLOCK;
+        int blocks = (size_tok + threads - 1) / threads;
+        kernel_apply_mask<<<blocks, threads>>>(block->token_mixing_weight, 
+                                               block->token_mixing_mask, 
+                                               block->masked_weights, size_tok);
         free(h_token_mixing_weight);
         
         int size_channel = embed_dim * embed_dim;
         float* h_channel_mixing_weight = (float*)malloc(size_channel * sizeof(float));
         fread(h_channel_mixing_weight, sizeof(float), size_channel, file);
-        cudaMemcpy(block->channel_mixing_weight, h_channel_mixing_weight, size_channel * sizeof(float), cudaMemcpyHostToDevice);
+        cudaMemcpy(block->channel_mixing_weight, h_channel_mixing_weight, 
+                   size_channel * sizeof(float), cudaMemcpyHostToDevice);
         free(h_channel_mixing_weight);
     }
     
@@ -1122,17 +1169,25 @@ int main(){
         for (int step = 0; step < steps_per_epoch; step++) {
             create_batch(text, text_size, seq_length, batch_size, h_input_tokens, h_target_tokens);
             
-            int* d_input_tokens;
-            cudaMalloc((void**)&d_input_tokens, batch_size * seq_length * sizeof(int));
-            cudaMemcpy(d_input_tokens, h_input_tokens, batch_size * seq_length * sizeof(int), cudaMemcpyHostToDevice);
+            // Copy input and target tokens to device
+            cudaMemcpy(model->d_input_tokens, h_input_tokens, 
+                       batch_size * seq_length * sizeof(int), cudaMemcpyHostToDevice);
+            cudaMemcpy(model->d_target_tokens, h_target_tokens, 
+                       batch_size * seq_length * sizeof(int), cudaMemcpyHostToDevice);
             
-            mixer_model_forward(cublasHandle, model, d_input_tokens);
-            mixer_model_backward(cublasHandle, model, h_input_tokens, h_target_tokens);
-            update_weights_adamw(model, learning_rate);
-            // Zero gradients after update.
+            // Forward pass
+            mixer_model_forward(cublasHandle, model, model->d_input_tokens);
+            
+            // Compute loss and gradients in one step
+            float step_loss = compute_loss_and_gradients_gpu(model, model->d_target_tokens);
+            
+            // Backward pass and update
+            mixer_model_backward(cublasHandle, model);
+            update_weights_adamw_gpu(model, learning_rate);
+            
+            // Zero gradients after update
             zero_gradients(model);
             
-            float step_loss = compute_loss_and_gradients(model, h_target_tokens);
             epoch_loss += step_loss;
             
             if (step % 10 == 0) {
@@ -1140,13 +1195,11 @@ int main(){
                        epoch+1, num_epochs, step+1, steps_per_epoch, step_loss);
             }
             if(step % 100 == 0) {
-                printf("Generating sample text periodically...\n");
+                printf("Generating sample text...\n");
                 printf("Sample seed text:\n%s\n\n", seed_text);
                 generate_text(cublasHandle, model, seed_text, 100, generated_text, sizeof(generated_text));
                 printf("Generated text:\n%s\n\n", generated_text);
             }
-            
-            cudaFree(d_input_tokens);
         }
         epoch_loss /= steps_per_epoch;
         time_t current_time = time(NULL);
