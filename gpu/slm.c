@@ -6,14 +6,6 @@
 #include <cuda_runtime.h>
 #include <cublas_v2.h>
 
-#define MAX_SEQ_LENGTH 1024
-#define MAX_VOCAB_SIZE 256
-#define EMBED_DIM 512
-#define NUM_LAYERS 8
-#define BATCH_SIZE 64
-#define TEMPERATURE 0.7f
-#define THREADS_PER_BLOCK 256
-
 // MixerBlock structure – all pointers refer to device memory.
 typedef struct {
     // Token mixing parameters
@@ -256,23 +248,22 @@ __global__ void kernel_softmax_cross_entropy(const float* logits, const int* tar
         
         // Compute softmax
         float sum_exp = 0.0f;
-        float probs[MAX_VOCAB_SIZE];  // Using MAX_VOCAB_SIZE assuming it's reasonable
         for (int v = 0; v < vocab_size; v++) {
-            probs[v] = expf(logits[idx * vocab_size + v] - max_val);
-            sum_exp += probs[v];
+            float exp_val = expf(logits[idx * vocab_size + v] - max_val);
+            d_logits[idx * vocab_size + v] = exp_val;  // Temporarily store exp values
+            sum_exp += exp_val;
         }
         
-        // Normalize and compute loss
+        // Normalize and compute gradient and loss
         float loss = 0.0f;
         for (int v = 0; v < vocab_size; v++) {
-            probs[v] /= sum_exp;
-            // Set gradient (softmax - one_hot)
-            d_logits[idx * vocab_size + v] = probs[v];
+            float prob = d_logits[idx * vocab_size + v] / sum_exp;
+            d_logits[idx * vocab_size + v] = prob;  // Store normalized probability
             
             // If this is the target token, subtract 1 for gradient and compute log loss
             if (v == target) {
                 d_logits[idx * vocab_size + v] -= 1.0f;
-                loss = -logf(probs[v] + 1e-10f);
+                loss = -logf(prob + 1e-10f);
             }
         }
         
@@ -284,7 +275,7 @@ __global__ void kernel_softmax_cross_entropy(const float* logits, const int* tar
 ////////////////////////////////////////////////////////////////////////////////
 // Initialization and free functions for MixerBlock and MixerModel.
 
-MixerBlock* init_mixer_block(int embed_dim, int seq_length) {
+MixerBlock* init_mixer_block(int embed_dim, int seq_length, int batch_size) {
     MixerBlock* block = (MixerBlock*)malloc(sizeof(MixerBlock));
     block->embed_dim = embed_dim;
     block->seq_length = seq_length;
@@ -340,10 +331,10 @@ MixerBlock* init_mixer_block(int embed_dim, int seq_length) {
     cudaMemset(block->channel_mixing_v, 0, size_channel);
     
     // Allocate forward pass buffers.
-    size_t tensor_size = BATCH_SIZE * seq_length * embed_dim * sizeof(float);
+    size_t tensor_size = batch_size * seq_length * embed_dim * sizeof(float);
     cudaMalloc(&block->input_buffer, tensor_size);
     cudaMalloc(&block->residual, tensor_size);
-    size_t tensor_size_trans = BATCH_SIZE * embed_dim * seq_length * sizeof(float);
+    size_t tensor_size_trans = batch_size * embed_dim * seq_length * sizeof(float);
     cudaMalloc(&block->transposed, tensor_size_trans);
     cudaMalloc(&block->token_mixed, tensor_size_trans);
     cudaMalloc(&block->token_mix_activated, tensor_size_trans);
@@ -454,7 +445,7 @@ MixerModel* init_mixer_model(int vocab_size, int embed_dim, int num_layers, int 
     // Allocate MixerBlocks.
     model->blocks = (MixerBlock**)malloc(num_layers * sizeof(MixerBlock*));
     for (int i = 0; i < num_layers; i++) {
-        model->blocks[i] = init_mixer_block(embed_dim, seq_length);
+        model->blocks[i] = init_mixer_block(embed_dim, seq_length, batch_size);
     }
     
     size_t tensor_size = batch_size * seq_length * embed_dim * sizeof(float);
@@ -534,7 +525,7 @@ void mixer_block_forward(cublasHandle_t handle, MixerBlock* block, float* input,
     cudaMemcpy(block->residual, input, total * sizeof(float), cudaMemcpyDeviceToDevice);
     
     // Transpose input: [batch, seq, embed] -> [batch, embed, seq]
-    int threads = THREADS_PER_BLOCK;
+    int threads = 256;
     int nblocks = (total + threads - 1) / threads;
     kernel_transpose_BSE_to_BES<<<nblocks, threads>>>(input, block->transposed, batch_size, seq, embed);
     
@@ -598,7 +589,7 @@ void mixer_model_forward(cublasHandle_t handle, MixerModel* model, int* d_input_
     float alpha = 1.0f, beta = 0.0f;
     
     // Embedding lookup.
-    int threads = THREADS_PER_BLOCK;
+    int threads = 256;
     int nblocks = (total + threads - 1) / threads;
     kernel_apply_embedding<<<nblocks, threads>>>(d_input_tokens, model->embedding_weight, model->embeddings,
                                                  batch, seq, embed, model->vocab_size);
@@ -634,7 +625,7 @@ float compute_loss_and_gradients_gpu(MixerModel* model, int* d_target_tokens) {
     int vocab = model->vocab_size;
     
     // Launch kernel to compute softmax, loss, and gradients in one go
-    int threads = THREADS_PER_BLOCK;
+    int threads = 256;
     int blocks = (batch * seq + threads - 1) / threads;
     kernel_softmax_cross_entropy<<<blocks, threads>>>(
         model->logits, d_target_tokens,
@@ -697,7 +688,7 @@ void mixer_block_backward(cublasHandle_t handle, MixerBlock* block, float* d_out
     int total_trans = batch_size * embed * seq;
     int combined_batch = batch_size * seq;
     int combined_batch_embed = batch_size * embed;
-    int threads = THREADS_PER_BLOCK;
+    int threads = 256;
     int nblocks;
     float alpha = 1.0f, beta = 0.0f;
     
@@ -790,7 +781,7 @@ void embedding_backward_gpu(MixerModel* model, int* d_input_tokens) {
     cudaMemsetAsync(model->embedding_weight_grad, 0, model->vocab_size * embed * sizeof(float));
     
     // Launch kernel to compute gradients
-    int threads = THREADS_PER_BLOCK;
+    int threads = 256;
     int blocks = (batch * seq + threads - 1) / threads;
     kernel_embedding_backward<<<blocks, threads>>>(
         d_input_tokens, model->d_block_outputs,
@@ -828,7 +819,7 @@ void update_weights_adamw_gpu(MixerModel* model, float learning_rate) {
     float scale = model->batch_size * model->seq_length; // For normalization
     
     // Update embedding weights
-    int threads = THREADS_PER_BLOCK;
+    int threads = 256;
     int blocks;
     int embed = model->embed_dim;
     int vocab = model->vocab_size;
@@ -901,7 +892,7 @@ void zero_gradients(MixerModel* model) {
 
 ////////////////////////////////////////////////////////////////////////////////
 // CPU softmax and sampling for text generation.
-void softmax_cpu(const float* input, float* output, int size) {
+void softmax_cpu(const float* input, float* output, int size, float temperature) {
     float max_val = input[0];
     for (int i = 1; i < size; i++) {
         if (input[i] > max_val)
@@ -909,7 +900,7 @@ void softmax_cpu(const float* input, float* output, int size) {
     }
     float sum = 0.0f;
     for (int i = 0; i < size; i++) {
-        output[i] = expf((input[i] - max_val) / TEMPERATURE);
+        output[i] = expf((input[i] - max_val) / temperature);
         sum += output[i];
     }
     for (int i = 0; i < size; i++) {
@@ -982,7 +973,7 @@ void generate_text(cublasHandle_t handle, MixerModel* model, const char* seed_te
         int vocab = model->vocab_size;
         float* h_logits = (float*)malloc(vocab * sizeof(float));
         cudaMemcpy(h_logits, model->logits + ((0 * seq + (seq-1)) * vocab), vocab * sizeof(float), cudaMemcpyDeviceToHost);
-        softmax_cpu(h_logits, h_probs, vocab);
+        softmax_cpu(h_logits, h_probs, vocab, 0.7f);
         int next_token = sample_from_distribution_cpu(h_probs, vocab);
         generated_tokens[i] = next_token;
         free(h_logits);
@@ -1210,7 +1201,7 @@ MixerModel* load_model(const char* filename) {
                    size_tok * sizeof(float), cudaMemcpyHostToDevice);
                    
         // Update masked weights
-        int threads = THREADS_PER_BLOCK;
+        int threads = 256;
         int blocks = (size_tok + threads - 1) / threads;
         kernel_apply_mask<<<blocks, threads>>>(block->token_mixing_weight, 
                                                block->token_mixing_mask, 
@@ -1239,7 +1230,7 @@ int main(){
     cublasCreate(&cublasHandle);
     
     printf("Initializing Mixer model (CUDA version)...\n");
-    int vocab_size = MAX_VOCAB_SIZE;
+    int vocab_size = 256;
     int embed_dim = 512;
     int num_layers = 8;
     int seq_length = 1024;
