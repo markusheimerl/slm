@@ -284,31 +284,6 @@ __global__ void kernel_softmax_cross_entropy(const float* logits, const int* tar
 }
 
 ////////////////////////////////////////////////////////////////////////////////
-// Row-major GEMM wrapper using cuBLAS.
-void gemm_rm(cublasHandle_t handle, int m, int n, int k,
-             const float *A, const float *B, float *C,
-             bool transA, bool transB) {
-    float alpha = 1.0f, beta = 0.0f;
-    // In this wrapper, the convention is as follows:
-    // To compute C = A * B in row-major order (where A is m x k, B is k x n) you should call:
-    //    gemm_rm(handle, m, n, k, A, B, C, true, false);
-    // This gives no transpose on A (transA=true => opA = CUBLAS_OP_N) and a transpose on B (transB=false => opB = CUBLAS_OP_T),
-    // so that cuBLAS computes: C = (B^T) * A in column-major which is equivalent to A * B in row-major.
-    cublasOperation_t opA = transA ? CUBLAS_OP_N : CUBLAS_OP_T;
-    cublasOperation_t opB = transB ? CUBLAS_OP_N : CUBLAS_OP_T;
-    int lda = transA ? k : m;
-    int ldb = transB ? n : k;
-    // Note: Since cuBLAS assumes column-major storage, we swap the order of multiplication.
-    cublasSgemm(handle, opB, opA,
-                n, m, k,
-                &alpha,
-                B, ldb,
-                A, lda,
-                &beta,
-                C, n);
-}
-
-////////////////////////////////////////////////////////////////////////////////
 // Initialization and free functions for MixerBlock and MixerModel.
 
 MixerBlock* init_mixer_block(int embed_dim, int seq_length) {
@@ -554,6 +529,7 @@ void mixer_block_forward(cublasHandle_t handle, MixerBlock* block, float* input,
     int embed = block->embed_dim;
     int total = batch_size * seq * embed;
     int total_trans = batch_size * embed * seq;
+    float alpha = 1.0f, beta = 0.0f;
     
     // Save input for backward.
     cudaMemcpyAsync(block->input_buffer, input, total * sizeof(float), cudaMemcpyDeviceToDevice);
@@ -571,7 +547,13 @@ void mixer_block_forward(cublasHandle_t handle, MixerBlock* block, float* input,
     // Token mixing GEMM:
     // Compute: token_mixed = transposed * (masked_weights)^T.
     int combined_batch_embed = batch_size * embed;
-    gemm_rm(handle, combined_batch_embed, seq, seq, block->transposed, block->masked_weights, block->token_mixed, true, false);
+    cublasSgemm(handle, CUBLAS_OP_T, CUBLAS_OP_N,
+                seq, combined_batch_embed, seq,
+                &alpha,
+                block->masked_weights, seq,
+                block->transposed, seq,
+                &beta,
+                block->token_mixed, seq);
     
     // Apply SiLU activation.
     nblocks = (total_trans + threads - 1) / threads;
@@ -591,7 +573,13 @@ void mixer_block_forward(cublasHandle_t handle, MixerBlock* block, float* input,
     
     // Channel mixing GEMM: channel_mixed = output * (channel_mixing_weight)^T.
     int combined_batch = batch_size * seq;
-    gemm_rm(handle, combined_batch, embed, embed, output, block->channel_mixing_weight, block->channel_mixed, true, false);
+    cublasSgemm(handle, CUBLAS_OP_T, CUBLAS_OP_N,
+                embed, combined_batch, embed,
+                &alpha,
+                block->channel_mixing_weight, embed,
+                output, embed,
+                &beta,
+                block->channel_mixed, embed);
     
     // Apply SiLU activation.
     nblocks = (total + threads - 1) / threads;
@@ -609,6 +597,7 @@ void mixer_model_forward(cublasHandle_t handle, MixerModel* model, int* d_input_
     int seq = model->seq_length;
     int embed = model->embed_dim;
     int total = batch * seq;
+    float alpha = 1.0f, beta = 0.0f;
     
     // Embedding lookup.
     int threads = THREADS_PER_BLOCK;
@@ -630,7 +619,13 @@ void mixer_model_forward(cublasHandle_t handle, MixerModel* model, int* d_input_
     // Output projection: logits = final_output * (out_proj_weight)^T.
     float* final_output = model->block_outputs + model->num_layers * tensor_elements;
     int combined_batch_seq = batch * seq;
-    gemm_rm(handle, combined_batch_seq, model->vocab_size, embed, final_output, model->out_proj_weight, model->logits, true, false);
+    cublasSgemm(handle, CUBLAS_OP_T, CUBLAS_OP_N,
+                model->vocab_size, combined_batch_seq, embed,
+                &alpha,
+                model->out_proj_weight, embed,
+                final_output, embed,
+                &beta,
+                model->logits, model->vocab_size);
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -669,6 +664,7 @@ void output_projection_backward(cublasHandle_t handle, MixerModel* model) {
     int embed = model->embed_dim;
     int vocab = model->vocab_size;
     int combined_batch_seq = batch * seq;
+    float alpha = 1.0f, beta = 0.0f;
     
     float* final_output = model->block_outputs + model->num_layers * (batch * seq * embed);
     float* d_final_output = model->d_block_outputs + model->num_layers * (batch * seq * embed);
@@ -676,10 +672,22 @@ void output_projection_backward(cublasHandle_t handle, MixerModel* model) {
     
     // Gradient w.r.t. output projection weights:
     // We want: out_proj_weight_grad = (d_logits)^T * final_output.
-    gemm_rm(handle, vocab, embed, combined_batch_seq, model->d_logits, final_output, model->out_proj_weight_grad, false, true);
+    cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_T,
+                embed, vocab, combined_batch_seq,
+                &alpha,
+                final_output, embed,
+                model->d_logits, vocab,
+                &beta,
+                model->out_proj_weight_grad, embed);
     
     // Gradient w.r.t. final_output: d_final_output = d_logits * out_proj_weight.
-    gemm_rm(handle, combined_batch_seq, embed, vocab, model->d_logits, model->out_proj_weight, d_final_output, true, true);
+    cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N,
+                embed, combined_batch_seq, vocab,
+                &alpha,
+                model->out_proj_weight, embed,
+                model->d_logits, vocab,
+                &beta,
+                d_final_output, embed);
 }
 
 //
@@ -693,6 +701,7 @@ void mixer_block_backward(cublasHandle_t handle, MixerBlock* block, float* d_out
     int combined_batch_embed = batch_size * embed;
     int threads = THREADS_PER_BLOCK;
     int nblocks;
+    float alpha = 1.0f, beta = 0.0f;
     
     // --- Channel Mixing Backward ---
     cudaMemcpyAsync(block->d_output, d_output, total * sizeof(float), cudaMemcpyDeviceToDevice);
@@ -701,10 +710,23 @@ void mixer_block_backward(cublasHandle_t handle, MixerBlock* block, float* d_out
     kernel_silu_deriv_mult<<<nblocks, threads>>>(block->channel_mixed, block->d_channel_activated, block->d_channel_mixed, total);
     
     // Gradient w.r.t. channel mixing weights
-    gemm_rm(handle, embed, embed, combined_batch, block->residual, block->d_channel_mixed, block->channel_mixing_weight_grad, false, true);
+    cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_T,
+                embed, embed, combined_batch,
+                &alpha,
+                block->d_channel_mixed, embed,
+                block->residual, embed,
+                &beta,
+                block->channel_mixing_weight_grad, embed);
     
     // Gradient w.r.t. inputs
-    gemm_rm(handle, combined_batch, embed, embed, block->d_channel_mixed, block->channel_mixing_weight, d_input, true, true);
+    cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N,
+                embed, combined_batch, embed,
+                &alpha,
+                block->channel_mixing_weight, embed,
+                block->d_channel_mixed, embed,
+                &beta,
+                d_input, embed);
+    
     kernel_add<<<nblocks, threads>>>(d_input, block->d_output, total);
     
     // --- Token Mixing Backward ---
@@ -715,13 +737,27 @@ void mixer_block_backward(cublasHandle_t handle, MixerBlock* block, float* d_out
     kernel_silu_deriv_mult<<<nblocks, threads>>>(block->token_mixed, block->d_output_transposed, block->d_token_mixed, total_trans);
     
     // Gradient w.r.t. token mixing weights
-    gemm_rm(handle, seq, seq, combined_batch_embed, block->d_token_mixed, block->transposed, block->temp_grad, false, true);
+    cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_T,
+                seq, seq, combined_batch_embed,
+                &alpha,
+                block->transposed, seq,
+                block->d_token_mixed, seq,
+                &beta,
+                block->temp_grad, seq);
+    
     nblocks = ((seq * seq) + threads - 1) / threads;
     kernel_apply_mask<<<nblocks, threads>>>(block->temp_grad, block->token_mixing_mask, block->temp_grad, seq * seq);
     kernel_add<<<nblocks, threads>>>(block->token_mixing_weight_grad, block->temp_grad, seq * seq);
     
     // Gradient w.r.t. input from token mixing
-    gemm_rm(handle, combined_batch_embed, seq, seq, block->d_token_mixed, block->masked_weights, block->d_input_transposed, true, true);
+    cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N,
+                seq, combined_batch_embed, seq,
+                &alpha,
+                block->masked_weights, seq,
+                block->d_token_mixed, seq,
+                &beta,
+                block->d_input_transposed, seq);
+    
     nblocks = (total + threads - 1) / threads;
     kernel_transpose_BES_to_BSE<<<nblocks, threads>>>(block->d_input_transposed, d_input, batch_size, embed, seq);
     kernel_add<<<nblocks, threads>>>(d_input, block->d_output, total);
