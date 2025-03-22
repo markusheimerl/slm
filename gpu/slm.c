@@ -171,22 +171,6 @@ __global__ void kernel_apply_mask(const float* weights, const float* mask, float
     }
 }
 
-// Kernel: add vector b into a: a[i] += b[i]
-__global__ void kernel_add(float* a, const float* b, int N) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if(idx < N) {
-        a[idx] += b[idx];
-    }
-}
-
-// Kernel: device-device copy from src to dst
-__global__ void kernel_copy(const float* src, float* dst, int N) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if(idx < N) {
-        dst[idx] = src[idx];
-    }
-}
-
 // Kernel: embedding lookup. For each token in input, copy its embedding row into output.
 __global__ void kernel_apply_embedding(const int* input_tokens, const float* embedding_weight, float* embeddings,
                                          int batch_size, int seq_length, int embed_dim, int vocab_size) {
@@ -538,9 +522,8 @@ void mixer_block_forward(cublasHandle_t handle, MixerBlock* block, float* input,
     nblocks = (total + threads - 1) / threads;
     kernel_transpose_BES_to_BSE<<<nblocks, threads>>>(block->token_mix_activated, output, batch_size, embed, seq);
     
-    // Add residual.
-    nblocks = (total + threads - 1) / threads;
-    kernel_add<<<nblocks, threads>>>(output, block->residual, total);
+    // Add residual
+    cublasSaxpy(handle, total, &alpha, block->residual, 1, output, 1);
     
     // --- Channel Mixing ---
     // Save current output as residual.
@@ -560,9 +543,11 @@ void mixer_block_forward(cublasHandle_t handle, MixerBlock* block, float* input,
     nblocks = (total + threads - 1) / threads;
     kernel_silu<<<nblocks, threads>>>(block->channel_mixed, block->channel_mix_activated, total);
     
-    // Copy activated output and add residual.
+    // Copy activated output
     cudaMemcpy(output, block->channel_mix_activated, total * sizeof(float), cudaMemcpyDeviceToDevice);
-    kernel_add<<<nblocks, threads>>>(output, block->residual, total);
+    
+    // Add residual
+    cublasSaxpy(handle, total, &alpha, block->residual, 1, output, 1);
 }
 
 //
@@ -643,7 +628,7 @@ void output_projection_backward(cublasHandle_t handle, MixerModel* model) {
     
     float* final_output = model->block_outputs + model->num_layers * (batch * seq * embed);
     float* d_final_output = model->d_block_outputs + model->num_layers * (batch * seq * embed);
-    cudaMemsetAsync(d_final_output, 0, combined_batch_seq * embed * sizeof(float));
+    cudaMemset(d_final_output, 0, combined_batch_seq * embed * sizeof(float));
     
     // Gradient w.r.t. output projection weights:
     // We want: out_proj_weight_grad = (d_logits)^T * final_output.
@@ -702,7 +687,8 @@ void mixer_block_backward(cublasHandle_t handle, MixerBlock* block, float* d_out
                 &beta,
                 d_input, embed);
     
-    kernel_add<<<nblocks, threads>>>(d_input, block->d_output, total);
+    // Add d_output to d_input
+    cublasSaxpy(handle, total, &alpha, block->d_output, 1, d_input, 1);
     
     // --- Token Mixing Backward ---
     cudaMemcpy(block->d_output, d_input, total * sizeof(float), cudaMemcpyDeviceToDevice);
@@ -722,7 +708,9 @@ void mixer_block_backward(cublasHandle_t handle, MixerBlock* block, float* d_out
     
     nblocks = ((seq * seq) + threads - 1) / threads;
     kernel_apply_mask<<<nblocks, threads>>>(block->temp_grad, block->token_mixing_mask, block->temp_grad, seq * seq);
-    kernel_add<<<nblocks, threads>>>(block->token_mixing_weight_grad, block->temp_grad, seq * seq);
+    
+    // Add temp_grad to token_mixing_weight_grad
+    cublasSaxpy(handle, seq * seq, &alpha, block->temp_grad, 1, block->token_mixing_weight_grad, 1);
     
     // Gradient w.r.t. input from token mixing
     cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N,
@@ -735,7 +723,9 @@ void mixer_block_backward(cublasHandle_t handle, MixerBlock* block, float* d_out
     
     nblocks = (total + threads - 1) / threads;
     kernel_transpose_BES_to_BSE<<<nblocks, threads>>>(block->d_input_transposed, d_input, batch_size, embed, seq);
-    kernel_add<<<nblocks, threads>>>(d_input, block->d_output, total);
+    
+    // Add d_output to d_input
+    cublasSaxpy(handle, total, &alpha, block->d_output, 1, d_input, 1);
 }
 
 // CUDA kernel for embedding backward
@@ -764,7 +754,7 @@ void embedding_backward_gpu(MixerModel* model, int* d_input_tokens) {
     int embed = model->embed_dim;
     
     // Zero out the embedding gradient first
-    cudaMemsetAsync(model->embedding_weight_grad, 0, model->vocab_size * embed * sizeof(float));
+    cudaMemset(model->embedding_weight_grad, 0, model->vocab_size * embed * sizeof(float));
     
     // Launch kernel to compute gradients
     int threads = 256;
@@ -865,14 +855,14 @@ void zero_gradients(MixerModel* model) {
     int embed = model->embed_dim;
     int vocab = model->vocab_size;
     size_t size = vocab * embed * sizeof(float);
-    cudaMemsetAsync(model->embedding_weight_grad, 0, size);
-    cudaMemsetAsync(model->out_proj_weight_grad, 0, size);
+    cudaMemset(model->embedding_weight_grad, 0, size);
+    cudaMemset(model->out_proj_weight_grad, 0, size);
     for (int l = 0; l < model->num_layers; l++) {
         MixerBlock* block = model->blocks[l];
         size_t size_tok = block->seq_length * block->seq_length * sizeof(float);
         size_t size_chan = block->embed_dim * block->embed_dim * sizeof(float);
-        cudaMemsetAsync(block->token_mixing_weight_grad, 0, size_tok);
-        cudaMemsetAsync(block->channel_mixing_weight_grad, 0, size_chan);
+        cudaMemset(block->token_mixing_weight_grad, 0, size_tok);
+        cudaMemset(block->channel_mixing_weight_grad, 0, size_chan);
     }
 }
 
