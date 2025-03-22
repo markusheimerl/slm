@@ -116,20 +116,6 @@ typedef struct {
 ////////////////////////////////////////////////////////////////////////////////
 // Device helper functions and CUDA kernels
 
-__device__ float device_sigmoid(float x) {
-    return 1.0f / (1.0f + expf(-x));
-}
-
-__device__ float device_silu(float x) {
-    float sig = device_sigmoid(x);
-    return x * sig;
-}
-
-__device__ float device_silu_derivative(float x) {
-    float sig = device_sigmoid(x);
-    return sig + x * sig * (1.0f - sig);
-}
-
 // Kernel: elementwise SiLU activation: out[i] = x * sigmoid(x)
 __global__ void kernel_silu(const float* input, float* output, int N) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
