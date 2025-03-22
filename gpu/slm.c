@@ -245,8 +245,6 @@ __global__ void kernel_softmax_cross_entropy(const float* logits, const int* tar
                                            int batch_size, int seq_length, int vocab_size) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < batch_size * seq_length) {
-        int b = idx / seq_length;
-        int s = idx % seq_length;
         int target = targets[idx];
         
         // Find max for numerical stability
