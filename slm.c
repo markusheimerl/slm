@@ -417,21 +417,25 @@ void mixer_model_forward(MixerModel* model, int* input_tokens) {
         mixer_block_forward(model->blocks[i], input_ptr, output_ptr, model->batch_size);
     }
     
-    // Apply output projection - manual matrix multiplication
+    // Apply output projection using CBLAS GEMM
     float* final_output = &model->block_outputs[model->num_layers * model->batch_size * model->seq_length * model->embed_dim];
+    int combined_batch_seq = model->batch_size * model->seq_length;
     
-    for (int b = 0; b < model->batch_size; b++) {
-        for (int s = 0; s < model->seq_length; s++) {
-            for (int v = 0; v < model->vocab_size; v++) {
-                float sum = 0.0f;
-                for (int e = 0; e < model->embed_dim; e++) {
-                    sum += final_output[b * model->seq_length * model->embed_dim + s * model->embed_dim + e] * 
-                           model->out_proj_weight[v * model->embed_dim + e];
-                }
-                model->logits[b * model->seq_length * model->vocab_size + s * model->vocab_size + v] = sum;
-            }
-        }
-    }
+    // Using GEMM: logits = final_output * out_proj_weight^T
+    cblas_sgemm(CblasRowMajor,         // Layout (row-major)
+                CblasNoTrans,          // No transpose for input
+                CblasTrans,            // Transpose weight matrix
+                combined_batch_seq,    // Number of rows in final_output (batch * seq_length)
+                model->vocab_size,     // Number of columns in out_proj_weight
+                model->embed_dim,      // Number of columns in final_output, rows in out_proj_weight
+                1.0f,                  // Alpha
+                final_output,          // Input matrix
+                model->embed_dim,      // Leading dimension of input
+                model->out_proj_weight,// Weight matrix
+                model->embed_dim,      // Leading dimension of weight matrix
+                0.0f,                  // Beta
+                model->logits,         // Output matrix
+                model->vocab_size);    // Leading dimension of output
 }
 
 // Compute cross-entropy loss and gradients
@@ -497,31 +501,41 @@ void output_projection_backward(MixerModel* model) {
     // Zero out the output projection gradients
     memset(model->out_proj_weight_grad, 0, model->vocab_size * model->embed_dim * sizeof(float));
     
-    // For each position, compute gradients
-    for (int b = 0; b < model->batch_size; b++) {
-        for (int s = 0; s < model->seq_length; s++) {
-            float* d_logits_pos = &model->d_logits[b * model->seq_length * model->vocab_size + s * model->vocab_size];
-            float* output_pos = &final_output[b * model->seq_length * model->embed_dim + s * model->embed_dim];
-            float* d_output_pos = &d_final_output[b * model->seq_length * model->embed_dim + s * model->embed_dim];
-            
-            // Gradient of loss w.r.t. output: d_logits * out_proj_weight (manual matrix multiplication)
-            for (int e = 0; e < model->embed_dim; e++) {
-                float sum = 0.0f;
-                for (int v = 0; v < model->vocab_size; v++) {
-                    sum += d_logits_pos[v] * model->out_proj_weight[v * model->embed_dim + e];
-                }
-                d_output_pos[e] = sum;
-            }
-            
-            // Gradient of loss w.r.t. out_proj_weight: outer product of d_logits and output
-            for (int v = 0; v < model->vocab_size; v++) {
-                for (int e = 0; e < model->embed_dim; e++) {
-                    model->out_proj_weight_grad[v * model->embed_dim + e] += 
-                        d_logits_pos[v] * output_pos[e];
-                }
-            }
-        }
-    }
+    int combined_batch_seq = model->batch_size * model->seq_length;
+    
+    // Gradient w.r.t. out_proj_weight
+    // Using GEMM: out_proj_weight_grad = d_logits^T * final_output
+    cblas_sgemm(CblasRowMajor,         // Layout (row-major)
+                CblasTrans,            // Transpose d_logits
+                CblasNoTrans,          // No transpose for final_output
+                model->vocab_size,     // Number of rows in d_logits^T
+                model->embed_dim,      // Number of columns in final_output
+                combined_batch_seq,    // Number of columns in d_logits^T (= rows in final_output)
+                1.0f,                  // Alpha
+                model->d_logits,       // d_logits matrix
+                model->vocab_size,     // Leading dimension of d_logits
+                final_output,          // final_output matrix
+                model->embed_dim,      // Leading dimension of final_output
+                0.0f,                  // Beta
+                model->out_proj_weight_grad, // Weight gradient matrix
+                model->embed_dim);     // Leading dimension of weight gradient matrix
+    
+    // Gradient w.r.t. final_output
+    // Using GEMM: d_final_output = d_logits * out_proj_weight
+    cblas_sgemm(CblasRowMajor,         // Layout (row-major)
+                CblasNoTrans,          // No transpose for d_logits
+                CblasNoTrans,          // No transpose for weights
+                combined_batch_seq,    // Number of rows in d_logits
+                model->embed_dim,      // Number of columns in weights
+                model->vocab_size,     // Number of columns in d_logits (= rows in weights)
+                1.0f,                  // Alpha
+                model->d_logits,       // d_logits matrix
+                model->vocab_size,     // Leading dimension of d_logits
+                model->out_proj_weight,// Weight matrix
+                model->embed_dim,      // Leading dimension of weight matrix
+                0.0f,                  // Beta
+                d_final_output,        // Output gradient
+                model->embed_dim);     // Leading dimension of output gradient
 }
 
 // Backward pass through a MixerBlock with optimized CBLAS for both token and channel mixing
