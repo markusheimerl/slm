@@ -42,6 +42,13 @@ typedef struct {
     float* d_channel_mixed;             // Gradient for channel mixing
     float* d_input;                     // Gradient to pass to previous layer
     
+    // Additional preallocated buffers
+    float* masked_weights;              // For token mixing
+    float* d_channel_activated;         // For backward pass
+    float* d_output_transposed;         // For token mixing backward
+    float* d_input_transposed;          // For token mixing backward
+    float* temp_grad;                   // For token mixing backward
+    
     // Dimensions
     int embed_dim;
     int seq_length;
@@ -72,6 +79,9 @@ typedef struct {
     // Backward pass buffers
     float* d_logits;                    // Gradient of loss w.r.t. logits
     float* d_block_outputs;             // Gradient of loss w.r.t. block outputs
+    
+    // Additional preallocated buffers
+    float* softmax_probs;               // For loss calculation
     
     // Adam optimizer parameters
     float beta1;
@@ -156,6 +166,13 @@ MixerBlock* init_mixer_block(int embed_dim, int seq_length) {
     block->d_channel_mixed = (float*)malloc(BATCH_SIZE * seq_length * embed_dim * sizeof(float));
     block->d_input = (float*)malloc(BATCH_SIZE * seq_length * embed_dim * sizeof(float));
     
+    // Allocate additional preallocated buffers
+    block->masked_weights = (float*)malloc(seq_length * seq_length * sizeof(float));
+    block->d_channel_activated = (float*)malloc(BATCH_SIZE * seq_length * embed_dim * sizeof(float));
+    block->d_output_transposed = (float*)malloc(BATCH_SIZE * embed_dim * seq_length * sizeof(float));
+    block->d_input_transposed = (float*)malloc(BATCH_SIZE * embed_dim * seq_length * sizeof(float));
+    block->temp_grad = (float*)calloc(seq_length * seq_length, sizeof(float));
+    
     return block;
 }
 
@@ -186,6 +203,13 @@ void free_mixer_block(MixerBlock* block) {
     free(block->d_token_mixed);
     free(block->d_channel_mixed);
     free(block->d_input);
+    
+    // Free additional preallocated buffers
+    free(block->masked_weights);
+    free(block->d_channel_activated);
+    free(block->d_output_transposed);
+    free(block->d_input_transposed);
+    free(block->temp_grad);
     
     free(block);
 }
@@ -242,6 +266,9 @@ MixerModel* init_mixer_model(int vocab_size, int embed_dim, int num_layers, int 
     model->d_logits = (float*)malloc(batch_size * seq_length * vocab_size * sizeof(float));
     model->d_block_outputs = (float*)malloc((num_layers + 1) * batch_size * seq_length * embed_dim * sizeof(float));
     
+    // Allocate additional preallocated buffers
+    model->softmax_probs = (float*)malloc(vocab_size * sizeof(float));
+    
     return model;
 }
 
@@ -271,6 +298,9 @@ void free_mixer_model(MixerModel* model) {
     // Free backward pass buffers
     free(model->d_logits);
     free(model->d_block_outputs);
+    
+    // Free additional preallocated buffers
+    free(model->softmax_probs);
     
     free(model);
 }
@@ -313,10 +343,9 @@ void mixer_block_forward(MixerBlock* block, float* input, float* output, int bat
     }
     
     // Create masked token mixing weights
-    float* masked_weights = (float*)malloc(block->seq_length * block->seq_length * sizeof(float));
     for (int i = 0; i < block->seq_length; i++) {
         for (int j = 0; j < block->seq_length; j++) {
-            masked_weights[i * block->seq_length + j] = 
+            block->masked_weights[i * block->seq_length + j] = 
                 block->token_mixing_weight[i * block->seq_length + j] * 
                 block->token_mixing_mask[i * block->seq_length + j];
         }
@@ -335,7 +364,7 @@ void mixer_block_forward(MixerBlock* block, float* input, float* output, int bat
                 1.0f,                   // Alpha
                 block->transposed,      // Input matrix (batch * embed_dim, seq_length)
                 block->seq_length,      // Leading dimension of input
-                masked_weights,         // Weight matrix (seq_length, seq_length) 
+                block->masked_weights,  // Weight matrix (seq_length, seq_length) 
                 block->seq_length,      // Leading dimension of weight matrix
                 0.0f,                   // Beta
                 block->token_mixed,     // Output matrix
@@ -400,8 +429,6 @@ void mixer_block_forward(MixerBlock* block, float* input, float* output, int bat
     for (int i = 0; i < batch_size * block->seq_length * block->embed_dim; i++) {
         output[i] += block->residual[i];
     }
-    
-    free(masked_weights);
 }
 
 // Forward pass through the entire model
@@ -462,28 +489,25 @@ float compute_loss_and_gradients(MixerModel* model, int* target_tokens) {
             
             // Compute softmax and loss
             float sum_exp = 0.0f;
-            float* softmax_probs = (float*)malloc(model->vocab_size * sizeof(float));
             
             for (int v = 0; v < model->vocab_size; v++) {
-                softmax_probs[v] = expf(logits[v] - max_logit);
-                sum_exp += softmax_probs[v];
+                model->softmax_probs[v] = expf(logits[v] - max_logit);
+                sum_exp += model->softmax_probs[v];
             }
             
             for (int v = 0; v < model->vocab_size; v++) {
-                softmax_probs[v] /= sum_exp;
+                model->softmax_probs[v] /= sum_exp;
             }
             
             // Cross-entropy loss for this position
-            float position_loss = -logf(softmax_probs[target] + 1e-10f);
+            float position_loss = -logf(model->softmax_probs[target] + 1e-10f);
             total_loss += position_loss;
             
             // Gradient of loss w.r.t. logits is (softmax_prob - one_hot_target)
             for (int v = 0; v < model->vocab_size; v++) {
-                d_logits[v] = softmax_probs[v];
+                d_logits[v] = model->softmax_probs[v];
             }
             d_logits[target] -= 1.0f;
-            
-            free(softmax_probs);
         }
     }
     
@@ -550,12 +574,11 @@ void mixer_block_backward(MixerBlock* block, float* d_output, float* d_input, in
     memcpy(block->d_output, d_output, batch_size * block->seq_length * block->embed_dim * sizeof(float));
     
     // Gradient through the residual connection
-    float* d_channel_activated = (float*)malloc(batch_size * block->seq_length * block->embed_dim * sizeof(float));
-    memcpy(d_channel_activated, block->d_output, batch_size * block->seq_length * block->embed_dim * sizeof(float));
+    memcpy(block->d_channel_activated, block->d_output, batch_size * block->seq_length * block->embed_dim * sizeof(float));
     
     // Gradient through the SiLU activation: d_out * SiLU'(x)
     for (int i = 0; i < batch_size * block->seq_length * block->embed_dim; i++) {
-        block->d_channel_mixed[i] = d_channel_activated[i] * silu_derivative(block->channel_mixed[i]);
+        block->d_channel_mixed[i] = block->d_channel_activated[i] * silu_derivative(block->channel_mixed[i]);
     }
     
     // Channel mixing backward - optimized using CBLAS GEMM
@@ -606,11 +629,10 @@ void mixer_block_backward(MixerBlock* block, float* d_output, float* d_input, in
     memcpy(block->d_output, d_input, batch_size * block->seq_length * block->embed_dim * sizeof(float));
     
     // Transpose d_output for token mixing backwards: [batch, seq, embed] -> [batch, embed, seq]
-    float* d_output_transposed = (float*)malloc(batch_size * block->embed_dim * block->seq_length * sizeof(float));
     for (int b = 0; b < batch_size; b++) {
         for (int s = 0; s < block->seq_length; s++) {
             for (int e = 0; e < block->embed_dim; e++) {
-                d_output_transposed[b * block->embed_dim * block->seq_length + e * block->seq_length + s] = 
+                block->d_output_transposed[b * block->embed_dim * block->seq_length + e * block->seq_length + s] = 
                     block->d_output[b * block->seq_length * block->embed_dim + s * block->embed_dim + e];
             }
         }
@@ -618,17 +640,7 @@ void mixer_block_backward(MixerBlock* block, float* d_output, float* d_input, in
     
     // Gradient through SiLU activation for token mixing
     for (int i = 0; i < batch_size * block->embed_dim * block->seq_length; i++) {
-        block->d_token_mixed[i] = d_output_transposed[i] * silu_derivative(block->token_mixed[i]);
-    }
-    
-    // Prepare masked weights
-    float* masked_weights = (float*)malloc(block->seq_length * block->seq_length * sizeof(float));
-    for (int i = 0; i < block->seq_length; i++) {
-        for (int j = 0; j < block->seq_length; j++) {
-            masked_weights[i * block->seq_length + j] = 
-                block->token_mixing_weight[i * block->seq_length + j] * 
-                block->token_mixing_mask[i * block->seq_length + j];
-        }
+        block->d_token_mixed[i] = block->d_output_transposed[i] * silu_derivative(block->token_mixed[i]);
     }
     
     // Combined batch * embed_dim dimension
@@ -636,7 +648,7 @@ void mixer_block_backward(MixerBlock* block, float* d_output, float* d_input, in
     
     // Gradient w.r.t. token mixing weights: W_grad = d_token_mixed^T * transposed
     // Using GEMM: W_grad = alpha * d_token_mixed^T * transposed + beta * W_grad
-    float* temp_grad = (float*)calloc(block->seq_length * block->seq_length, sizeof(float));
+    memset(block->temp_grad, 0, block->seq_length * block->seq_length * sizeof(float));
     cblas_sgemm(CblasRowMajor,         // Layout (row-major)
                 CblasTrans,            // Transpose d_token_mixed
                 CblasNoTrans,          // No transpose for transposed input
@@ -649,21 +661,20 @@ void mixer_block_backward(MixerBlock* block, float* d_output, float* d_input, in
                 block->transposed,     // Transposed inputs from forward pass
                 block->seq_length,     // Leading dimension of transposed input
                 0.0f,                  // Beta
-                temp_grad,             // Temporary weight gradient matrix
+                block->temp_grad,      // Temporary weight gradient matrix
                 block->seq_length);    // Leading dimension of temp_grad
 
     // Apply mask to the gradients and add to weight_grad
     for (int i = 0; i < block->seq_length; i++) {
         for (int j = 0; j < block->seq_length; j++) {
             if (block->token_mixing_mask[i * block->seq_length + j] > 0) {
-                block->token_mixing_weight_grad[i * block->seq_length + j] += temp_grad[i * block->seq_length + j];
+                block->token_mixing_weight_grad[i * block->seq_length + j] += block->temp_grad[i * block->seq_length + j];
             }
         }
     }
     
     // Gradient w.r.t. input (transposed): d_input_transposed = d_token_mixed * masked_weights
     // Using GEMM: d_input_transposed = alpha * d_token_mixed * masked_weights + beta * d_input_transposed
-    float* d_input_transposed = (float*)malloc(batch_size * block->embed_dim * block->seq_length * sizeof(float));
     cblas_sgemm(CblasRowMajor,         // Layout (row-major)
                 CblasNoTrans,          // No transpose for d_token_mixed
                 CblasNoTrans,          // No transpose for masked_weights
@@ -673,10 +684,10 @@ void mixer_block_backward(MixerBlock* block, float* d_output, float* d_input, in
                 1.0f,                  // Alpha
                 block->d_token_mixed,  // d_token_mixed matrix
                 block->seq_length,     // Leading dimension of d_token_mixed
-                masked_weights,        // Masked weight matrix
+                block->masked_weights, // Masked weight matrix
                 block->seq_length,     // Leading dimension of masked weights
                 0.0f,                  // Beta
-                d_input_transposed,    // d_input_transposed matrix
+                block->d_input_transposed, // d_input_transposed matrix
                 block->seq_length);    // Leading dimension of d_input_transposed
                 
     // Transpose the gradient back to the original format [batch, embed, seq] -> [batch, seq, embed]
@@ -684,7 +695,7 @@ void mixer_block_backward(MixerBlock* block, float* d_output, float* d_input, in
         for (int e = 0; e < block->embed_dim; e++) {
             for (int s = 0; s < block->seq_length; s++) {
                 d_input[b * block->seq_length * block->embed_dim + s * block->embed_dim + e] = 
-                    d_input_transposed[b * block->embed_dim * block->seq_length + e * block->seq_length + s];
+                    block->d_input_transposed[b * block->embed_dim * block->seq_length + e * block->seq_length + s];
             }
         }
     }
@@ -693,12 +704,6 @@ void mixer_block_backward(MixerBlock* block, float* d_output, float* d_input, in
     for (int i = 0; i < batch_size * block->seq_length * block->embed_dim; i++) {
         d_input[i] += block->d_output[i];
     }
-    
-    free(d_channel_activated);
-    free(d_output_transposed);
-    free(masked_weights);
-    free(temp_grad);
-    free(d_input_transposed);
 }
 
 // Backward pass through the embedding layer
