@@ -1042,11 +1042,6 @@ int main() {
     int seq_length = 128; // Reduced for faster training
     int batch_size = 8;   // Reduced for faster training
     
-    // Training parameters
-    float learning_rate = 0.0001f;
-    int num_epochs = 10;
-    int steps_per_epoch = 50;
-    
     // Initialize model
     MixerModel* model = init_mixer_model(vocab_size, embed_dim, num_layers, seq_length, batch_size);
     
@@ -1064,6 +1059,11 @@ int main() {
     }
     
     printf("Loaded text corpus with %zu bytes\n", text_size);
+
+    // Training parameters
+    float learning_rate = 0.0001f;
+    int num_epochs = 10;
+    int steps_per_epoch = text_size / (seq_length * batch_size);
     
     // Allocate memory for batches
     int* input_tokens = (int*)malloc(batch_size * seq_length * sizeof(int));
@@ -1110,6 +1110,12 @@ int main() {
                 printf("Epoch %d/%d, Step %d/%d, Loss: %.4f\n", 
                        epoch+1, num_epochs, step+1, steps_per_epoch, step_loss);
             }
+
+            if(step % 100 == 0) {
+                printf("Generating sample text periodically...\n");
+                generate_text(model, seed_text, 100, generated_text, sizeof(generated_text));
+                printf("Generated text:\n%.200s...\n\n", generated_text);
+            }
         }
         
         epoch_loss /= steps_per_epoch;
@@ -1117,11 +1123,6 @@ int main() {
         
         printf("\nEpoch %d/%d completed, Average Loss: %.4f, Time elapsed: %ld seconds\n\n", 
                epoch+1, num_epochs, epoch_loss, current_time - start_time);
-        
-        // Generate sample text after each epoch
-        printf("Generating sample text after epoch %d...\n", epoch+1);
-        generate_text(model, seed_text, 100, generated_text, sizeof(generated_text));
-        printf("Generated text:\n%.200s...\n\n", generated_text);
     }
     
     // Final model saving
