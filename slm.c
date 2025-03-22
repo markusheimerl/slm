@@ -292,7 +292,7 @@ void apply_embedding(MixerModel* model, int* input_tokens) {
            model->batch_size * model->seq_length * model->embed_dim * sizeof(float));
 }
 
-// Forward pass through a MixerBlock with optimized CBLAS for channel mixing
+// Forward pass through a MixerBlock with optimized CBLAS for both token and channel mixing
 void mixer_block_forward(MixerBlock* block, float* input, float* output, int batch_size) {
     // Store input for backward pass
     memcpy(block->input_buffer, input, batch_size * block->seq_length * block->embed_dim * sizeof(float));
@@ -322,20 +322,24 @@ void mixer_block_forward(MixerBlock* block, float* input, float* output, int bat
         }
     }
     
-    // Token mixing - using manual matrix multiplication instead of SGEMV
-    for (int b = 0; b < batch_size; b++) {
-        for (int e = 0; e < block->embed_dim; e++) {
-            // Use manual matrix multiplication
-            for (int s_out = 0; s_out < block->seq_length; s_out++) {
-                block->token_mixed[b * block->embed_dim * block->seq_length + e * block->seq_length + s_out] = 0.0f;
-                for (int s_in = 0; s_in < block->seq_length; s_in++) {
-                    block->token_mixed[b * block->embed_dim * block->seq_length + e * block->seq_length + s_out] +=
-                        block->transposed[b * block->embed_dim * block->seq_length + e * block->seq_length + s_in] * 
-                        masked_weights[s_out * block->seq_length + s_in];
-                }
-            }
-        }
-    }
+    // Token mixing - using CBLAS GEMM
+    int combined_batch_embed = batch_size * block->embed_dim;
+    
+    // Using GEMM: token_mixed = transposed * masked_weights^T
+    cblas_sgemm(CblasRowMajor,          // Layout (row-major)
+                CblasNoTrans,           // No transpose for input
+                CblasTrans,             // Transpose weight matrix
+                combined_batch_embed,   // Number of rows in input (batch * embed_dim)
+                block->seq_length,      // Number of columns in masked_weights
+                block->seq_length,      // Number of columns in input, rows in masked_weights
+                1.0f,                   // Alpha
+                block->transposed,      // Input matrix (batch * embed_dim, seq_length)
+                block->seq_length,      // Leading dimension of input
+                masked_weights,         // Weight matrix (seq_length, seq_length) 
+                block->seq_length,      // Leading dimension of weight matrix
+                0.0f,                   // Beta
+                block->token_mixed,     // Output matrix
+                block->seq_length);     // Leading dimension of output
     
     // Apply SiLU activation: x * sigmoid(x)
     for (int i = 0; i < batch_size * block->embed_dim * block->seq_length; i++) {
@@ -520,7 +524,7 @@ void output_projection_backward(MixerModel* model) {
     }
 }
 
-// Backward pass through a MixerBlock with optimized CBLAS for channel mixing
+// Backward pass through a MixerBlock with optimized CBLAS for both token and channel mixing
 void mixer_block_backward(MixerBlock* block, float* d_output, float* d_input, int batch_size) {
     // Initialize gradients for this block
     memset(block->token_mixing_weight_grad, 0, block->seq_length * block->seq_length * sizeof(float));
@@ -613,42 +617,61 @@ void mixer_block_backward(MixerBlock* block, float* d_output, float* d_input, in
         }
     }
     
-    // Gradient w.r.t. token mixing weights and inputs
+    // Combined batch * embed_dim dimension
+    int combined_batch_embed = batch_size * block->embed_dim;
+    
+    // Gradient w.r.t. token mixing weights: W_grad = d_token_mixed^T * transposed
+    // Using GEMM: W_grad = alpha * d_token_mixed^T * transposed + beta * W_grad
+    float* temp_grad = (float*)calloc(block->seq_length * block->seq_length, sizeof(float));
+    cblas_sgemm(CblasRowMajor,         // Layout (row-major)
+                CblasTrans,            // Transpose d_token_mixed
+                CblasNoTrans,          // No transpose for transposed input
+                block->seq_length,     // Number of rows in d_token_mixed^T
+                block->seq_length,     // Number of columns in transposed
+                combined_batch_embed,  // Number of columns in d_token_mixed^T (= rows in transposed)
+                1.0f,                  // Alpha
+                block->d_token_mixed,  // d_token_mixed matrix
+                block->seq_length,     // Leading dimension of d_token_mixed
+                block->transposed,     // Transposed inputs from forward pass
+                block->seq_length,     // Leading dimension of transposed input
+                0.0f,                  // Beta
+                temp_grad,             // Temporary weight gradient matrix
+                block->seq_length);    // Leading dimension of temp_grad
+
+    // Apply mask to the gradients and add to weight_grad
+    for (int i = 0; i < block->seq_length; i++) {
+        for (int j = 0; j < block->seq_length; j++) {
+            if (block->token_mixing_mask[i * block->seq_length + j] > 0) {
+                block->token_mixing_weight_grad[i * block->seq_length + j] += temp_grad[i * block->seq_length + j];
+            }
+        }
+    }
+    
+    // Gradient w.r.t. input (transposed): d_input_transposed = d_token_mixed * masked_weights
+    // Using GEMM: d_input_transposed = alpha * d_token_mixed * masked_weights + beta * d_input_transposed
+    float* d_input_transposed = (float*)malloc(batch_size * block->embed_dim * block->seq_length * sizeof(float));
+    cblas_sgemm(CblasRowMajor,         // Layout (row-major)
+                CblasNoTrans,          // No transpose for d_token_mixed
+                CblasNoTrans,          // No transpose for masked_weights
+                combined_batch_embed,  // Number of rows in d_token_mixed
+                block->seq_length,     // Number of columns in masked_weights
+                block->seq_length,     // Number of columns in d_token_mixed (= rows in masked_weights)
+                1.0f,                  // Alpha
+                block->d_token_mixed,  // d_token_mixed matrix
+                block->seq_length,     // Leading dimension of d_token_mixed
+                masked_weights,        // Masked weight matrix
+                block->seq_length,     // Leading dimension of masked weights
+                0.0f,                  // Beta
+                d_input_transposed,    // d_input_transposed matrix
+                block->seq_length);    // Leading dimension of d_input_transposed
+                
+    // Transpose the gradient back to the original format [batch, embed, seq] -> [batch, seq, embed]
     for (int b = 0; b < batch_size; b++) {
         for (int e = 0; e < block->embed_dim; e++) {
-            float* d_mixed = &block->d_token_mixed[b * block->embed_dim * block->seq_length + e * block->seq_length];
-            float* input_slice = &block->transposed[b * block->embed_dim * block->seq_length + e * block->seq_length];
-            
-            // Gradient w.r.t. token mixing weights (masked)
-            for (int s_out = 0; s_out < block->seq_length; s_out++) {
-                for (int s_in = 0; s_in < block->seq_length; s_in++) {
-                    if (block->token_mixing_mask[s_out * block->seq_length + s_in] > 0) {
-                        block->token_mixing_weight_grad[s_out * block->seq_length + s_in] += 
-                            d_mixed[s_out] * input_slice[s_in];
-                    }
-                }
-            }
-            
-            // Gradient w.r.t. input (transposed)
-            float* d_input_transposed = (float*)malloc(block->seq_length * sizeof(float));
-            memset(d_input_transposed, 0, block->seq_length * sizeof(float));
-            
-            for (int s_in = 0; s_in < block->seq_length; s_in++) {
-                float sum = 0.0f;
-                for (int s_out = 0; s_out < block->seq_length; s_out++) {
-                    if (block->token_mixing_mask[s_out * block->seq_length + s_in] > 0) {
-                        sum += d_mixed[s_out] * masked_weights[s_out * block->seq_length + s_in];
-                    }
-                }
-                d_input_transposed[s_in] = sum;
-            }
-            
-            // Transpose the gradient back to the original format
             for (int s = 0; s < block->seq_length; s++) {
-                d_input[b * block->seq_length * block->embed_dim + s * block->embed_dim + e] = d_input_transposed[s];
+                d_input[b * block->seq_length * block->embed_dim + s * block->embed_dim + e] = 
+                    d_input_transposed[b * block->embed_dim * block->seq_length + e * block->seq_length + s];
             }
-            
-            free(d_input_transposed);
         }
     }
     
@@ -660,6 +683,8 @@ void mixer_block_backward(MixerBlock* block, float* d_output, float* d_input, in
     free(d_channel_activated);
     free(d_output_transposed);
     free(masked_weights);
+    free(temp_grad);
+    free(d_input_transposed);
 }
 
 // Backward pass through the embedding layer
@@ -860,9 +885,7 @@ void generate_text(MixerModel* model, const char* seed_text, int max_length, cha
     }
     
     // Allocate buffer for generated tokens
-    int* generated_tokens = (int*)malloc((model->seq_length + max_length) * sizeof(int));
-    memcpy(generated_tokens, seed_tokens, model->seq_length * sizeof(int));
-    int num_generated = model->seq_length;
+    int* generated_tokens = (int*)malloc(max_length * sizeof(int));
     
     // Generate text token by token
     for (int i = 0; i < max_length; i++) {
@@ -870,14 +893,15 @@ void generate_text(MixerModel* model, const char* seed_text, int max_length, cha
         mixer_model_forward(model, input_batch);
         
         // Get logits for the last token position of the first example
-        float* last_position_logits = &model->logits[0 * model->seq_length * model->vocab_size + (model->seq_length - 1) * model->vocab_size];
+        float* last_position_logits = &model->logits[0 * model->seq_length * model->vocab_size + 
+                                                   (model->seq_length - 1) * model->vocab_size];
         
         // Apply softmax to get probabilities
         softmax(last_position_logits, probs, model->vocab_size);
         
         // Sample the next token
         int next_token = sample_from_distribution(probs, model->vocab_size);
-        generated_tokens[num_generated++] = next_token;
+        generated_tokens[i] = next_token;
         
         // Shift input tokens to the left and add the new token at the end
         for (int s = 0; s < model->seq_length - 1; s++) {
@@ -887,7 +911,7 @@ void generate_text(MixerModel* model, const char* seed_text, int max_length, cha
     }
     
     // Decode the generated tokens
-    decode_tokens(generated_tokens, num_generated, output, output_size);
+    decode_tokens(generated_tokens, max_length, output, output_size);
     
     free(seed_tokens);
     free(input_batch);
@@ -1056,10 +1080,10 @@ int main() {
     
     // Model hyperparameters
     int vocab_size = MAX_VOCAB_SIZE;
-    int embed_dim = 128;  // Reduced for faster training
-    int num_layers = 4;   // Reduced for faster training
-    int seq_length = 128; // Reduced for faster training
-    int batch_size = 8;   // Reduced for faster training
+    int embed_dim = 128;
+    int num_layers = 4;
+    int seq_length = 512;
+    int batch_size = 16;
     
     // Initialize model
     MixerModel* model = init_mixer_model(vocab_size, embed_dim, num_layers, seq_length, batch_size);
@@ -1093,14 +1117,8 @@ int main() {
     size_t seed_pos = rand() % (text_size - 1024);
     strncpy(seed_text, text + seed_pos, 1023);
     seed_text[1023] = '\0';
-    printf("Sample seed text for generation:\n%.100s...\n\n", seed_text);
-    
-    // Generate text before training
-    char generated_text[4096];
-    printf("Generating text before training...\n");
-    generate_text(model, seed_text, 100, generated_text, sizeof(generated_text));
-    printf("Generated text:\n%.200s...\n\n", generated_text);
-    
+    char generated_text[2048];
+
     // Training loop
     printf("Starting training...\n");
     time_t start_time = time(NULL);
@@ -1132,8 +1150,9 @@ int main() {
 
             if(step % 100 == 0) {
                 printf("Generating sample text periodically...\n");
+                printf("Sample seed text for generation:\n%s\n\n", seed_text);
                 generate_text(model, seed_text, 100, generated_text, sizeof(generated_text));
-                printf("Generated text:\n%.200s...\n\n", generated_text);
+                printf("Generated text:\n%s\n\n", generated_text);
             }
         }
         
