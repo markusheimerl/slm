@@ -99,42 +99,19 @@ class TextDataset(Dataset):
         start_idx = random.randint(0, len(self.text) - char_length - 1)
         return self.text[start_idx:start_idx + char_length]
 
-class CausalTokenMixingMLP(nn.Module):
-    def __init__(self, seq_length):
-        super().__init__()
-        self.weight1 = nn.Parameter(torch.randn(seq_length, seq_length) / math.sqrt(seq_length))
-        self.weight2 = nn.Parameter(torch.randn(seq_length, seq_length) / math.sqrt(seq_length))
-        mask = torch.tril(torch.ones(seq_length, seq_length))
-        self.register_buffer('mask', mask)
-    
-    def forward(self, x):
-        masked_weight1 = self.weight1 * self.mask
-        x = F.linear(x, masked_weight1)
-        x = x * torch.sigmoid(x)
-        masked_weight2 = self.weight2 * self.mask
-        x = F.linear(x, masked_weight2)
-        return x
-
-class ChannelMixingMLP(nn.Module):
-    def __init__(self, embed_dim, hidden_dim):
-        super().__init__()
-        self.weight1 = nn.Parameter(torch.randn(hidden_dim, embed_dim) / math.sqrt(embed_dim))
-        self.weight2 = nn.Parameter(torch.randn(embed_dim, hidden_dim) / math.sqrt(hidden_dim))
-    
-    def forward(self, x):
-        x = F.linear(x, self.weight1)
-        x = x * torch.sigmoid(x)
-        x = F.linear(x, self.weight2)
-        return x
-
 class MixerBlock(nn.Module):
-    def __init__(self, embed_dim, seq_length, hidden_dim_channel):
+    def __init__(self, embed_dim, seq_length):
         super().__init__()
         self.embed_dim = embed_dim
         self.seq_length = seq_length
         
-        self.token_mixing = CausalTokenMixingMLP(seq_length)
-        self.channel_mixing = ChannelMixingMLP(embed_dim, hidden_dim_channel)
+        # Token mixing parameters
+        self.token_mixing_weight = nn.Parameter(torch.randn(seq_length, seq_length) / math.sqrt(seq_length))
+        mask = torch.tril(torch.ones(seq_length, seq_length))
+        self.register_buffer('mask', mask)
+        
+        # Channel mixing parameters
+        self.channel_mixing_weight = nn.Parameter(torch.randn(embed_dim, embed_dim) / math.sqrt(embed_dim))
     
     def forward(self, x):
         batch_size = x.shape[0]
@@ -143,29 +120,32 @@ class MixerBlock(nn.Module):
         residual = x
         x = x.transpose(1, 2)
         x_flat = x.reshape(batch_size * self.embed_dim, self.seq_length)
-        x_mixed = self.token_mixing(x_flat)
-        x = x_mixed.reshape(batch_size, self.embed_dim, self.seq_length)
+        masked_weight = self.token_mixing_weight * self.mask
+        x_token_mixed = F.linear(x_flat, masked_weight)
+        x_token_mixed = x_token_mixed * torch.sigmoid(x_token_mixed)
+        x = x_token_mixed.reshape(batch_size, self.embed_dim, self.seq_length)
         x = x.transpose(1, 2)
         x = x + residual
         
         # Channel mixing
         residual = x
         x_flat = x.reshape(batch_size * self.seq_length, self.embed_dim)
-        x_mixed = self.channel_mixing(x_flat)
-        x = x_mixed.reshape(batch_size, self.seq_length, self.embed_dim)
+        x_channel_mixed = F.linear(x_flat, self.channel_mixing_weight)
+        x_channel_mixed = x_channel_mixed * torch.sigmoid(x_channel_mixed)
+        x = x_channel_mixed.reshape(batch_size, self.seq_length, self.embed_dim)
         x = x + residual
         
         return x
 
 class MixerModel(nn.Module):
-    def __init__(self, vocab_size, embed_dim=128, hidden_dim=256, num_layers=4, seq_length=64):
+    def __init__(self, vocab_size, embed_dim=128, num_layers=4, seq_length=64):
         super().__init__()
         self.embed_dim = embed_dim
         self.seq_length = seq_length
         
         self.embedding = Embedding(vocab_size, embed_dim)
         self.blocks = nn.ModuleList([
-            MixerBlock(embed_dim=embed_dim, seq_length=seq_length, hidden_dim_channel=hidden_dim)
+            MixerBlock(embed_dim=embed_dim, seq_length=seq_length)
             for _ in range(num_layers)
         ])
         self.out_proj_weight = nn.Parameter(torch.randn(vocab_size, embed_dim) / math.sqrt(embed_dim))
@@ -255,9 +235,8 @@ def main():
     
     model = MixerModel(
         vocab_size=tokenizer.vocab_size,
-        embed_dim=16,
-        hidden_dim=512,
-        num_layers=4,
+        embed_dim=512,
+        num_layers=8,
         seq_length=seq_length
     ).to(device)
     
