@@ -296,15 +296,15 @@ MixerBlock* init_mixer_block(int embed_dim, int seq_length) {
     for (int i = 0; i < seq_length * seq_length; i++) {
         h_token_mixing_weight[i] = (((float)rand()/(float)RAND_MAX * 2.0f - 1.0f) * scale_token);
     }
-    cudaMalloc((void**)&block->token_mixing_weight, size_tok);
+    cudaMalloc(&block->token_mixing_weight, size_tok);
     cudaMemcpy(block->token_mixing_weight, h_token_mixing_weight, size_tok, cudaMemcpyHostToDevice);
     free(h_token_mixing_weight);
     
-    cudaMalloc((void**)&block->token_mixing_weight_grad, size_tok);
+    cudaMalloc(&block->token_mixing_weight_grad, size_tok);
     cudaMemset(block->token_mixing_weight_grad, 0, size_tok);
-    cudaMalloc((void**)&block->token_mixing_m, size_tok);
+    cudaMalloc(&block->token_mixing_m, size_tok);
     cudaMemset(block->token_mixing_m, 0, size_tok);
-    cudaMalloc((void**)&block->token_mixing_v, size_tok);
+    cudaMalloc(&block->token_mixing_v, size_tok);
     cudaMemset(block->token_mixing_v, 0, size_tok);
     
     // Create token mixing mask on host then copy.
@@ -314,12 +314,12 @@ MixerBlock* init_mixer_block(int embed_dim, int seq_length) {
             h_token_mixing_mask[i * seq_length + j] = (j <= i) ? 1.0f : 0.0f;
         }
     }
-    cudaMalloc((void**)&block->token_mixing_mask, size_tok);
+    cudaMalloc(&block->token_mixing_mask, size_tok);
     cudaMemcpy(block->token_mixing_mask, h_token_mixing_mask, size_tok, cudaMemcpyHostToDevice);
     free(h_token_mixing_mask);
     
     // Pre-allocate masked_weights buffer
-    cudaMalloc((void**)&block->masked_weights, size_tok);
+    cudaMalloc(&block->masked_weights, size_tok);
     
     // Channel mixing weights.
     size_t size_channel = embed_dim * embed_dim * sizeof(float);
@@ -328,39 +328,39 @@ MixerBlock* init_mixer_block(int embed_dim, int seq_length) {
     for (int i = 0; i < embed_dim * embed_dim; i++){
         h_channel_mixing_weight[i] = (((float)rand()/(float)RAND_MAX * 2.0f - 1.0f) * scale_channel);
     }
-    cudaMalloc((void**)&block->channel_mixing_weight, size_channel);
+    cudaMalloc(&block->channel_mixing_weight, size_channel);
     cudaMemcpy(block->channel_mixing_weight, h_channel_mixing_weight, size_channel, cudaMemcpyHostToDevice);
     free(h_channel_mixing_weight);
     
-    cudaMalloc((void**)&block->channel_mixing_weight_grad, size_channel);
+    cudaMalloc(&block->channel_mixing_weight_grad, size_channel);
     cudaMemset(block->channel_mixing_weight_grad, 0, size_channel);
-    cudaMalloc((void**)&block->channel_mixing_m, size_channel);
+    cudaMalloc(&block->channel_mixing_m, size_channel);
     cudaMemset(block->channel_mixing_m, 0, size_channel);
-    cudaMalloc((void**)&block->channel_mixing_v, size_channel);
+    cudaMalloc(&block->channel_mixing_v, size_channel);
     cudaMemset(block->channel_mixing_v, 0, size_channel);
     
     // Allocate forward pass buffers.
     size_t tensor_size = BATCH_SIZE * seq_length * embed_dim * sizeof(float);
-    cudaMalloc((void**)&block->input_buffer, tensor_size);
-    cudaMalloc((void**)&block->residual, tensor_size);
+    cudaMalloc(&block->input_buffer, tensor_size);
+    cudaMalloc(&block->residual, tensor_size);
     size_t tensor_size_trans = BATCH_SIZE * embed_dim * seq_length * sizeof(float);
-    cudaMalloc((void**)&block->transposed, tensor_size_trans);
-    cudaMalloc((void**)&block->token_mixed, tensor_size_trans);
-    cudaMalloc((void**)&block->token_mix_activated, tensor_size_trans);
-    cudaMalloc((void**)&block->channel_mixed, tensor_size);
-    cudaMalloc((void**)&block->channel_mix_activated, tensor_size);
+    cudaMalloc(&block->transposed, tensor_size_trans);
+    cudaMalloc(&block->token_mixed, tensor_size_trans);
+    cudaMalloc(&block->token_mix_activated, tensor_size_trans);
+    cudaMalloc(&block->channel_mixed, tensor_size);
+    cudaMalloc(&block->channel_mix_activated, tensor_size);
     
     // Allocate backward pass buffers.
-    cudaMalloc((void**)&block->d_output, tensor_size);
-    cudaMalloc((void**)&block->d_token_mixed, tensor_size_trans);
-    cudaMalloc((void**)&block->d_channel_mixed, tensor_size);
-    cudaMalloc((void**)&block->d_input, tensor_size);
+    cudaMalloc(&block->d_output, tensor_size);
+    cudaMalloc(&block->d_token_mixed, tensor_size_trans);
+    cudaMalloc(&block->d_channel_mixed, tensor_size);
+    cudaMalloc(&block->d_input, tensor_size);
     
     // Additional buffers.
-    cudaMalloc((void**)&block->d_channel_activated, tensor_size);
-    cudaMalloc((void**)&block->d_output_transposed, tensor_size_trans);
-    cudaMalloc((void**)&block->d_input_transposed, tensor_size_trans);
-    cudaMalloc((void**)&block->temp_grad, size_tok);
+    cudaMalloc(&block->d_channel_activated, tensor_size);
+    cudaMalloc(&block->d_output_transposed, tensor_size_trans);
+    cudaMalloc(&block->d_input_transposed, tensor_size_trans);
+    cudaMalloc(&block->temp_grad, size_tok);
     cudaMemset(block->temp_grad, 0, size_tok);
     
     return block;
@@ -420,21 +420,21 @@ MixerModel* init_mixer_model(int vocab_size, int embed_dim, int num_layers, int 
     for (int i = 0; i < vocab_size * embed_dim; i++) {
         h_embedding_weight[i] = (((float)rand()/(float)RAND_MAX * 2.0f - 1.0f) * scale_embed);
     }
-    cudaMalloc((void**)&model->embedding_weight, embed_matrix_size);
+    cudaMalloc(&model->embedding_weight, embed_matrix_size);
     cudaMemcpy(model->embedding_weight, h_embedding_weight, embed_matrix_size, cudaMemcpyHostToDevice);
     
     // Keep a CPU copy for quick parameter access
     model->h_embedding_weight = h_embedding_weight;
     
-    cudaMalloc((void**)&model->embedding_weight_grad, embed_matrix_size);
+    cudaMalloc(&model->embedding_weight_grad, embed_matrix_size);
     cudaMemset(model->embedding_weight_grad, 0, embed_matrix_size);
-    cudaMalloc((void**)&model->embedding_m, embed_matrix_size);
+    cudaMalloc(&model->embedding_m, embed_matrix_size);
     cudaMemset(model->embedding_m, 0, embed_matrix_size);
-    cudaMalloc((void**)&model->embedding_v, embed_matrix_size);
+    cudaMalloc(&model->embedding_v, embed_matrix_size);
     cudaMemset(model->embedding_v, 0, embed_matrix_size);
     
     // Output projection weights.
-    cudaMalloc((void**)&model->out_proj_weight, embed_matrix_size);
+    cudaMalloc(&model->out_proj_weight, embed_matrix_size);
     float* h_out_proj_weight = (float*)malloc(embed_matrix_size);
     for (int i = 0; i < vocab_size * embed_dim; i++) {
         h_out_proj_weight[i] = (((float)rand()/(float)RAND_MAX * 2.0f - 1.0f) * scale_embed);
@@ -444,11 +444,11 @@ MixerModel* init_mixer_model(int vocab_size, int embed_dim, int num_layers, int 
     // Keep a CPU copy for quick parameter access
     model->h_out_proj_weight = h_out_proj_weight;
     
-    cudaMalloc((void**)&model->out_proj_weight_grad, embed_matrix_size);
+    cudaMalloc(&model->out_proj_weight_grad, embed_matrix_size);
     cudaMemset(model->out_proj_weight_grad, 0, embed_matrix_size);
-    cudaMalloc((void**)&model->out_proj_m, embed_matrix_size);
+    cudaMalloc(&model->out_proj_m, embed_matrix_size);
     cudaMemset(model->out_proj_m, 0, embed_matrix_size);
-    cudaMalloc((void**)&model->out_proj_v, embed_matrix_size);
+    cudaMalloc(&model->out_proj_v, embed_matrix_size);
     cudaMemset(model->out_proj_v, 0, embed_matrix_size);
     
     // Allocate MixerBlocks.
@@ -458,20 +458,20 @@ MixerModel* init_mixer_model(int vocab_size, int embed_dim, int num_layers, int 
     }
     
     size_t tensor_size = batch_size * seq_length * embed_dim * sizeof(float);
-    cudaMalloc((void**)&model->embeddings, tensor_size);
+    cudaMalloc(&model->embeddings, tensor_size);
     // Allocate (num_layers+1) outputs concatenated.
-    cudaMalloc((void**)&model->block_outputs, (num_layers+1) * tensor_size);
+    cudaMalloc(&model->block_outputs, (num_layers+1) * tensor_size);
     // Logits: [batch, seq, vocab_size]
     size_t logits_size = batch_size * seq_length * vocab_size * sizeof(float);
-    cudaMalloc((void**)&model->logits, logits_size);
+    cudaMalloc(&model->logits, logits_size);
     
-    cudaMalloc((void**)&model->d_logits, logits_size);
-    cudaMalloc((void**)&model->d_block_outputs, (num_layers+1) * tensor_size);
+    cudaMalloc(&model->d_logits, logits_size);
+    cudaMalloc(&model->d_block_outputs, (num_layers+1) * tensor_size);
     
     // Allocate persistent device buffers for training
-    cudaMalloc((void**)&model->d_input_tokens, batch_size * seq_length * sizeof(int));
-    cudaMalloc((void**)&model->d_target_tokens, batch_size * seq_length * sizeof(int));
-    cudaMalloc((void**)&model->d_loss_buffer, batch_size * seq_length * sizeof(float));
+    cudaMalloc(&model->d_input_tokens, batch_size * seq_length * sizeof(int));
+    cudaMalloc(&model->d_target_tokens, batch_size * seq_length * sizeof(int));
+    cudaMalloc(&model->d_loss_buffer, batch_size * seq_length * sizeof(float));
     
     // Allocate persistent host buffers for loss computation
     model->h_loss_buffer = (float*)malloc(batch_size * seq_length * sizeof(float));
@@ -530,8 +530,8 @@ void mixer_block_forward(cublasHandle_t handle, MixerBlock* block, float* input,
     float alpha = 1.0f, beta = 0.0f;
     
     // Save input for backward.
-    cudaMemcpyAsync(block->input_buffer, input, total * sizeof(float), cudaMemcpyDeviceToDevice);
-    cudaMemcpyAsync(block->residual, input, total * sizeof(float), cudaMemcpyDeviceToDevice);
+    cudaMemcpy(block->input_buffer, input, total * sizeof(float), cudaMemcpyDeviceToDevice);
+    cudaMemcpy(block->residual, input, total * sizeof(float), cudaMemcpyDeviceToDevice);
     
     // Transpose input: [batch, seq, embed] -> [batch, embed, seq]
     int threads = THREADS_PER_BLOCK;
@@ -567,7 +567,7 @@ void mixer_block_forward(cublasHandle_t handle, MixerBlock* block, float* input,
     
     // --- Channel Mixing ---
     // Save current output as residual.
-    cudaMemcpyAsync(block->residual, output, total * sizeof(float), cudaMemcpyDeviceToDevice);
+    cudaMemcpy(block->residual, output, total * sizeof(float), cudaMemcpyDeviceToDevice);
     
     // Channel mixing GEMM: channel_mixed = output * (channel_mixing_weight)^T.
     int combined_batch = batch_size * seq;
@@ -584,7 +584,7 @@ void mixer_block_forward(cublasHandle_t handle, MixerBlock* block, float* input,
     kernel_silu<<<nblocks, threads>>>(block->channel_mixed, block->channel_mix_activated, total);
     
     // Copy activated output and add residual.
-    cudaMemcpyAsync(output, block->channel_mix_activated, total * sizeof(float), cudaMemcpyDeviceToDevice);
+    cudaMemcpy(output, block->channel_mix_activated, total * sizeof(float), cudaMemcpyDeviceToDevice);
     kernel_add<<<nblocks, threads>>>(output, block->residual, total);
 }
 
@@ -605,7 +605,7 @@ void mixer_model_forward(cublasHandle_t handle, MixerModel* model, int* d_input_
     
     // Copy embeddings to first block_outputs buffer.
     int tensor_elements = total * embed;
-    cudaMemcpyAsync(model->block_outputs, model->embeddings, tensor_elements * sizeof(float), cudaMemcpyDeviceToDevice);
+    cudaMemcpy(model->block_outputs, model->embeddings, tensor_elements * sizeof(float), cudaMemcpyDeviceToDevice);
     
     // Forward through each MixerBlock.
     for (int i = 0; i < model->num_layers; i++) {
@@ -643,7 +643,7 @@ float compute_loss_and_gradients_gpu(MixerModel* model, int* d_target_tokens) {
     );
     
     // Retrieve loss values
-    cudaMemcpyAsync(model->h_loss_buffer, model->d_loss_buffer, batch * seq * sizeof(float), cudaMemcpyDeviceToHost);
+    cudaMemcpy(model->h_loss_buffer, model->d_loss_buffer, batch * seq * sizeof(float), cudaMemcpyDeviceToHost);
     
     // Sum up the loss on CPU
     float total_loss = 0.0f;
@@ -702,8 +702,8 @@ void mixer_block_backward(cublasHandle_t handle, MixerBlock* block, float* d_out
     float alpha = 1.0f, beta = 0.0f;
     
     // --- Channel Mixing Backward ---
-    cudaMemcpyAsync(block->d_output, d_output, total * sizeof(float), cudaMemcpyDeviceToDevice);
-    cudaMemcpyAsync(block->d_channel_activated, block->d_output, total * sizeof(float), cudaMemcpyDeviceToDevice);
+    cudaMemcpy(block->d_output, d_output, total * sizeof(float), cudaMemcpyDeviceToDevice);
+    cudaMemcpy(block->d_channel_activated, block->d_output, total * sizeof(float), cudaMemcpyDeviceToDevice);
     nblocks = (total + threads - 1) / threads;
     kernel_silu_deriv_mult<<<nblocks, threads>>>(block->channel_mixed, block->d_channel_activated, block->d_channel_mixed, total);
     
@@ -728,7 +728,7 @@ void mixer_block_backward(cublasHandle_t handle, MixerBlock* block, float* d_out
     kernel_add<<<nblocks, threads>>>(d_input, block->d_output, total);
     
     // --- Token Mixing Backward ---
-    cudaMemcpyAsync(block->d_output, d_input, total * sizeof(float), cudaMemcpyDeviceToDevice);
+    cudaMemcpy(block->d_output, d_input, total * sizeof(float), cudaMemcpyDeviceToDevice);
     nblocks = (total_trans + threads - 1) / threads;
     kernel_transpose_BSE_to_BES<<<nblocks, threads>>>(d_input, block->d_output_transposed, batch_size, seq, embed);
     nblocks = (total_trans + threads - 1) / threads;
@@ -971,7 +971,7 @@ void generate_text(cublasHandle_t handle, MixerModel* model, const char* seed_te
     int* generated_tokens = (int*)malloc(max_length * sizeof(int));
     
     int* d_input_batch;
-    cudaMalloc((void**)&d_input_batch, model->batch_size * model->seq_length * sizeof(int));
+    cudaMalloc(&d_input_batch, model->batch_size * model->seq_length * sizeof(int));
     cudaMemcpy(d_input_batch, h_input_batch, model->batch_size * model->seq_length * sizeof(int), cudaMemcpyHostToDevice);
     
     for (int i = 0; i < max_length; i++) {
