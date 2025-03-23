@@ -3,6 +3,7 @@
 #include <string.h>
 #include <math.h>
 #include <time.h>
+#include <unistd.h>
 #include <cuda_runtime.h>
 #include <cublas_v2.h>
 
@@ -1242,7 +1243,7 @@ MixerModel* load_model(const char* filename) {
 ////////////////////////////////////////////////////////////////////////////////
 // Main function.
 int main(){
-    srand(time(NULL));
+    srand(time(NULL) ^ getpid());
     CHECK_CUDA(cudaSetDevice(0));
     cublasHandle_t cublasHandle;
     CHECK_CUBLAS(cublasCreate(&cublasHandle));
