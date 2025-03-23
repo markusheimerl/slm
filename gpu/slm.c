@@ -35,7 +35,6 @@ typedef struct {
     // Token mixing parameters
     float* token_mixing_weight;         // [seq_length x seq_length]
     float* token_mixing_weight_grad;
-    float* token_mixing_mask;           // [seq_length x seq_length]
     float* token_mixing_m;
     float* token_mixing_v;
     
@@ -61,7 +60,7 @@ typedef struct {
     float* d_input;         // [batch, seq, embed]
     
     // Additional buffers
-    float* masked_weights;   // [seq, seq] = token_mixing_weight * token_mixing_mask
+    float* masked_weights;   // [seq, seq] = token_mixing_weight with lower triangular masking
     float* d_channel_activated; // [batch, seq, embed]
     float* d_output_transposed; // [batch, embed, seq]
     float* d_input_transposed;  // [batch, embed, seq]
@@ -185,11 +184,17 @@ __global__ void transpose_BES_to_BSE_kernel(const float* input, float* output, i
     }
 }
 
-// Kernel: elementwise multiply two arrays (for masking)
-__global__ void apply_mask_kernel(const float* weights, const float* mask, float* output, int size) {
+// Kernel: Apply lower triangular mask directly to a matrix
+__global__ void apply_lower_triangular_mask_kernel(float* matrix, int seq_length) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if(idx < size) {
-        output[idx] = weights[idx] * mask[idx];
+    if(idx < seq_length * seq_length) {
+        int row = idx / seq_length;
+        int col = idx % seq_length;
+        
+        // Apply lower triangular mask: set to zero if col > row
+        if(col > row) {
+            matrix[idx] = 0.0f;
+        }
     }
 }
 
@@ -314,19 +319,6 @@ MixerBlock* init_mixer_block(int embed_dim, int seq_length, int batch_size) {
     CHECK_CUDA(cudaMalloc(&block->token_mixing_v, size_tok));
     CHECK_CUDA(cudaMemset(block->token_mixing_v, 0, size_tok));
     
-    // Create token mixing mask on host
-    float* h_token_mixing_mask = (float*)malloc(size_tok);
-    for (int i = 0; i < seq_length; i++) {
-        for (int j = 0; j < seq_length; j++) {
-            h_token_mixing_mask[i * seq_length + j] = (j <= i) ? 1.0f : 0.0f;
-        }
-    }
-    
-    // Allocate and initialize token mixing mask
-    CHECK_CUDA(cudaMalloc(&block->token_mixing_mask, size_tok));
-    CHECK_CUDA(cudaMemcpy(block->token_mixing_mask, h_token_mixing_mask, size_tok, cudaMemcpyHostToDevice));
-    free(h_token_mixing_mask);
-    
     // Allocate masked weights buffer
     CHECK_CUDA(cudaMalloc(&block->masked_weights, size_tok));
     
@@ -378,11 +370,6 @@ MixerBlock* init_mixer_block(int embed_dim, int seq_length, int batch_size) {
     CHECK_CUDA(cudaMalloc(&block->temp_grad, size_tok));
     CHECK_CUDA(cudaMemset(block->temp_grad, 0, size_tok));
     
-    // Initialize masked weights
-    int threads = 256;
-    int blocks = (seq_length * seq_length + threads - 1) / threads;
-    apply_mask_kernel<<<blocks, threads>>>(block->token_mixing_weight, block->token_mixing_mask, block->masked_weights, seq_length * seq_length);
-    
     return block;
 }
 
@@ -390,7 +377,6 @@ void free_mixer_block(MixerBlock* block) {
     // Free token mixing parameters
     CHECK_CUDA(cudaFree(block->token_mixing_weight));
     CHECK_CUDA(cudaFree(block->token_mixing_weight_grad));
-    CHECK_CUDA(cudaFree(block->token_mixing_mask));
     CHECK_CUDA(cudaFree(block->token_mixing_m));
     CHECK_CUDA(cudaFree(block->token_mixing_v));
     
@@ -579,9 +565,10 @@ void mixer_block_forward(MixerBlock* block, float* input, float* output, int bat
     int nblocks = (total + threads - 1) / threads;
     transpose_BSE_to_BES_kernel<<<nblocks, threads>>>(input, block->transposed, batch_size, seq, embed);
     
-    // Apply masking to the token mixing weights
+    // Copy weights to masked_weights and apply lower triangular mask
+    CHECK_CUDA(cudaMemcpy(block->masked_weights, block->token_mixing_weight, seq * seq * sizeof(float), cudaMemcpyDeviceToDevice));
     int mask_blocks = (seq * seq + threads - 1) / threads;
-    apply_mask_kernel<<<mask_blocks, threads>>>(block->token_mixing_weight, block->token_mixing_mask, block->masked_weights, seq * seq);
+    apply_lower_triangular_mask_kernel<<<mask_blocks, threads>>>(block->masked_weights, seq);
     
     // Token mixing GEMM:
     // Compute: token_mixed = transposed * (masked_weights)^T
@@ -752,8 +739,9 @@ void mixer_block_backward(MixerBlock* block, float* d_output, float* d_input, in
                 &beta,
                 block->temp_grad, seq));
     
+    // Apply lower triangular mask to gradients
     nblocks = ((seq * seq) + threads - 1) / threads;
-    apply_mask_kernel<<<nblocks, threads>>>(block->temp_grad, block->token_mixing_mask, block->temp_grad, seq * seq);
+    apply_lower_triangular_mask_kernel<<<nblocks, threads>>>(block->temp_grad, seq);
     
     // Add temp_grad to token_mixing_weight_grad
     CHECK_CUBLAS(cublasSaxpy(handle, seq * seq, &alpha, block->temp_grad, 1, block->token_mixing_weight_grad, 1));
@@ -849,37 +837,19 @@ void update_weights_adamw_gpu(MixerModel* model, float learning_rate) {
     int vocab = model->vocab_size;
     
     blocks = (vocab * embed + threads - 1) / threads;
-    adamw_update_kernel<<<blocks, threads>>>(
-        model->embedding_weight,
-        model->embedding_weight_grad,
-        model->embedding_m,
-        model->embedding_v,
-        model->beta1,
-        model->beta2,
-        model->epsilon,
-        learning_rate,
-        model->weight_decay,
-        alpha_t,
-        vocab * embed,
-        scale
-    );
+    adamw_update_kernel<<<blocks, threads>>>(model->embedding_weight, model->embedding_weight_grad,
+                                            model->embedding_m, model->embedding_v,
+                                            model->beta1, model->beta2, model->epsilon,
+                                            learning_rate, model->weight_decay, alpha_t,
+                                            vocab * embed, scale);
     
     // Update output projection weights
     blocks = (vocab * embed + threads - 1) / threads;
-    adamw_update_kernel<<<blocks, threads>>>(
-        model->out_proj_weight,
-        model->out_proj_weight_grad,
-        model->out_proj_m,
-        model->out_proj_v,
-        model->beta1,
-        model->beta2,
-        model->epsilon,
-        learning_rate,
-        model->weight_decay,
-        alpha_t,
-        vocab * embed,
-        scale
-    );
+    adamw_update_kernel<<<blocks, threads>>>(model->out_proj_weight, model->out_proj_weight_grad,
+                                            model->out_proj_m, model->out_proj_v,
+                                            model->beta1, model->beta2, model->epsilon,
+                                            learning_rate, model->weight_decay, alpha_t,
+                                            vocab * embed, scale);
     
     // Update MixerBlock weights
     for (int l = 0; l < model->num_layers; l++) {
@@ -889,43 +859,19 @@ void update_weights_adamw_gpu(MixerModel* model, float learning_rate) {
         
         // Token mixing weights
         blocks = (size_tok + threads - 1) / threads;
-        adamw_update_kernel<<<blocks, threads>>>(
-            block->token_mixing_weight,
-            block->token_mixing_weight_grad,
-            block->token_mixing_m,
-            block->token_mixing_v,
-            model->beta1,
-            model->beta2,
-            model->epsilon,
-            learning_rate,
-            model->weight_decay,
-            alpha_t,
-            size_tok,
-            scale
-        );
-        
-        // Update masked weights - important to preserve the masking structure
-        apply_mask_kernel<<<blocks, threads>>>(
-            block->token_mixing_weight, block->token_mixing_mask, 
-            block->masked_weights, size_tok
-        );
+        adamw_update_kernel<<<blocks, threads>>>(block->token_mixing_weight, block->token_mixing_weight_grad,
+                                                block->token_mixing_m, block->token_mixing_v,
+                                                model->beta1, model->beta2, model->epsilon,
+                                                learning_rate, model->weight_decay, alpha_t,
+                                                size_tok, scale);
         
         // Channel mixing weights
         blocks = (size_channel + threads - 1) / threads;
-        adamw_update_kernel<<<blocks, threads>>>(
-            block->channel_mixing_weight,
-            block->channel_mixing_weight_grad,
-            block->channel_mixing_m,
-            block->channel_mixing_v,
-            model->beta1,
-            model->beta2,
-            model->epsilon,
-            learning_rate,
-            model->weight_decay,
-            alpha_t,
-            size_channel,
-            scale
-        );
+        adamw_update_kernel<<<blocks, threads>>>(block->channel_mixing_weight, block->channel_mixing_weight_grad,
+                                                block->channel_mixing_m, block->channel_mixing_v,
+                                                model->beta1, model->beta2, model->epsilon,
+                                                learning_rate, model->weight_decay, alpha_t,
+                                                size_channel, scale);
     }
 }
 
@@ -1189,13 +1135,6 @@ MixerModel* load_model(const char* filename) {
         // Copy from host to device
         CHECK_CUDA(cudaMemcpy(block->token_mixing_weight, h_token_mixing_weight, 
                    size_tok * sizeof(float), cudaMemcpyHostToDevice));
-                   
-        // Update masked weights
-        int threads = 256;
-        int blocks = (size_tok + threads - 1) / threads;
-        apply_mask_kernel<<<blocks, threads>>>(block->token_mixing_weight, 
-                                               block->token_mixing_mask, 
-                                               block->masked_weights, size_tok);
         free(h_token_mixing_weight);
         
         // Read channel mixing weights to host buffer
