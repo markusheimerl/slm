@@ -112,7 +112,7 @@ typedef struct {
     // Additional preallocated buffer for softmax (on host)
     float* softmax_probs;  // [vocab_size]
     
-    // Adam optimizer parameters
+    // AdamW optimizer parameters
     float beta1;
     float beta2;
     float epsilon;
@@ -210,19 +210,25 @@ __global__ void kernel_apply_embedding(const int* input_tokens, const float* emb
     }
 }
 
-// Kernel for Adam weight update
-__global__ void kernel_adam_update(float* weight, const float* grad, float* m, float* v,
+// Kernel for AdamW weight update
+__global__ void kernel_adamw_update(float* weight, const float* grad, float* m, float* v,
                                   float alpha_t, float beta1, float beta2, float epsilon,
                                   float weight_decay, float lr, int N, float scale) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if(idx < N) {
         float g = grad[idx] / scale;
+        
+        // Update moment estimates
         float m_new = beta1 * m[idx] + (1.0f - beta1) * g;
         float v_new = beta2 * v[idx] + (1.0f - beta2) * g * g;
         m[idx] = m_new;
         v[idx] = v_new;
-        float update = alpha_t * m_new / (sqrtf(v_new) + epsilon);
-        weight[idx] = weight[idx] * (1.0f - lr * weight_decay) - update;
+        
+        // Calculate Adam step
+        float adam_step = alpha_t * m_new / (sqrtf(v_new) + epsilon);
+        
+        // AdamW update: Separate weight decay from gradient-based update
+        weight[idx] = weight[idx] * (1.0f - lr * weight_decay) - adam_step;
     }
 }
 
@@ -395,6 +401,7 @@ MixerModel* init_mixer_model(int vocab_size, int embed_dim, int num_layers, int 
     model->seq_length = seq_length;
     model->batch_size = batch_size;
     
+    // AdamW optimizer parameters
     model->beta1 = 0.9f;
     model->beta2 = 0.999f;
     model->epsilon = 1e-8f;
@@ -828,7 +835,7 @@ void update_weights_adamw_gpu(MixerModel* model, float learning_rate) {
     int vocab = model->vocab_size;
     
     blocks = (vocab * embed + threads - 1) / threads;
-    kernel_adam_update<<<blocks, threads>>>(
+    kernel_adamw_update<<<blocks, threads>>>(
         model->embedding_weight, model->embedding_weight_grad,
         model->embedding_m, model->embedding_v,
         alpha_t, model->beta1, model->beta2, model->epsilon,
@@ -837,7 +844,7 @@ void update_weights_adamw_gpu(MixerModel* model, float learning_rate) {
     
     // Update output projection weights
     blocks = (vocab * embed + threads - 1) / threads;
-    kernel_adam_update<<<blocks, threads>>>(
+    kernel_adamw_update<<<blocks, threads>>>(
         model->out_proj_weight, model->out_proj_weight_grad,
         model->out_proj_m, model->out_proj_v,
         alpha_t, model->beta1, model->beta2, model->epsilon,
@@ -852,7 +859,7 @@ void update_weights_adamw_gpu(MixerModel* model, float learning_rate) {
         
         // Token mixing weights
         blocks = (size_tok + threads - 1) / threads;
-        kernel_adam_update<<<blocks, threads>>>(
+        kernel_adamw_update<<<blocks, threads>>>(
             block->token_mixing_weight, block->token_mixing_weight_grad,
             block->token_mixing_m, block->token_mixing_v,
             alpha_t, model->beta1, model->beta2, model->epsilon,
@@ -867,7 +874,7 @@ void update_weights_adamw_gpu(MixerModel* model, float learning_rate) {
         
         // Channel mixing weights
         blocks = (size_channel + threads - 1) / threads;
-        kernel_adam_update<<<blocks, threads>>>(
+        kernel_adamw_update<<<blocks, threads>>>(
             block->channel_mixing_weight, block->channel_mixing_weight_grad,
             block->channel_mixing_m, block->channel_mixing_v,
             alpha_t, model->beta1, model->beta2, model->epsilon,
