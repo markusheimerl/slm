@@ -123,17 +123,6 @@ typedef struct {
     cublasHandle_t cublas_handle;
 } MixerModel;
 
-// Dataset structure to store text and manage pre-shuffled indices
-typedef struct {
-    char* text;               // Raw text data
-    size_t text_size;         // Size of the text in bytes
-    int seq_length;           // Sequence length for each sample
-    int* indices;             // Array of valid starting indices
-    int num_indices;          // Number of valid indices
-    int* shuffled_indices;    // Shuffled array of indices for current epoch
-    int current_position;     // Current position in the shuffled indices
-} Dataset;
-
 ////////////////////////////////////////////////////////////////////////////////
 // Device helper functions and CUDA kernels
 
@@ -893,29 +882,6 @@ void zero_gradients(MixerModel* model) {
 }
 
 ////////////////////////////////////////////////////////////////////////////////
-// Encode a UTF-8 string to byte tokens.
-int encode_string(const char* input, int* tokens, int max_tokens) {
-    int len = 0;
-    while (*input && len < max_tokens) {
-        tokens[len++] = (unsigned char)(*input++);
-    }
-    return len;
-}
-
-////////////////////////////////////////////////////////////////////////////////
-// Count model parameters.
-int count_parameters(MixerModel* model) {
-    int total_params = 0;
-    total_params += model->vocab_size * model->embed_dim;
-    total_params += model->vocab_size * model->embed_dim;
-    for (int i = 0; i < model->num_layers; i++) {
-        total_params += model->seq_length * model->seq_length;
-        total_params += model->embed_dim * model->embed_dim;
-    }
-    return total_params;
-}
-
-////////////////////////////////////////////////////////////////////////////////
 // Load text data from a file (CPU).
 char* load_text_file(const char* filename, size_t* size) {
     FILE* file = fopen(filename, "rb");
@@ -946,81 +912,39 @@ char* load_text_file(const char* filename, size_t* size) {
 }
 
 ////////////////////////////////////////////////////////////////////////////////
-// Dataset and DataLoader implementation
-
-// Initialize dataset
-Dataset* init_dataset(char* text, size_t text_size, int seq_length) {
-    Dataset* dataset = (Dataset*)malloc(sizeof(Dataset));
-    dataset->text = text;
-    dataset->text_size = text_size;
-    dataset->seq_length = seq_length;
-    
-    // Calculate number of valid starting indices (need seq_length+1 chars for input+target)
-    dataset->num_indices = text_size - seq_length;
-    if (dataset->num_indices <= 0) {
-        fprintf(stderr, "Error: Text is too short for the given sequence length\n");
-        free(dataset);
-        return NULL;
+// Get a batch of randomly sampled sequences from the text
+void get_random_batch(const char* text, size_t text_size, int batch_size, int seq_length, 
+                      int* input_tokens, int* target_tokens) {
+    // Make sure we can sample valid sequences (text_size must be at least seq_length+1)
+    if (text_size <= (size_t)seq_length) {
+        fprintf(stderr, "Error: Text size is too small for the sequence length\n");
+        return;
     }
     
-    // Allocate and fill indices array
-    dataset->indices = (int*)malloc(dataset->num_indices * sizeof(int));
-    for (int i = 0; i < dataset->num_indices; i++) {
-        dataset->indices[i] = i;
-    }
-    
-    // Allocate shuffled indices array and initialize
-    dataset->shuffled_indices = (int*)malloc(dataset->num_indices * sizeof(int));
-    memcpy(dataset->shuffled_indices, dataset->indices, dataset->num_indices * sizeof(int));
-    dataset->current_position = 0;
-    
-    return dataset;
-}
-
-// Free dataset
-void free_dataset(Dataset* dataset) {
-    // Don't free dataset->text as it's owned by the caller
-    free(dataset->indices);
-    free(dataset->shuffled_indices);
-    free(dataset);
-}
-
-// Fisher-Yates shuffle algorithm
-void shuffle_dataset(Dataset* dataset) {
-    // Reset the position
-    dataset->current_position = 0;
-    
-    // Copy from original indices
-    memcpy(dataset->shuffled_indices, dataset->indices, dataset->num_indices * sizeof(int));
-    
-    // Shuffle the indices
-    for (int i = dataset->num_indices - 1; i > 0; i--) {
-        int j = rand() % (i + 1);
-        int temp = dataset->shuffled_indices[i];
-        dataset->shuffled_indices[i] = dataset->shuffled_indices[j];
-        dataset->shuffled_indices[j] = temp;
-    }
-}
-
-// Get next batch from dataset
-int get_next_batch(Dataset* dataset, int batch_size, int* input_tokens, int* target_tokens) {
-    // Check if we need to reshuffle
-    if (dataset->current_position + batch_size > dataset->num_indices) {
-        shuffle_dataset(dataset);
-    }
-    
-    // Fill in the batch
+    // Generate random starting positions for each sequence in the batch
     for (int b = 0; b < batch_size; b++) {
-        int start_idx = dataset->shuffled_indices[dataset->current_position++];
+        // Random start position (leave room for sequence + 1 target)
+        int start_pos = rand() % (text_size - seq_length - 1);
         
-        // Extract the sequence for this example
-        for (int s = 0; s < dataset->seq_length; s++) {
-            input_tokens[b * dataset->seq_length + s] = (unsigned char)dataset->text[start_idx + s];
-            target_tokens[b * dataset->seq_length + s] = (unsigned char)dataset->text[start_idx + s + 1];
+        // Fill input and target tokens
+        for (int s = 0; s < seq_length; s++) {
+            input_tokens[b * seq_length + s] = (unsigned char)text[start_pos + s];
+            target_tokens[b * seq_length + s] = (unsigned char)text[start_pos + s + 1];
         }
     }
-    
-    return batch_size;
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// Count model parameters.
+int count_parameters(MixerModel* model) {
+    int total_params = 0;
+    total_params += model->vocab_size * model->embed_dim;
+    total_params += model->vocab_size * model->embed_dim;
+    for (int i = 0; i < model->num_layers; i++) {
+        total_params += model->seq_length * model->seq_length;
+        total_params += model->embed_dim * model->embed_dim;
+    }
+    return total_params;
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -1153,12 +1077,99 @@ MixerModel* load_model(const char* filename) {
 }
 
 ////////////////////////////////////////////////////////////////////////////////
+// Generate text from the model with temperature-based sampling
+void generate_text(MixerModel* model, const char* corpus, size_t corpus_size, int max_new_tokens, float temperature) {
+    int seq_length = model->seq_length;
+    
+    // Allocate buffers for tokens
+    int* h_tokens = (int*)malloc(seq_length * sizeof(int));
+    
+
+    int start_pos = rand() % (corpus_size - seq_length);
+    
+    // Print the full initial context we're using
+    for (int i = 0; i < seq_length; i++) {
+        h_tokens[i] = (unsigned char)corpus[start_pos + i];
+        printf("%c", h_tokens[i]);
+    }
+
+    // Copy tokens to device
+    CHECK_CUDA(cudaMemcpy(model->d_input_tokens, h_tokens, seq_length * sizeof(int), cudaMemcpyHostToDevice));
+    
+    // Generate tokens one by one
+    for (int i = 0; i < max_new_tokens; i++) {
+        // Forward pass
+        mixer_model_forward(model, model->d_input_tokens);
+        
+        // Get logits for the last token
+        float* h_logits = (float*)malloc(model->vocab_size * sizeof(float));
+        CHECK_CUDA(cudaMemcpy(h_logits, 
+                   model->logits + (seq_length - 1) * model->vocab_size, 
+                   model->vocab_size * sizeof(float), 
+                   cudaMemcpyDeviceToHost));
+        
+        // Apply temperature with epsilon to prevent division by zero
+        float temp = temperature + 1e-7f;  // Add small epsilon
+        for (int v = 0; v < model->vocab_size; v++) {
+            h_logits[v] /= temp;
+        }
+        
+        // Softmax for probabilities
+        float max_logit = h_logits[0];
+        for (int v = 1; v < model->vocab_size; v++) {
+            if (h_logits[v] > max_logit) {
+                max_logit = h_logits[v];
+            }
+        }
+        
+        float sum_exp = 0.0f;
+        for (int v = 0; v < model->vocab_size; v++) {
+            h_logits[v] = expf(h_logits[v] - max_logit);
+            sum_exp += h_logits[v];
+        }
+        
+        for (int v = 0; v < model->vocab_size; v++) {
+            h_logits[v] /= sum_exp;  // Now h_logits contains probabilities
+        }
+        
+        // Sample from distribution
+        float r = (float)rand() / (float)RAND_MAX;
+        float cdf = 0.0f;
+        int next_token = 0;
+        for (int v = 0; v < model->vocab_size; v++) {
+            cdf += h_logits[v];
+            if (r < cdf) {
+                next_token = v;
+                break;
+            }
+        }
+        
+        // Print the generated character
+        printf("%c", next_token);
+        fflush(stdout);
+        
+        // Shift tokens to the left and add new token at the end
+        for (int j = 0; j < seq_length - 1; j++) {
+            h_tokens[j] = h_tokens[j + 1];
+        }
+        h_tokens[seq_length - 1] = next_token;
+        
+        // Copy updated tokens to device
+        CHECK_CUDA(cudaMemcpy(model->d_input_tokens, h_tokens, seq_length * sizeof(int), cudaMemcpyHostToDevice));
+        
+        free(h_logits);
+    }
+    
+    printf("\n");
+    free(h_tokens);
+}
+
+////////////////////////////////////////////////////////////////////////////////
 // Main function.
-int main(){
+int main() {
     srand(time(NULL));
     CHECK_CUDA(cudaSetDevice(0));
     
-    printf("Initializing Mixer model (CUDA version)...\n");
     int vocab_size = 256;
     int embed_dim = 512;
     int num_layers = 8;
@@ -1178,24 +1189,9 @@ int main(){
     }
     printf("Loaded text corpus with %zu bytes\n", text_size);
     
-    // Initialize dataset with the text corpus
-    Dataset* dataset = init_dataset(text, text_size, seq_length);
-    if (!dataset) {
-        fprintf(stderr, "Failed to initialize dataset\n");
-        free(text);
-        free_mixer_model(model);
-        return 1;
-    }
-    printf("Dataset initialized with %d samples\n", dataset->num_indices);
-    
-    // Shuffle the dataset for training
-    shuffle_dataset(dataset);
-    
     float learning_rate = 0.0001f;
     int num_epochs = 10;
-    
-    // Calculate steps per epoch based on dataset size
-    int steps_per_epoch = dataset->num_indices / batch_size;
+    int steps_per_epoch = 1000;
     
     printf("Training for %d epochs with %d steps per epoch\n", num_epochs, steps_per_epoch);
     
@@ -1205,13 +1201,10 @@ int main(){
     time_t start_time = time(NULL);
     
     for (int epoch = 0; epoch < num_epochs; epoch++) {
-        // Shuffle dataset at the beginning of each epoch
-        shuffle_dataset(dataset);
-        
         float epoch_loss = 0.0f;
         for (int step = 0; step < steps_per_epoch; step++) {
-            // Get next batch from dataset
-            get_next_batch(dataset, batch_size, h_input_tokens, h_target_tokens);
+            // Get random batch from text
+            get_random_batch(text, text_size, batch_size, seq_length, h_input_tokens, h_target_tokens);
             
             // Copy input and target tokens to device
             CHECK_CUDA(cudaMemcpy(model->d_input_tokens, h_input_tokens, 
@@ -1236,20 +1229,28 @@ int main(){
             
             if (step % 10 == 0) {
                 printf("Epoch %d/%d, Step %d/%d, Loss: %.4f\n", 
-                       epoch+1, num_epochs, step+1, steps_per_epoch, step_loss);
+                       epoch+1, num_epochs, step, steps_per_epoch, step_loss);
+            }
+            
+            if (step % 100 == 0 && step > 0) {
+                printf("\n======= Sample generation at epoch %d, step %d =======\n", epoch+1, step);
+                generate_text(model, text, text_size, 128, 0.8f);
             }
         }
+
         epoch_loss /= steps_per_epoch;
         time_t current_time = time(NULL);
         printf("\nEpoch %d/%d completed, Average Loss: %.4f, Time elapsed: %ld seconds\n\n", 
                epoch+1, num_epochs, epoch_loss, current_time - start_time);
     }
     
-    save_model(model, "mixer_model_final_cuda.bin");
+    char model_fname[64];
+    time_t now = time(NULL);
+    strftime(model_fname, sizeof(model_fname), "%Y%m%d_%H%M%S_mixer_model.bin", localtime(&now));
+    save_model(model, model_fname);
     
     free(h_input_tokens);
     free(h_target_tokens);
-    free_dataset(dataset);
     free(text);
     free_mixer_model(model);
     
