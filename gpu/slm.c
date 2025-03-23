@@ -228,36 +228,37 @@ __global__ void kernel_adam_update(float* weight, const float* grad, float* m, f
 
 // Kernel to compute softmax and cross-entropy loss
 __global__ void kernel_softmax_cross_entropy(const float* logits, const int* targets,
-                                           float* d_logits, float* loss_buffer,
-                                           int batch_size, int seq_length, int vocab_size) {
+                                          float* d_logits, float* loss_buffer,
+                                          int batch_size, int seq_length, int vocab_size) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < batch_size * seq_length) {
         int target = targets[idx];
+        long long offset = (long long)idx * (long long)vocab_size;
         
         // Find max for numerical stability
-        float max_val = logits[idx * vocab_size];
+        float max_val = logits[offset];
         for (int v = 1; v < vocab_size; v++) {
-            float val = logits[idx * vocab_size + v];
+            float val = logits[offset + v];
             max_val = (val > max_val) ? val : max_val;
         }
         
         // Compute softmax
         float sum_exp = 0.0f;
         for (int v = 0; v < vocab_size; v++) {
-            float exp_val = expf(logits[idx * vocab_size + v] - max_val);
-            d_logits[idx * vocab_size + v] = exp_val;  // Temporarily store exp values
+            float exp_val = expf(logits[offset + v] - max_val);
+            d_logits[offset + v] = exp_val;  // Temporarily store exp values
             sum_exp += exp_val;
         }
         
         // Normalize and compute gradient and loss
         float loss = 0.0f;
         for (int v = 0; v < vocab_size; v++) {
-            float prob = d_logits[idx * vocab_size + v] / sum_exp;
-            d_logits[idx * vocab_size + v] = prob;  // Store normalized probability
+            float prob = d_logits[offset + v] / sum_exp;
+            d_logits[offset + v] = prob;  // Store normalized probability
             
             // If this is the target token, subtract 1 for gradient and compute log loss
             if (v == target) {
-                d_logits[idx * vocab_size + v] -= 1.0f;
+                d_logits[offset + v] -= 1.0f;
                 loss = -logf(prob + 1e-10f);
             }
         }
@@ -1253,7 +1254,7 @@ int main(){
     int embed_dim = 512;
     int num_layers = 16;
     int seq_length = 1024;
-    int batch_size = 32;
+    int batch_size = 64;
     
     MixerModel* model = init_mixer_model(vocab_size, embed_dim, num_layers, seq_length, batch_size);
     int num_params = count_parameters(model);
