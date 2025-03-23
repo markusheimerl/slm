@@ -1210,14 +1210,14 @@ int main(){
     int embed_dim = 512;
     int num_layers = 16;
     int seq_length = 2048;
-    int batch_size = 64;
+    int batch_size = 8;
     
     MixerModel* model = init_mixer_model(vocab_size, embed_dim, num_layers, seq_length, batch_size);
     int num_params = count_parameters(model);
     printf("Model initialized with %d parameters\n", num_params);
     
     size_t text_size;
-    char* text = load_text_file("../gutenberg_texts/combined_corpus.txt", &text_size);
+    char* text = load_text_file("../gutenberg_texts/peter_pan.txt", &text_size);
     if (!text) {
         fprintf(stderr, "Failed to load text data\n");
         free_mixer_model(model);
