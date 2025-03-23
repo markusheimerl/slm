@@ -448,7 +448,7 @@ MixerModel* init_mixer_model(int vocab_size, int embed_dim, int num_layers, int 
     // Allocate (num_layers+1) outputs concatenated.
     CHECK_CUDA(cudaMalloc(&model->block_outputs, (num_layers+1) * tensor_size));
     // Logits: [batch, seq, vocab_size]
-    size_t logits_size = batch_size * seq_length * vocab_size * sizeof(float);
+    size_t logits_size = batch_size * (size_t)seq_length * vocab_size * sizeof(float);
     CHECK_CUDA(cudaMalloc(&model->logits, logits_size));
     
     CHECK_CUDA(cudaMalloc(&model->d_logits, logits_size));
@@ -1252,7 +1252,7 @@ int main(){
     int vocab_size = 65536;
     int embed_dim = 512;
     int num_layers = 16;
-    int seq_length = 512;
+    int seq_length = 1024;
     int batch_size = 32;
     
     MixerModel* model = init_mixer_model(vocab_size, embed_dim, num_layers, seq_length, batch_size);
