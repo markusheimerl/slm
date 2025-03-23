@@ -645,8 +645,8 @@ void mixer_model_forward(MixerModel* model, int* d_input_tokens) {
 }
 
 ////////////////////////////////////////////////////////////////////////////////
-// Compute cross-entropy loss and gradients directly on GPU
-float compute_loss_and_gradients_gpu(MixerModel* model, int* d_target_tokens) {
+// Compute cross-entropy loss and gradients
+float compute_loss_and_gradients(MixerModel* model, int* d_target_tokens) {
     int batch = model->batch_size;
     int seq = model->seq_length;
     int vocab = model->vocab_size;
@@ -807,8 +807,8 @@ void mixer_model_backward(MixerModel* model) {
 }
 
 //
-// Update weights using AdamW optimizer - GPU based version
-void update_weights_adamw_gpu(MixerModel* model, float learning_rate) {
+// Update weights using AdamW optimizer
+void update_weights_adamw(MixerModel* model, float learning_rate) {
     model->t++;  // Increment time step.
     
     // Calculate bias correction factors
@@ -1164,6 +1164,14 @@ void generate_text(MixerModel* model, const char* corpus, size_t corpus_size, in
     free(h_tokens);
 }
 
+// Calculate cosine learning rate schedule
+float get_cosine_lr(float initial_lr, float min_lr, int current_step, int total_steps) {
+    // Implement cosine annealing schedule
+    float progress = (float)current_step / (float)total_steps;
+    // Cosine decay from initial_lr to min_lr
+    return min_lr + 0.5f * (initial_lr - min_lr) * (1.0f + cosf(M_PI * progress));
+}
+
 ////////////////////////////////////////////////////////////////////////////////
 // Main function.
 int main() {
@@ -1177,71 +1185,60 @@ int main() {
     int batch_size = 64;
     
     MixerModel* model = init_mixer_model(vocab_size, embed_dim, num_layers, seq_length, batch_size);
-    int num_params = count_parameters(model);
-    printf("Model initialized with %d parameters\n", num_params);
+    printf("Model initialized with %d parameters\n", count_parameters(model));
     
     size_t text_size;
     char* text = load_text_file("../gutenberg_texts/combined_corpus.txt", &text_size);
-    if (!text) {
-        fprintf(stderr, "Failed to load text data\n");
-        free_mixer_model(model);
-        return 1;
-    }
     printf("Loaded text corpus with %zu bytes\n", text_size);
     
-    float learning_rate = 0.0001f;
-    int num_epochs = 10;
-    int steps_per_epoch = 1000;
+    float initial_lr = 0.0001f;
+    float min_lr = 0.00001f;
+    int total_training_steps = 10000;
     
-    printf("Training for %d epochs with %d steps per epoch\n", num_epochs, steps_per_epoch);
+    printf("Training for %d total steps with cosine learning rate schedule (%.6f to %.6f)\n", 
+           total_training_steps, initial_lr, min_lr);
     
     int* h_input_tokens = (int*)malloc(batch_size * seq_length * sizeof(int));
     int* h_target_tokens = (int*)malloc(batch_size * seq_length * sizeof(int));
     
     time_t start_time = time(NULL);
-    
-    for (int epoch = 0; epoch < num_epochs; epoch++) {
-        float epoch_loss = 0.0f;
-        for (int step = 0; step < steps_per_epoch; step++) {
-            // Get random batch from text
-            get_random_batch(text, text_size, batch_size, seq_length, h_input_tokens, h_target_tokens);
-            
-            // Copy input and target tokens to device
-            CHECK_CUDA(cudaMemcpy(model->d_input_tokens, h_input_tokens, 
-                       batch_size * seq_length * sizeof(int), cudaMemcpyHostToDevice));
-            CHECK_CUDA(cudaMemcpy(model->d_target_tokens, h_target_tokens, 
-                       batch_size * seq_length * sizeof(int), cudaMemcpyHostToDevice));
-            
-            // Forward pass
-            mixer_model_forward(model, model->d_input_tokens);
-            
-            // Compute loss and gradients in one step
-            float step_loss = compute_loss_and_gradients_gpu(model, model->d_target_tokens);
-            
-            // Backward pass and update
-            mixer_model_backward(model);
-            update_weights_adamw_gpu(model, learning_rate);
-            
-            // Zero gradients after update
-            zero_gradients(model);
-            
-            epoch_loss += step_loss;
-            
-            if (step % 10 == 0) {
-                printf("Epoch %d/%d, Step %d/%d, Loss: %.4f\n", 
-                       epoch+1, num_epochs, step, steps_per_epoch, step_loss);
-            }
-            
-            if (step % 100 == 0 && step > 0) {
-                printf("\n======= Sample generation at epoch %d, step %d =======\n", epoch+1, step);
-                generate_text(model, text, text_size, 128, 0.8f);
-            }
-        }
 
-        epoch_loss /= steps_per_epoch;
-        time_t current_time = time(NULL);
-        printf("\nEpoch %d/%d completed, Average Loss: %.4f, Time elapsed: %ld seconds\n\n", 
-               epoch+1, num_epochs, epoch_loss, current_time - start_time);
+    for (int step = 0; step < total_training_steps; step++) {
+        // Calculate learning rate for this step
+        float learning_rate = get_cosine_lr(initial_lr, min_lr, step, total_training_steps);
+        
+        // Get random batch from text
+        get_random_batch(text, text_size, batch_size, seq_length, h_input_tokens, h_target_tokens);
+        
+        // Copy input and target tokens to device
+        CHECK_CUDA(cudaMemcpy(model->d_input_tokens, h_input_tokens, 
+                   batch_size * seq_length * sizeof(int), cudaMemcpyHostToDevice));
+        CHECK_CUDA(cudaMemcpy(model->d_target_tokens, h_target_tokens, 
+                   batch_size * seq_length * sizeof(int), cudaMemcpyHostToDevice));
+        
+        // Forward pass
+        mixer_model_forward(model, model->d_input_tokens);
+        
+        // Compute loss and gradients in one step
+        float step_loss = compute_loss_and_gradients(model, model->d_target_tokens);
+        
+        // Backward pass and update
+        mixer_model_backward(model);
+        update_weights_adamw(model, learning_rate);
+        
+        // Zero gradients after update
+        zero_gradients(model);
+        
+        if (step % 10 == 0) {
+            printf("Step %d/%d, LR: %.6f, Loss: %.4f\n", step, total_training_steps, learning_rate, step_loss);
+        }
+        
+        if (step % 200 == 0 && step > 0) {
+            time_t current_time = time(NULL);
+            printf("\n======= Sample generation at step %d after %ld seconds =======\n", step, current_time - start_time);
+            generate_text(model, text, text_size, 128, 0.8f);
+            printf("\n");
+        }
     }
     
     char model_fname[64];
@@ -1253,7 +1250,5 @@ int main() {
     free(h_target_tokens);
     free(text);
     free_mixer_model(model);
-    
-    printf("Training completed!\n");
     return 0;
 }
