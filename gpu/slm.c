@@ -35,6 +35,7 @@ typedef struct {
     // Token mixing parameters
     float* token_mixing_weight;         // [seq_length x seq_length]
     float* token_mixing_weight_grad;
+    float* token_mixing_mask;           // [seq_length x seq_length]
     float* token_mixing_m;
     float* token_mixing_v;
     
@@ -60,7 +61,7 @@ typedef struct {
     float* d_input;         // [batch, seq, embed]
     
     // Additional buffers
-    float* masked_weights;   // [seq, seq] = token_mixing_weight * lower_triangular_mask
+    float* masked_weights;   // [seq, seq] = token_mixing_weight * token_mixing_mask
     float* d_channel_activated; // [batch, seq, embed]
     float* d_output_transposed; // [batch, embed, seq]
     float* d_input_transposed;  // [batch, embed, seq]
@@ -186,19 +187,11 @@ __global__ void kernel_transpose_BES_to_BSE(const float* input, float* output, i
     }
 }
 
-// Kernel: apply lower triangular mask
-__global__ void kernel_apply_mask(const float* weights, float* output, int seq_length) {
+// Kernel: elementwise multiply two arrays (for masking)
+__global__ void kernel_apply_mask(const float* weights, const float* mask, float* output, int size) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if(idx < seq_length * seq_length) {
-        int row = idx / seq_length;
-        int col = idx % seq_length;
-        
-        // Apply lower triangular mask (including the diagonal)
-        if (col <= row) {
-            output[idx] = weights[idx];
-        } else {
-            output[idx] = 0.0f;
-        }
+    if(idx < size) {
+        output[idx] = weights[idx] * mask[idx];
     }
 }
 
@@ -318,6 +311,17 @@ MixerBlock* init_mixer_block(int embed_dim, int seq_length, int batch_size) {
     CHECK_CUDA(cudaMalloc(&block->token_mixing_v, size_tok));
     CHECK_CUDA(cudaMemset(block->token_mixing_v, 0, size_tok));
     
+    // Create token mixing mask on host then copy.
+    float* h_token_mixing_mask = (float*)malloc(size_tok);
+    for (int i = 0; i < seq_length; i++) {
+        for (int j = 0; j < seq_length; j++) {
+            h_token_mixing_mask[i * seq_length + j] = (j <= i) ? 1.0f : 0.0f;
+        }
+    }
+    CHECK_CUDA(cudaMalloc(&block->token_mixing_mask, size_tok));
+    CHECK_CUDA(cudaMemcpy(block->token_mixing_mask, h_token_mixing_mask, size_tok, cudaMemcpyHostToDevice));
+    free(h_token_mixing_mask);
+    
     // Pre-allocate masked_weights buffer
     CHECK_CUDA(cudaMalloc(&block->masked_weights, size_tok));
     
@@ -369,6 +373,7 @@ MixerBlock* init_mixer_block(int embed_dim, int seq_length, int batch_size) {
 void free_mixer_block(MixerBlock* block) {
     CHECK_CUDA(cudaFree(block->token_mixing_weight));
     CHECK_CUDA(cudaFree(block->token_mixing_weight_grad));
+    CHECK_CUDA(cudaFree(block->token_mixing_mask));
     CHECK_CUDA(cudaFree(block->token_mixing_m));
     CHECK_CUDA(cudaFree(block->token_mixing_v));
     
@@ -536,10 +541,12 @@ void mixer_block_forward(cublasHandle_t handle, MixerBlock* block, float* input,
     int threads = 256;
     int nblocks = (total + threads - 1) / threads;
     kernel_transpose_BSE_to_BES<<<nblocks, threads>>>(input, block->transposed, batch_size, seq, embed);
+    CHECK_CUDA(cudaGetLastError());
     
     // Apply masking to the token mixing weights
     int mask_blocks = (seq * seq + threads - 1) / threads;
-    kernel_apply_mask<<<mask_blocks, threads>>>(block->token_mixing_weight, block->masked_weights, seq);
+    kernel_apply_mask<<<mask_blocks, threads>>>(block->token_mixing_weight, block->token_mixing_mask, block->masked_weights, seq * seq);
+    CHECK_CUDA(cudaGetLastError());
     
     // Token mixing GEMM:
     // Compute: token_mixed = transposed * (masked_weights)^T.
@@ -555,10 +562,12 @@ void mixer_block_forward(cublasHandle_t handle, MixerBlock* block, float* input,
     // Apply SiLU activation.
     nblocks = (total_trans + threads - 1) / threads;
     kernel_silu<<<nblocks, threads>>>(block->token_mixed, block->token_mix_activated, total_trans);
+    CHECK_CUDA(cudaGetLastError());
     
     // Transpose back: [batch, embed, seq] -> [batch, seq, embed]
     nblocks = (total + threads - 1) / threads;
     kernel_transpose_BES_to_BSE<<<nblocks, threads>>>(block->token_mix_activated, output, batch_size, embed, seq);
+    CHECK_CUDA(cudaGetLastError());
     
     // Add residual
     CHECK_CUBLAS(cublasSaxpy(handle, total, &alpha, block->residual, 1, output, 1));
@@ -580,6 +589,7 @@ void mixer_block_forward(cublasHandle_t handle, MixerBlock* block, float* input,
     // Apply SiLU activation.
     nblocks = (total + threads - 1) / threads;
     kernel_silu<<<nblocks, threads>>>(block->channel_mixed, block->channel_mix_activated, total);
+    CHECK_CUDA(cudaGetLastError());
     
     // Copy activated output
     CHECK_CUDA(cudaMemcpy(output, block->channel_mix_activated, total * sizeof(float), cudaMemcpyDeviceToDevice));
@@ -602,6 +612,7 @@ void mixer_model_forward(cublasHandle_t handle, MixerModel* model, int* d_input_
     int nblocks = (total + threads - 1) / threads;
     kernel_apply_embedding<<<nblocks, threads>>>(d_input_tokens, model->embedding_weight, model->embeddings,
                                                  batch, seq, embed, model->vocab_size);
+    CHECK_CUDA(cudaGetLastError());
     
     // Copy embeddings to first block_outputs buffer.
     int tensor_elements = total * embed;
@@ -641,6 +652,7 @@ float compute_loss_and_gradients_gpu(MixerModel* model, int* d_target_tokens) {
         model->d_logits, model->d_loss_buffer,
         batch, seq, vocab
     );
+    CHECK_CUDA(cudaGetLastError());
     
     // Retrieve loss values
     CHECK_CUDA(cudaMemcpy(model->h_loss_buffer, model->d_loss_buffer, batch * seq * sizeof(float), cudaMemcpyDeviceToHost));
@@ -672,6 +684,7 @@ void mixer_block_backward(cublasHandle_t handle, MixerBlock* block, float* d_out
     CHECK_CUDA(cudaMemcpy(block->d_channel_activated, block->d_output, total * sizeof(float), cudaMemcpyDeviceToDevice));
     nblocks = (total + threads - 1) / threads;
     kernel_silu_deriv_mult<<<nblocks, threads>>>(block->channel_mixed, block->d_channel_activated, block->d_channel_mixed, total);
+    CHECK_CUDA(cudaGetLastError());
     
     // Gradient w.r.t. channel mixing weights
     CHECK_CUBLAS(cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_T,
@@ -698,8 +711,10 @@ void mixer_block_backward(cublasHandle_t handle, MixerBlock* block, float* d_out
     CHECK_CUDA(cudaMemcpy(block->d_output, d_input, total * sizeof(float), cudaMemcpyDeviceToDevice));
     nblocks = (total_trans + threads - 1) / threads;
     kernel_transpose_BSE_to_BES<<<nblocks, threads>>>(d_input, block->d_output_transposed, batch_size, seq, embed);
+    CHECK_CUDA(cudaGetLastError());
     nblocks = (total_trans + threads - 1) / threads;
     kernel_silu_deriv_mult<<<nblocks, threads>>>(block->token_mixed, block->d_output_transposed, block->d_token_mixed, total_trans);
+    CHECK_CUDA(cudaGetLastError());
     
     // Gradient w.r.t. token mixing weights
     CHECK_CUBLAS(cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_T,
@@ -711,7 +726,8 @@ void mixer_block_backward(cublasHandle_t handle, MixerBlock* block, float* d_out
                 block->temp_grad, seq));
     
     nblocks = ((seq * seq) + threads - 1) / threads;
-    kernel_apply_mask<<<nblocks, threads>>>(block->temp_grad, block->temp_grad, seq);
+    kernel_apply_mask<<<nblocks, threads>>>(block->temp_grad, block->token_mixing_mask, block->temp_grad, seq * seq);
+    CHECK_CUDA(cudaGetLastError());
     
     // Add temp_grad to token_mixing_weight_grad
     CHECK_CUBLAS(cublasSaxpy(handle, seq * seq, &alpha, block->temp_grad, 1, block->token_mixing_weight_grad, 1));
@@ -727,6 +743,7 @@ void mixer_block_backward(cublasHandle_t handle, MixerBlock* block, float* d_out
     
     nblocks = (total + threads - 1) / threads;
     kernel_transpose_BES_to_BSE<<<nblocks, threads>>>(block->d_input_transposed, d_input, batch_size, embed, seq);
+    CHECK_CUDA(cudaGetLastError());
     
     // Add d_output to d_input
     CHECK_CUBLAS(cublasSaxpy(handle, total, &alpha, block->d_output, 1, d_input, 1));
@@ -785,6 +802,7 @@ void mixer_model_backward(cublasHandle_t handle, MixerModel* model) {
         model->d_input_tokens, model->d_block_outputs,
         model->embedding_weight_grad, batch, seq, embed, model->vocab_size
     );
+    CHECK_CUDA(cudaGetLastError());
 }
 
 //
@@ -809,6 +827,7 @@ void update_weights_adamw_gpu(MixerModel* model, float learning_rate) {
         alpha_t, model->beta1, model->beta2, model->epsilon,
         model->weight_decay, learning_rate, vocab * embed, scale
     );
+    CHECK_CUDA(cudaGetLastError());
     
     // Update output projection weights
     blocks = (vocab * embed + threads - 1) / threads;
@@ -818,6 +837,7 @@ void update_weights_adamw_gpu(MixerModel* model, float learning_rate) {
         alpha_t, model->beta1, model->beta2, model->epsilon,
         model->weight_decay, learning_rate, vocab * embed, scale
     );
+    CHECK_CUDA(cudaGetLastError());
     
     // Update MixerBlock weights
     for (int l = 0; l < model->num_layers; l++) {
@@ -833,11 +853,14 @@ void update_weights_adamw_gpu(MixerModel* model, float learning_rate) {
             alpha_t, model->beta1, model->beta2, model->epsilon,
             model->weight_decay, learning_rate, size_tok, scale
         );
+        CHECK_CUDA(cudaGetLastError());
         
         // Update masked weights - important to preserve the masking structure
         kernel_apply_mask<<<blocks, threads>>>(
-            block->token_mixing_weight, block->masked_weights, block->seq_length
+            block->token_mixing_weight, block->token_mixing_mask, 
+            block->masked_weights, size_tok
         );
+        CHECK_CUDA(cudaGetLastError());
         
         // Channel mixing weights
         blocks = (size_channel + threads - 1) / threads;
@@ -847,6 +870,7 @@ void update_weights_adamw_gpu(MixerModel* model, float learning_rate) {
             alpha_t, model->beta1, model->beta2, model->epsilon,
             model->weight_decay, learning_rate, size_channel, scale
         );
+        CHECK_CUDA(cudaGetLastError());
     }
 }
 
@@ -1177,6 +1201,15 @@ MixerModel* load_model(const char* filename) {
         CHECK_CUDA(cudaMemcpy(block->token_mixing_weight, h_token_mixing_weight, 
                    size_tok * sizeof(float), cudaMemcpyHostToDevice));
                    
+        // Update masked weights
+        int threads = 256;
+        int blocks = (size_tok + threads - 1) / threads;
+        kernel_apply_mask<<<blocks, threads>>>(block->token_mixing_weight, 
+                                               block->token_mixing_mask, 
+                                               block->masked_weights, size_tok);
+        CHECK_CUDA(cudaGetLastError());
+        free(h_token_mixing_weight);
+        
         int size_channel = embed_dim * embed_dim;
         float* h_channel_mixing_weight = (float*)malloc(size_channel * sizeof(float));
         fread(h_channel_mixing_weight, sizeof(float), size_channel, file);
@@ -1296,7 +1329,7 @@ int main(){
             if(step % 100 == 0) {
                 printf("Generating sample text...\n");
                 printf("Sample seed text:\n%s\n\n", seed_text);
-                generate_text(cublasHandle, model, seed_text, 100, generated_text, sizeof(generated_text));
+                generate_text(cublasHandle, model, seed_text, 128, generated_text, sizeof(generated_text));
                 printf("Generated text:\n%s\n\n", generated_text);
             }
         }
