@@ -123,11 +123,6 @@ jobs:
           MODEL_FILE=$(ls -t *_mixer_model.bin | head -1)
           echo "Generated model file: $MODEL_FILE" | tee -a $TRAINING_LOG
           
-          # Generate sample text after training
-          echo "=== Text Generation Sample ===" | tee -a $TRAINING_LOG
-          echo "Generating sample text with temperature 0.8..." | tee -a $TRAINING_LOG
-          ./slm.out $MODEL_FILE 2>&1 | tee -a $TRAINING_LOG
-          
           # Prepare release notes with the generation output and training params
           cat > release_notes.md << EOF2
           Automatically trained Mixer Language Model.
