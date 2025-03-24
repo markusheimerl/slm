@@ -65,9 +65,9 @@ jobs:
           gh auth login --with-token < token.txt
           rm token.txt  # Remove the token file for security
           
-          # Create a training log file with timestamp
+          # Create a training log file with timestamp at the beginning
           TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
-          TRAINING_LOG="slm_training_${TIMESTAMP}.log"
+          TRAINING_LOG="${TIMESTAMP}_slm_training.log"
           touch $TRAINING_LOG
           
           # Log system info
