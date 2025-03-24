@@ -1174,7 +1174,7 @@ float get_cosine_lr(float initial_lr, float min_lr, int current_step, int total_
 
 ////////////////////////////////////////////////////////////////////////////////
 // Main function.
-int main() {
+int main(int argc, char** argv) {
     srand(time(NULL));
     CHECK_CUDA(cudaSetDevice(0));
     
@@ -1184,8 +1184,17 @@ int main() {
     int seq_length = 1024;
     int batch_size = 64;
     
-    MixerModel* model = init_mixer_model(vocab_size, embed_dim, num_layers, seq_length, batch_size);
-    printf("Model initialized with %d parameters\n", count_parameters(model));
+    MixerModel* model;
+    
+    if (argc > 1) {
+        // Load existing model
+        model = load_model(argv[1]);
+    } else {
+        // Create new model
+        model = init_mixer_model(vocab_size, embed_dim, num_layers, seq_length, batch_size);
+    }
+    
+    printf("Model with %d parameters\n", count_parameters(model));
     
     size_t text_size;
     char* text = load_text_file("../gutenberg_texts/combined_corpus.txt", &text_size);
