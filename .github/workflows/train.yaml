@@ -45,7 +45,7 @@ jobs:
           wget -q -O - https://apt.llvm.org/llvm-snapshot.gpg.key | apt-key add -
           
           apt update
-          apt install -y time tree htop nvtop libcurl4-openssl-dev clang-17 gh jq
+          apt install -y time tree htop nvtop libcurl4-openssl-dev clang-17 gh
           update-alternatives --install /usr/bin/clang clang /usr/bin/clang-17 100
           
           mkdir -p slm
@@ -89,50 +89,35 @@ jobs:
           echo "Processing data..." | tee -a $TRAINING_LOG
           make data 2>&1 | tee -a $TRAINING_LOG
           
-          # Check for previous releases
+          # Check for previous releases - using the exact approach from your known working script
           echo "Checking for previous releases..." | tee -a $TRAINING_LOG
-          RELEASES=$(gh release list --limit 5 | tee -a $TRAINING_LOG || echo "")
+          PREVIOUS_RELEASE=$(gh release list --limit 1 | grep -v "No releases" || echo "")
           
-          if [[ -n "$RELEASES" && "$RELEASES" != *"No releases"* ]]; then
-            echo "Found previous releases. Attempting to download the most recent model." | tee -a $TRAINING_LOG
+          echo "=== Training Process ===" | tee -a $TRAINING_LOG
+          if [ -n "$PREVIOUS_RELEASE" ]; then
+            echo "Found previous release. Continuing training from existing model." | tee -a $TRAINING_LOG
+            # Extract the tag name from the release list output - exactly as in the working script
+            RELEASE_TAG=$(echo "$PREVIOUS_RELEASE" | awk '{print $1}')
             
-            # First try to get the latest release (first line)
-            RELEASE_TAG=$(echo "$RELEASES" | head -n 1 | awk '{print $1}')
-            echo "Latest release tag: $RELEASE_TAG" | tee -a $TRAINING_LOG
+            echo "Downloading model from release $RELEASE_TAG..." | tee -a $TRAINING_LOG
+            # Download all files from the release to be safe
+            gh release download "$RELEASE_TAG" 2>&1 | tee -a $TRAINING_LOG
             
-            # List all assets from the release to find the model file
-            echo "Listing release assets:" | tee -a $TRAINING_LOG
-            ASSETS=$(gh release view $RELEASE_TAG --json assets | jq -r '.assets[].name' | tee -a $TRAINING_LOG)
-            
-            # Look for a model file (should match *_mixer_model.bin)
-            MODEL_FILE=$(echo "$ASSETS" | grep "_mixer_model.bin" | head -n 1)
-            
-            if [[ -n "$MODEL_FILE" ]]; then
-              echo "Found model file: $MODEL_FILE" | tee -a $TRAINING_LOG
-              echo "Downloading model from release $RELEASE_TAG..." | tee -a $TRAINING_LOG
-              gh release download "$RELEASE_TAG" --pattern "$MODEL_FILE" 2>&1 | tee -a $TRAINING_LOG
+            # Find any mixer model files
+            if ls *_mixer_model.bin 1> /dev/null 2>&1; then
+              MODEL_FILE=$(ls -t *_mixer_model.bin | head -1)
+              echo "Using model file: $MODEL_FILE" | tee -a $TRAINING_LOG
               
-              if [[ -f "$MODEL_FILE" ]]; then
-                echo "Downloaded model file successfully" | tee -a $TRAINING_LOG
-                echo "=== Training Process ===" | tee -a $TRAINING_LOG
-                echo "Starting training continuation..." | tee -a $TRAINING_LOG
-                make cont 2>&1 | tee -a $TRAINING_LOG
-              else
-                echo "Error: Downloaded file not found! Starting training from scratch." | tee -a $TRAINING_LOG
-                echo "=== Training Process ===" | tee -a $TRAINING_LOG
-                echo "Starting training from scratch..." | tee -a $TRAINING_LOG
-                make run 2>&1 | tee -a $TRAINING_LOG
-              fi
+              # Continue training from existing model
+              echo "Starting training continuation..." | tee -a $TRAINING_LOG
+              make cont 2>&1 | tee -a $TRAINING_LOG
             else
-              echo "No model file found in release assets. Starting training from scratch." | tee -a $TRAINING_LOG
-              echo "=== Training Process ===" | tee -a $TRAINING_LOG
-              echo "Starting training from scratch..." | tee -a $TRAINING_LOG
+              echo "No model file found. Starting training from scratch." | tee -a $TRAINING_LOG
               make run 2>&1 | tee -a $TRAINING_LOG
             fi
           else
-            echo "No previous releases found. Starting training from scratch." | tee -a $TRAINING_LOG
-            echo "=== Training Process ===" | tee -a $TRAINING_LOG
-            echo "Starting training from scratch..." | tee -a $TRAINING_LOG
+            echo "No previous release found. Starting training from scratch." | tee -a $TRAINING_LOG
+            # Start training from scratch
             make run 2>&1 | tee -a $TRAINING_LOG
           fi
           
@@ -141,6 +126,12 @@ jobs:
           # Find the most recent model file
           MODEL_FILE=$(ls -t *_mixer_model.bin | head -1)
           echo "Generated model file: $MODEL_FILE" | tee -a $TRAINING_LOG
+          
+          # Generate sample text after training
+          echo "=== Text Generation Sample ===" | tee -a $TRAINING_LOG
+          echo "Generating sample text with temperature 0.8..." | tee -a $TRAINING_LOG
+          GEN_OUTPUT=$(./slm.out $MODEL_FILE 2>&1)
+          echo "$GEN_OUTPUT" | tee -a $TRAINING_LOG
           
           # Prepare release notes with the generation output and training params
           cat > release_notes.md << EOF2
