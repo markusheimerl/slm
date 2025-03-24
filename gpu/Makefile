@@ -16,5 +16,8 @@ data: data.out
 run: slm.out
 	@time ./slm.out
 
+cont: slm.out
+	@time ./slm.out $(shell ls -t *_mixer_model.bin | head -1)
+
 clean:
 	rm -f *.out *.bin
