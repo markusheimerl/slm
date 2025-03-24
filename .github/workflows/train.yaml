@@ -38,8 +38,16 @@ jobs:
           # Create a script file with the setup and training logic
           cat > setup_script.sh << 'EOF'
           cd /workspace
+          
+          # Set up LLVM/Clang 17 repository
+          echo "deb http://apt.llvm.org/jammy/ llvm-toolchain-jammy-17 main" > /etc/apt/sources.list.d/llvm-17.list
+          echo "deb-src http://apt.llvm.org/jammy/ llvm-toolchain-jammy-17 main" >> /etc/apt/sources.list.d/llvm-17.list
+          wget -q -O - https://apt.llvm.org/llvm-snapshot.gpg.key | apt-key add -
+          
           apt update
-          apt install -y time tree htop nvtop libcurl4-openssl-dev clang gh
+          apt install -y time tree htop nvtop libcurl4-openssl-dev clang-17 gh
+          update-alternatives --install /usr/bin/clang clang /usr/bin/clang-17 100
+          
           mkdir -p slm
           cd slm
           
@@ -65,6 +73,7 @@ jobs:
           # Log system info
           echo "=== System Information ===" | tee -a $TRAINING_LOG
           nvidia-smi | tee -a $TRAINING_LOG
+          clang --version | tee -a $TRAINING_LOG
           echo "" | tee -a $TRAINING_LOG
           
           # Log training configuration
