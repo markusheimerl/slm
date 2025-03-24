@@ -1621,7 +1621,7 @@ int main(int argc, char** argv) {
     
     float initial_lr = 0.0001f;
     float min_lr = 0.00001f;
-    int total_training_steps = 1000000;
+    int total_training_steps = 100000;
     
     printf("Training for %d total steps with cosine learning rate schedule (%.6f to %.6f)\n", 
            total_training_steps, initial_lr, min_lr);

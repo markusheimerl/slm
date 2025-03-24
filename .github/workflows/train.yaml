@@ -6,7 +6,7 @@ on:
       training_steps:
         description: 'Number of training steps'
         required: true
-        default: '1000000'
+        default: '100000'
         type: string
       batch_size:
         description: 'Batch size for training'
@@ -136,12 +136,6 @@ jobs:
           # Find the most recent model file
           MODEL_FILE=$(ls -t *_mixer_model.bin | head -1)
           echo "Final model file: $MODEL_FILE" | tee -a $TRAINING_LOG
-          
-          # Generate sample text after training
-          echo "=== Text Generation Sample ===" | tee -a $TRAINING_LOG
-          echo "Generating sample text with temperature 0.8..." | tee -a $TRAINING_LOG
-          GEN_OUTPUT=$(./slm.out $MODEL_FILE 2>&1)
-          echo "$GEN_OUTPUT" | tee -a $TRAINING_LOG
           
           # Use personal access token for GitHub operations
           echo "$USER_PAT" > token.txt
