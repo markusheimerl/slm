@@ -38,22 +38,17 @@ jobs:
           # Create a script file with the setup and training logic
           cat > setup_script.sh << 'EOF'
           cd /workspace
-          
-          # Set up LLVM/Clang 17 repository
           echo "deb http://apt.llvm.org/jammy/ llvm-toolchain-jammy-17 main" > /etc/apt/sources.list.d/llvm-17.list
           echo "deb-src http://apt.llvm.org/jammy/ llvm-toolchain-jammy-17 main" >> /etc/apt/sources.list.d/llvm-17.list
           wget -q -O - https://apt.llvm.org/llvm-snapshot.gpg.key | apt-key add -
-          
           apt update
           apt install -y time tree htop nvtop libcurl4-openssl-dev clang-17 gh
           update-alternatives --install /usr/bin/clang clang /usr/bin/clang-17 100
           
           mkdir -p slm
           cd slm
+          git clone --recursive https://github.com/$REPO_OWNER/$REPO_NAME.git .
           
-          # Clone repo and set up directories
-          git clone --depth 1 https://github.com/$REPO_OWNER/$REPO_NAME.git .
-
           # Set training parameters in the SLM code
           sed -i "s/int total_training_steps = 1000000;/int total_training_steps = $TRAINING_STEPS;/" slm.c
           sed -i "s/int batch_size = 64;/int batch_size = $BATCH_SIZE;/" slm.c
@@ -70,13 +65,11 @@ jobs:
           TRAINING_LOG="${TIMESTAMP}_slm_training.log"
           touch $TRAINING_LOG
           
-          # Log system info
+          # Log system info and configuration
           echo "=== System Information ===" | tee -a $TRAINING_LOG
           nvidia-smi | tee -a $TRAINING_LOG
           clang --version | tee -a $TRAINING_LOG
           echo "" | tee -a $TRAINING_LOG
-          
-          # Log training configuration
           echo "=== Training Configuration ===" | tee -a $TRAINING_LOG
           echo "Training Steps: $TRAINING_STEPS" | tee -a $TRAINING_LOG
           echo "Batch Size: $BATCH_SIZE" | tee -a $TRAINING_LOG
@@ -84,48 +77,47 @@ jobs:
           echo "Minimum Learning Rate: $MIN_LEARNING_RATE" | tee -a $TRAINING_LOG
           echo "" | tee -a $TRAINING_LOG
           
-          # Process data - Download corpus if needed
-          echo "=== Training Initialization ===" | tee -a $TRAINING_LOG
-          echo "Processing data..." | tee -a $TRAINING_LOG
+          # Process data
           make data 2>&1 | tee -a $TRAINING_LOG
           
-          # Check for previous releases - using the exact approach from your known working script
-          echo "Checking for previous releases..." | tee -a $TRAINING_LOG
+          # Original release handling logic from your working script
           PREVIOUS_RELEASE=$(gh release list --limit 1 | grep -v "No releases" || echo "")
           
-          echo "=== Training Process ===" | tee -a $TRAINING_LOG
           if [ -n "$PREVIOUS_RELEASE" ]; then
             echo "Found previous release. Continuing training from existing model." | tee -a $TRAINING_LOG
-            # Extract the tag name from the release list output - exactly as in the working script
+            # Extract the tag name from the release list output
             RELEASE_TAG=$(echo "$PREVIOUS_RELEASE" | awk '{print $1}')
             
-            echo "Downloading model from release $RELEASE_TAG..." | tee -a $TRAINING_LOG
-            # Download all files from the release to be safe
-            gh release download "$RELEASE_TAG" 2>&1 | tee -a $TRAINING_LOG
+            # Download the model file
+            echo "Attempting to download model from release $RELEASE_TAG..." | tee -a $TRAINING_LOG
             
-            # Find any mixer model files
-            if ls *_mixer_model.bin 1> /dev/null 2>&1; then
+            # First, let's debug what the release actually contains
+            echo "Available assets in release:" | tee -a $TRAINING_LOG
+            gh release view $RELEASE_TAG | tee -a $TRAINING_LOG
+            
+            # Try to find and download model files (both patterns to be safe)
+            gh release download $RELEASE_TAG --pattern "*_mixer_model.bin" || echo "No mixer_model.bin found" | tee -a $TRAINING_LOG
+            
+            # Check if we got a model file
+            if [ -f $(ls -t *_mixer_model.bin 2>/dev/null | head -1) ]; then
               MODEL_FILE=$(ls -t *_mixer_model.bin | head -1)
-              echo "Using model file: $MODEL_FILE" | tee -a $TRAINING_LOG
+              echo "Found and using model file: $MODEL_FILE" | tee -a $TRAINING_LOG
               
               # Continue training from existing model
               echo "Starting training continuation..." | tee -a $TRAINING_LOG
               make cont 2>&1 | tee -a $TRAINING_LOG
             else
-              echo "No model file found. Starting training from scratch." | tee -a $TRAINING_LOG
+              echo "No model file found despite release existing. Starting training from scratch." | tee -a $TRAINING_LOG
               make run 2>&1 | tee -a $TRAINING_LOG
             fi
           else
             echo "No previous release found. Starting training from scratch." | tee -a $TRAINING_LOG
-            # Start training from scratch
             make run 2>&1 | tee -a $TRAINING_LOG
           fi
           
-          echo "=== Training Completed ===" | tee -a $TRAINING_LOG
-          
           # Find the most recent model file
           MODEL_FILE=$(ls -t *_mixer_model.bin | head -1)
-          echo "Generated model file: $MODEL_FILE" | tee -a $TRAINING_LOG
+          echo "Final model file: $MODEL_FILE" | tee -a $TRAINING_LOG
           
           # Generate sample text after training
           echo "=== Text Generation Sample ===" | tee -a $TRAINING_LOG
@@ -133,7 +125,7 @@ jobs:
           GEN_OUTPUT=$(./slm.out $MODEL_FILE 2>&1)
           echo "$GEN_OUTPUT" | tee -a $TRAINING_LOG
           
-          # Prepare release notes with the generation output and training params
+          # Prepare release notes
           cat > release_notes.md << EOF2
           Automatically trained Mixer Language Model.
           
@@ -143,28 +135,21 @@ jobs:
           - Initial Learning Rate: $LEARNING_RATE
           - Minimum Learning Rate: $MIN_LEARNING_RATE
           
-          ## Training Log
-          Full training log is available in the attached log file.
-          
           ## Model Information
           - Model file: $MODEL_FILE
           - Training completed: $(date)
-          EOF2
           
-          # Extract a sample of the generated text for the release notes
-          echo -e "\n## Generation Sample Output\n" >> release_notes.md
-          echo "\`\`\`" >> release_notes.md
-          # Get the generated sample
-          echo "$GEN_OUTPUT" | tail -30 >> release_notes.md
-          echo "\`\`\`" >> release_notes.md
+          ## Generation Sample Output
+          
+          \`\`\`
+          $(echo "$GEN_OUTPUT" | tail -30)
+          \`\`\`
+          EOF2
           
           # Create the release with the model file and log
           RELEASE_TAG="${TIMESTAMP}_slm_training"
           echo "Creating release with tag: $RELEASE_TAG" | tee -a $TRAINING_LOG
           gh release create $RELEASE_TAG $MODEL_FILE $TRAINING_LOG --title "SLM Training $TIMESTAMP" --notes-file release_notes.md
-          
-          echo "Release created successfully." | tee -a $TRAINING_LOG
-          echo "Cleaning up..." | tee -a $TRAINING_LOG
           
           # Clean up the pod once we're done
           runpodctl remove pod $RUNPOD_POD_ID
