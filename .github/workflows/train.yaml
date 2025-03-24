@@ -1,0 +1,209 @@
+name: Train SLM Model
+
+on:
+  workflow_dispatch:
+    inputs:
+      training_steps:
+        description: 'Number of training steps'
+        required: true
+        default: '1000000'
+        type: string
+      batch_size:
+        description: 'Batch size for training'
+        required: true
+        default: '64'
+        type: string
+      learning_rate:
+        description: 'Initial learning rate'
+        required: true
+        default: '0.0001'
+        type: string
+      min_learning_rate:
+        description: 'Minimum learning rate (for cosine schedule)'
+        required: true
+        default: '0.00001'
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  create-pod:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Create RunPod Instance
+        id: create-pod
+        run: |
+          # Create a script file with the setup and training logic
+          cat > setup_script.sh << 'EOF'
+          cd /workspace
+          apt update
+          apt install -y time tree htop nvtop libcurl4-openssl-dev clang gh
+          mkdir -p slm
+          cd slm
+          
+          # Clone repo and set up directories
+          git clone --depth 1 https://github.com/$REPO_OWNER/$REPO_NAME.git .
+
+          # Set training parameters in the SLM code
+          sed -i "s/int total_training_steps = 1000000;/int total_training_steps = $TRAINING_STEPS;/" slm.c
+          sed -i "s/int batch_size = 64;/int batch_size = $BATCH_SIZE;/" slm.c
+          sed -i "s/float initial_lr = 0.0001f;/float initial_lr = ${LEARNING_RATE}f;/" slm.c
+          sed -i "s/float min_lr = 0.00001f;/float min_lr = ${MIN_LEARNING_RATE}f;/" slm.c
+          
+          # Use the personal access token for authentication
+          echo "$USER_PAT" > token.txt
+          gh auth login --with-token < token.txt
+          rm token.txt  # Remove the token file for security
+          
+          # Create a training log file with timestamp
+          TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
+          TRAINING_LOG="slm_training_${TIMESTAMP}.log"
+          touch $TRAINING_LOG
+          
+          # Log system info
+          echo "=== System Information ===" | tee -a $TRAINING_LOG
+          nvidia-smi | tee -a $TRAINING_LOG
+          echo "" | tee -a $TRAINING_LOG
+          
+          # Log training configuration
+          echo "=== Training Configuration ===" | tee -a $TRAINING_LOG
+          echo "Training Steps: $TRAINING_STEPS" | tee -a $TRAINING_LOG
+          echo "Batch Size: $BATCH_SIZE" | tee -a $TRAINING_LOG
+          echo "Initial Learning Rate: $LEARNING_RATE" | tee -a $TRAINING_LOG
+          echo "Minimum Learning Rate: $MIN_LEARNING_RATE" | tee -a $TRAINING_LOG
+          echo "" | tee -a $TRAINING_LOG
+          
+          # Check for previous releases
+          echo "=== Training Initialization ===" | tee -a $TRAINING_LOG
+          echo "Checking for previous releases..." | tee -a $TRAINING_LOG
+          PREVIOUS_RELEASE=$(gh release list --limit 1 | grep -v "No releases" || echo "")
+          
+          # Process data - Download corpus if needed
+          echo "Processing data..." | tee -a $TRAINING_LOG
+          make data 2>&1 | tee -a $TRAINING_LOG
+          
+          echo "=== Training Process ===" | tee -a $TRAINING_LOG
+          if [ -n "$PREVIOUS_RELEASE" ]; then
+            echo "Found previous release. Continuing training from existing model." | tee -a $TRAINING_LOG
+            # Extract the tag name from the release list output
+            RELEASE_TAG=$(echo "$PREVIOUS_RELEASE" | awk '{print $1}')
+            
+            # Download the model file
+            echo "Downloading model from release $RELEASE_TAG..." | tee -a $TRAINING_LOG
+            gh release download "$RELEASE_TAG" --pattern "*_mixer_model.bin"
+            
+            # Get the model file name
+            MODEL_FILE=$(ls *_mixer_model.bin)
+            echo "Using model file: $MODEL_FILE" | tee -a $TRAINING_LOG
+            
+            # Continue training from existing model
+            echo "Starting training continuation..." | tee -a $TRAINING_LOG
+            make cont 2>&1 | tee -a $TRAINING_LOG
+          else
+            echo "No previous release found. Starting training from scratch." | tee -a $TRAINING_LOG
+            # Start training from scratch
+            echo "Starting training from scratch..." | tee -a $TRAINING_LOG
+            make run 2>&1 | tee -a $TRAINING_LOG
+          fi
+          
+          echo "=== Training Completed ===" | tee -a $TRAINING_LOG
+          
+          # Find the most recent model file
+          MODEL_FILE=$(ls -t *_mixer_model.bin | head -1)
+          echo "Generated model file: $MODEL_FILE" | tee -a $TRAINING_LOG
+          
+          # Generate sample text after training
+          echo "=== Text Generation Sample ===" | tee -a $TRAINING_LOG
+          echo "Generating sample text with temperature 0.8..." | tee -a $TRAINING_LOG
+          ./slm.out $MODEL_FILE 2>&1 | tee -a $TRAINING_LOG
+          
+          # Prepare release notes with the generation output and training params
+          cat > release_notes.md << EOF2
+          Automatically trained Mixer Language Model.
+          
+          ## Training Configuration
+          - Training Steps: $TRAINING_STEPS
+          - Batch Size: $BATCH_SIZE
+          - Initial Learning Rate: $LEARNING_RATE
+          - Minimum Learning Rate: $MIN_LEARNING_RATE
+          
+          ## Training Log
+          Full training log is available in the attached log file.
+          
+          ## Model Information
+          - Model file: $MODEL_FILE
+          - Training completed: $(date)
+          EOF2
+          
+          # Extract a sample of the generated text from the log
+          echo -e "\n## Generation Sample Output\n" >> release_notes.md
+          echo "\`\`\`" >> release_notes.md
+          # Isolate a sample from the log file - just the last generation
+          grep -A 30 "======= Sample generation" $TRAINING_LOG | tail -30 >> release_notes.md
+          echo "\`\`\`" >> release_notes.md
+          
+          # Create the release with the model file and log
+          RELEASE_TAG="${TIMESTAMP}_slm_training"
+          echo "Creating release with tag: $RELEASE_TAG" | tee -a $TRAINING_LOG
+          gh release create $RELEASE_TAG $MODEL_FILE $TRAINING_LOG --title "SLM Training $TIMESTAMP" --notes-file release_notes.md
+          
+          echo "Release created successfully." | tee -a $TRAINING_LOG
+          echo "Cleaning up..." | tee -a $TRAINING_LOG
+          
+          # Clean up the pod once we're done
+          runpodctl remove pod $RUNPOD_POD_ID
+          EOF
+          
+          # Base64 encode the script to avoid escaping issues
+          ENCODED_SCRIPT=$(base64 -w 0 setup_script.sh)
+          
+          # Create the command that will be run inside the pod
+          DOCKER_ARGS="bash -c 'echo $ENCODED_SCRIPT | base64 -d > /workspace/setup.sh && chmod +x /workspace/setup.sh && REPO_OWNER=${{ github.repository_owner }} REPO_NAME=${{ github.event.repository.name }} USER_PAT=${{ secrets.USER_PAT }} TRAINING_STEPS=${{ inputs.training_steps }} BATCH_SIZE=${{ inputs.batch_size }} LEARNING_RATE=${{ inputs.learning_rate }} MIN_LEARNING_RATE=${{ inputs.min_learning_rate }} /workspace/setup.sh'"
+
+          # Submit the pod creation request to RunPod
+          RESPONSE=$(curl --request POST \
+            --header 'content-type: application/json' \
+            --url "https://api.runpod.io/graphql?api_key=${{ secrets.RUNPOD_API_KEY }}" \
+            --data "$(jq -n \
+              --arg docker_args "$DOCKER_ARGS" \
+              '{
+                "query": "mutation($input: PodFindAndDeployOnDemandInput!) { podFindAndDeployOnDemand(input: $input) { id imageName machineId } }",
+                "variables": {
+                  "input": {
+                    "cloudType": "SECURE",
+                    "gpuCount": 1,
+                    "volumeInGb": 10,
+                    "containerDiskInGb": 20,
+                    "minVcpuCount": 4,
+                    "minMemoryInGb": 20,
+                    "gpuTypeId": "NVIDIA GeForce RTX 4090",
+                    "name": "slm-training",
+                    "imageName": "runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04",
+                    "ports": "8888/http,22/tcp,8080/http",
+                    "volumeMountPath": "/workspace",
+                    "dockerArgs": $docker_args
+                  }
+                }
+              }'
+            )")
+
+          echo "Response: $RESPONSE"
+          
+          if echo "$RESPONSE" | grep -q "error"; then
+            echo "Error creating pod"
+            echo "$RESPONSE"
+            exit 1
+          fi
+          
+          POD_ID=$(echo "$RESPONSE" | jq -r '.data.podFindAndDeployOnDemand.id')
+          if [[ -z "$POD_ID" || "$POD_ID" == "null" ]]; then
+            echo "Failed to get pod ID from response"
+            exit 1
+          fi
+          
+          echo "Created pod with ID: $POD_ID"
+          echo "pod_id=$POD_ID" >> $GITHUB_OUTPUT
+          
+          echo "Pod has been started."
