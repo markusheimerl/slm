@@ -51,7 +51,6 @@ typedef struct {
     float* token_mixed;    // [batch, embed, seq]
     float* token_mix_activated; // [batch, embed, seq]
     float* channel_mixed;  // [batch, seq, embed]
-    float* channel_mix_activated; // [batch, seq, embed]
     
     // Backward pass buffers
     float* d_output;       // gradient from next layer [batch, seq, embed]
@@ -61,7 +60,6 @@ typedef struct {
     
     // Additional buffers
     float* masked_weights;   // [seq, seq] = token_mixing_weight with lower triangular masking
-    float* d_channel_activated; // [batch, seq, embed]
     float* d_output_transposed; // [batch, embed, seq]
     float* d_input_transposed;  // [batch, embed, seq]
     float* temp_grad;           // [seq, seq] temporary
@@ -339,7 +337,6 @@ MixerBlock* init_mixer_block(int embed_dim, int seq_length, int batch_size) {
     CHECK_CUDA(cudaMalloc(&block->token_mixed, tensor_size_trans));
     CHECK_CUDA(cudaMalloc(&block->token_mix_activated, tensor_size_trans));
     CHECK_CUDA(cudaMalloc(&block->channel_mixed, tensor_size));
-    CHECK_CUDA(cudaMalloc(&block->channel_mix_activated, tensor_size));
     
     // Allocate backward pass buffers
     CHECK_CUDA(cudaMalloc(&block->d_output, tensor_size));
@@ -348,7 +345,6 @@ MixerBlock* init_mixer_block(int embed_dim, int seq_length, int batch_size) {
     CHECK_CUDA(cudaMalloc(&block->d_input, tensor_size));
     
     // Allocate additional buffers
-    CHECK_CUDA(cudaMalloc(&block->d_channel_activated, tensor_size));
     CHECK_CUDA(cudaMalloc(&block->d_output_transposed, tensor_size_trans));
     CHECK_CUDA(cudaMalloc(&block->d_input_transposed, tensor_size_trans));
     CHECK_CUDA(cudaMalloc(&block->temp_grad, size_tok));
@@ -377,7 +373,6 @@ void free_mixer_block(MixerBlock* block) {
     CHECK_CUDA(cudaFree(block->token_mixed));
     CHECK_CUDA(cudaFree(block->token_mix_activated));
     CHECK_CUDA(cudaFree(block->channel_mixed));
-    CHECK_CUDA(cudaFree(block->channel_mix_activated));
     
     // Free backward pass buffers
     CHECK_CUDA(cudaFree(block->d_output));
@@ -387,7 +382,6 @@ void free_mixer_block(MixerBlock* block) {
     
     // Free additional buffers
     CHECK_CUDA(cudaFree(block->masked_weights));
-    CHECK_CUDA(cudaFree(block->d_channel_activated));
     CHECK_CUDA(cudaFree(block->d_output_transposed));
     CHECK_CUDA(cudaFree(block->d_input_transposed));
     CHECK_CUDA(cudaFree(block->temp_grad));
@@ -592,12 +586,9 @@ void mixer_block_forward(MixerBlock* block, float* input, float* output, int bat
                 &beta,
                 block->channel_mixed, embed));
     
-    // Apply SiLU activation
+    // Apply SiLU activation directly to output
     nblocks = (total + threads - 1) / threads;
-    silu_kernel<<<nblocks, threads>>>(block->channel_mixed, block->channel_mix_activated, total);
-    
-    // Copy activated output
-    CHECK_CUDA(cudaMemcpy(output, block->channel_mix_activated, total * sizeof(float), cudaMemcpyDeviceToDevice));
+    silu_kernel<<<nblocks, threads>>>(block->channel_mixed, output, total);
     
     // Add residual
     CHECK_CUBLAS(cublasSaxpy(handle, total, &alpha, block->residual, 1, output, 1));
@@ -685,9 +676,8 @@ void mixer_block_backward(MixerBlock* block, float* d_output, float* d_input, in
     CHECK_CUDA(cudaMemcpy(block->d_output, d_output, total * sizeof(float), cudaMemcpyDeviceToDevice));
     
     // Gradient through SiLU activation
-    CHECK_CUDA(cudaMemcpy(block->d_channel_activated, block->d_output, total * sizeof(float), cudaMemcpyDeviceToDevice));
     nblocks = (total + threads - 1) / threads;
-    silu_deriv_mult_kernel<<<nblocks, threads>>>(block->channel_mixed, block->d_channel_activated, block->d_channel_mixed, total);
+    silu_deriv_mult_kernel<<<nblocks, threads>>>(block->channel_mixed, block->d_output, block->d_channel_mixed, total);
     
     // Gradient w.r.t. channel mixing weights
     CHECK_CUBLAS(cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_T,
