@@ -1,5 +1,5 @@
 # slm
-A state space language model implementation
+A small language model implementation
 
 Consider a sequence model operating on batched inputs of shape (batch_size × seq_length × embed_dim). The architecture processes sequences through alternating token-mixing and channel-mixing operations, where the forward propagation follows:
 
