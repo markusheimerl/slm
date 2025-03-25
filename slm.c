@@ -1169,10 +1169,10 @@ int main(int argc, char** argv) {
     CHECK_CUDA(cudaSetDevice(0));
     
     int vocab_size = 256;
-    int embed_dim = 512;
-    int num_layers = 8;
-    int seq_length = 1024;
-    int batch_size = 64;
+    int embed_dim = 2048;
+    int num_layers = 12;
+    int seq_length = 2048;
+    int batch_size = 6;
     
     MixerModel* model;
     
