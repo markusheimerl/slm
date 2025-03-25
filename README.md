@@ -5,7 +5,7 @@ Consider a sequence model operating on batched inputs of shape (batch_size × se
 
 $$
 \begin{align*}
-T &= X^TW_{\text{t}} \\
+T &= X^T(W_{\text{t}} \odot M) \\
 X' &= (T\odot\sigma(T))^T + X \\
 C &= X'W_{\text{c}} \\
 Y &= (C\odot\sigma(C)) + X'
