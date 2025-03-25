@@ -14,14 +14,9 @@ on:
         default: '64'
         type: string
       learning_rate:
-        description: 'Initial learning rate'
+        description: 'Learning rate'
         required: true
         default: '0.0001'
-        type: string
-      min_learning_rate:
-        description: 'Minimum learning rate (for cosine schedule)'
-        required: true
-        default: '0.00001'
         type: string
 
 permissions:
@@ -52,8 +47,7 @@ jobs:
           # Set training parameters in the SLM code
           sed -i "s/int total_training_steps = 1000000;/int total_training_steps = $TRAINING_STEPS;/" slm.c
           sed -i "s/int batch_size = 64;/int batch_size = $BATCH_SIZE;/" slm.c
-          sed -i "s/float initial_lr = 0.0001f;/float initial_lr = ${LEARNING_RATE}f;/" slm.c
-          sed -i "s/float min_lr = 0.00001f;/float min_lr = ${MIN_LEARNING_RATE}f;/" slm.c
+          sed -i "s/float learning_rate = 0.0001f;/float learning_rate = ${LEARNING_RATE}f;/" slm.c
           
           # Create a training log file with timestamp at the beginning
           TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
@@ -68,8 +62,7 @@ jobs:
           echo "=== Training Configuration ===" | tee -a $TRAINING_LOG
           echo "Training Steps: $TRAINING_STEPS" | tee -a $TRAINING_LOG
           echo "Batch Size: $BATCH_SIZE" | tee -a $TRAINING_LOG
-          echo "Initial Learning Rate: $LEARNING_RATE" | tee -a $TRAINING_LOG
-          echo "Minimum Learning Rate: $MIN_LEARNING_RATE" | tee -a $TRAINING_LOG
+          echo "Learning Rate: $LEARNING_RATE" | tee -a $TRAINING_LOG
           echo "" | tee -a $TRAINING_LOG
           
           # Process data
@@ -149,18 +142,11 @@ jobs:
           ## Training Configuration
           - Training Steps: $TRAINING_STEPS
           - Batch Size: $BATCH_SIZE
-          - Initial Learning Rate: $LEARNING_RATE
-          - Minimum Learning Rate: $MIN_LEARNING_RATE
+          - Learning Rate: $LEARNING_RATE
           
           ## Model Information
           - Model file: $MODEL_FILE
           - Training completed: $(date)
-          
-          ## Generation Sample Output
-          
-          \`\`\`
-          $(echo "$GEN_OUTPUT" | tail -30)
-          \`\`\`
           EOF2
           
           # Create the release with the model file and log
@@ -176,7 +162,7 @@ jobs:
           ENCODED_SCRIPT=$(base64 -w 0 setup_script.sh)
           
           # Create the command that will be run inside the pod
-          DOCKER_ARGS="bash -c 'echo $ENCODED_SCRIPT | base64 -d > /workspace/setup.sh && chmod +x /workspace/setup.sh && REPO_OWNER=${{ github.repository_owner }} REPO_NAME=${{ github.event.repository.name }} USER_PAT=${{ secrets.USER_PAT }} TRAINING_STEPS=${{ inputs.training_steps }} BATCH_SIZE=${{ inputs.batch_size }} LEARNING_RATE=${{ inputs.learning_rate }} MIN_LEARNING_RATE=${{ inputs.min_learning_rate }} /workspace/setup.sh'"
+          DOCKER_ARGS="bash -c 'echo $ENCODED_SCRIPT | base64 -d > /workspace/setup.sh && chmod +x /workspace/setup.sh && REPO_OWNER=${{ github.repository_owner }} REPO_NAME=${{ github.event.repository.name }} USER_PAT=${{ secrets.USER_PAT }} TRAINING_STEPS=${{ inputs.training_steps }} BATCH_SIZE=${{ inputs.batch_size }} LEARNING_RATE=${{ inputs.learning_rate }} /workspace/setup.sh'"
 
           # Submit the pod creation request to RunPod
           RESPONSE=$(curl --request POST \

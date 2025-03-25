@@ -44,49 +44,20 @@ typedef struct {
     float* channel_mixing_m;
     float* channel_mixing_v;
     
-    // Layer normalization parameters
-    float* ln1_scale;                   // [embed_dim]
-    float* ln1_bias;                    // [embed_dim]
-    float* ln1_scale_grad;
-    float* ln1_bias_grad;
-    float* ln1_scale_m;
-    float* ln1_scale_v;
-    float* ln1_bias_m;
-    float* ln1_bias_v;
-    
-    float* ln2_scale;                   // [embed_dim]
-    float* ln2_bias;                    // [embed_dim]
-    float* ln2_scale_grad;
-    float* ln2_bias_grad;
-    float* ln2_scale_m;
-    float* ln2_scale_v;
-    float* ln2_bias_m;
-    float* ln2_bias_v;
-    
     // Forward pass buffers
     float* input_buffer;   // [batch, seq, embed]
     float* residual;       // [batch, seq, embed]
-    float* ln1_output;     // [batch, seq, embed]
-    float* ln2_output;     // [batch, seq, embed]
     float* transposed;     // [batch, embed, seq] temporary for token mixing
     float* token_mixed;    // [batch, embed, seq]
     float* token_mix_activated; // [batch, embed, seq]
     float* channel_mixed;  // [batch, seq, embed]
     float* channel_mix_activated; // [batch, seq, embed]
     
-    // Buffers for layer normalization
-    float* ln1_mean;       // [batch, seq]
-    float* ln1_var;        // [batch, seq]
-    float* ln2_mean;       // [batch, seq]
-    float* ln2_var;        // [batch, seq]
-    
     // Backward pass buffers
     float* d_output;       // gradient from next layer [batch, seq, embed]
     float* d_token_mixed;  // [batch, embed, seq]
     float* d_channel_mixed; // [batch, seq, embed]
     float* d_input;         // [batch, seq, embed]
-    float* d_ln1_input;     // [batch, seq, embed]
-    float* d_ln2_input;     // [batch, seq, embed]
     
     // Additional buffers
     float* masked_weights;   // [seq, seq] = token_mixing_weight with lower triangular masking
@@ -230,159 +201,6 @@ __global__ void apply_embedding_kernel(const int* input_tokens, const float* emb
     }
 }
 
-// Kernel to compute mean and variance for layer normalization
-__global__ void layer_norm_mean_var_kernel(const float* input, float* mean, float* var, 
-                                          int batch_size, int seq_length, int embed_dim) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < batch_size * seq_length) {
-        int b = idx / seq_length;
-        int s = idx % seq_length;
-        
-        // Compute mean
-        float sum = 0.0f;
-        for (int e = 0; e < embed_dim; e++) {
-            sum += input[b * seq_length * embed_dim + s * embed_dim + e];
-        }
-        mean[idx] = sum / embed_dim;
-        
-        // Compute variance
-        float sq_sum = 0.0f;
-        for (int e = 0; e < embed_dim; e++) {
-            float diff = input[b * seq_length * embed_dim + s * embed_dim + e] - mean[idx];
-            sq_sum += diff * diff;
-        }
-        var[idx] = sq_sum / embed_dim;
-    }
-}
-
-// Kernel for layer normalization
-__global__ void layer_norm_kernel(const float* input, const float* mean, const float* var,
-                                const float* scale, const float* bias, float* output,
-                                int batch_size, int seq_length, int embed_dim) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < batch_size * seq_length * embed_dim) {
-        int b = idx / (seq_length * embed_dim);
-        int s = (idx % (seq_length * embed_dim)) / embed_dim;
-        int e = idx % embed_dim;
-        
-        int bs_idx = b * seq_length + s;
-        float x = input[idx];
-        float m = mean[bs_idx];
-        float v = var[bs_idx];
-        float norm = (x - m) / sqrtf(v + 1e-5f);
-        output[idx] = norm * scale[e] + bias[e];
-    }
-}
-
-// Kernel for layer normalization backward
-__global__ void layer_norm_backward_kernel(const float* input, const float* mean, const float* var,
-                                          const float* scale, const float* grad_output,
-                                          float* grad_input, float* grad_scale, float* grad_bias,
-                                          int batch_size, int seq_length, int embed_dim) {
-    extern __shared__ float shared_mem[];
-    float* shared_grad_scale = shared_mem;
-    float* shared_grad_bias = shared_mem + embed_dim;
-    
-    int tid = threadIdx.x;
-    int e = blockIdx.x; // Each block handles one element of the embedding dimension
-    
-    // Initialize shared memory
-    if (tid < embed_dim) {
-        shared_grad_scale[tid] = 0.0f;
-        shared_grad_bias[tid] = 0.0f;
-    }
-    __syncthreads();
-    
-    // Each thread handles one (batch, seq) pair
-    for (int bs = tid; bs < batch_size * seq_length; bs += blockDim.x) {
-        int b = bs / seq_length;
-        int s = bs % seq_length;
-        int idx = b * seq_length * embed_dim + s * embed_dim + e;
-        
-        // Compute normalized input
-        float m = mean[bs];
-        float v = var[bs];
-        float x = input[idx];
-        float norm = (x - m) / sqrtf(v + 1e-5f);
-        
-        // Accumulate gradients for scale and bias
-        float grad_out = grad_output[idx];
-        atomicAdd(&shared_grad_scale[e], norm * grad_out);
-        atomicAdd(&shared_grad_bias[e], grad_out);
-        
-        // Compute gradient for input (partial)
-        float grad_norm = grad_out * scale[e];
-        
-        // Will accumulate the complete grad_input in the calling function
-        // This is partial derivative with respect to the normalized value
-        grad_input[idx] = grad_norm;
-    }
-    
-    __syncthreads();
-    
-    // Only one thread writes the final gradients
-    if (tid == 0) {
-        atomicAdd(&grad_scale[e], shared_grad_scale[e]);
-        atomicAdd(&grad_bias[e], shared_grad_bias[e]);
-    }
-}
-
-// Kernel to complete the layer norm backward pass
-__global__ void layer_norm_backward_finalize_kernel(const float* input, const float* mean, const float* var,
-                                                   const float* grad_normalized, float* grad_input,
-                                                   int batch_size, int seq_length, int embed_dim) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < batch_size * seq_length) {
-        int b = idx / seq_length;
-        int s = idx % seq_length;
-        int bs_idx = b * seq_length + s;
-        
-        float m = mean[bs_idx];
-        float v = var[bs_idx];
-        float inv_std = 1.0f / sqrtf(v + 1e-5f);
-        
-        // Compute sum terms for the finalization
-        float sum_grad = 0.0f;
-        float sum_grad_x_norm = 0.0f;
-        
-        for (int e = 0; e < embed_dim; e++) {
-            int idx_e = b * seq_length * embed_dim + s * embed_dim + e;
-            float x_norm = (input[idx_e] - m) * inv_std;
-            float grad_norm = grad_normalized[idx_e];
-            
-            sum_grad += grad_norm;
-            sum_grad_x_norm += grad_norm * x_norm;
-        }
-        
-        // Update gradient for each element in this (batch, seq) pair
-        for (int e = 0; e < embed_dim; e++) {
-            int idx_e = b * seq_length * embed_dim + s * embed_dim + e;
-            float x = input[idx_e];
-            float x_norm = (x - m) * inv_std;
-            float grad_norm = grad_normalized[idx_e];
-            
-            // Complete gradient calculation using the chain rule
-            grad_input[idx_e] = inv_std * (grad_norm - (sum_grad + x_norm * sum_grad_x_norm) / embed_dim);
-        }
-    }
-}
-
-// Kernel for AdamW weight update
-__global__ void adamw_update_kernel(float* weight, const float* grad, float* m, float* v,
-                                   float beta1, float beta2, float epsilon, float learning_rate,
-                                   float weight_decay, float alpha_t, int size, float scale) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if(idx < size) {
-        float g = grad[idx] / scale;
-        
-        m[idx] = beta1 * m[idx] + (1.0f - beta1) * g;
-        v[idx] = beta2 * v[idx] + (1.0f - beta2) * g * g;
-        
-        float update = alpha_t * m[idx] / (sqrtf(v[idx]) + epsilon);
-        weight[idx] = weight[idx] * (1.0f - learning_rate * weight_decay) - update;
-    }
-}
-
 // Kernel to compute softmax and cross-entropy loss
 __global__ void softmax_cross_entropy_kernel(const float* logits, const int* targets,
                                            float* d_logits, float* loss_buffer,
@@ -443,6 +261,22 @@ __global__ void embedding_backward_kernel(const int* input_tokens, const float* 
     }
 }
 
+// Kernel for AdamW weight update
+__global__ void adamw_update_kernel(float* weight, const float* grad, float* m, float* v,
+                                   float beta1, float beta2, float epsilon, float learning_rate,
+                                   float weight_decay, float alpha_t, int size, float scale) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if(idx < size) {
+        float g = grad[idx] / scale;
+        
+        m[idx] = beta1 * m[idx] + (1.0f - beta1) * g;
+        v[idx] = beta2 * v[idx] + (1.0f - beta2) * g * g;
+        
+        float update = alpha_t * m[idx] / (sqrtf(v[idx]) + epsilon);
+        weight[idx] = weight[idx] * (1.0f - learning_rate * weight_decay) - update;
+    }
+}
+
 ////////////////////////////////////////////////////////////////////////////////
 // Initialization and free functions for MixerBlock and MixerModel.
 
@@ -500,75 +334,10 @@ MixerBlock* init_mixer_block(int embed_dim, int seq_length, int batch_size) {
     CHECK_CUDA(cudaMalloc(&block->channel_mixing_v, size_channel));
     CHECK_CUDA(cudaMemset(block->channel_mixing_v, 0, size_channel));
     
-    // Initialize layer normalization parameters
-    size_t size_ln = embed_dim * sizeof(float);
-    
-    // Initialize LN1 weights (token mixing)
-    float* h_ln1_scale = (float*)malloc(size_ln);
-    float* h_ln1_bias = (float*)malloc(size_ln);
-    for (int i = 0; i < embed_dim; i++) {
-        h_ln1_scale[i] = 1.0f;  // Initialize scale to 1.0
-        h_ln1_bias[i] = 0.0f;   // Initialize bias to 0.0
-    }
-    
-    CHECK_CUDA(cudaMalloc(&block->ln1_scale, size_ln));
-    CHECK_CUDA(cudaMemcpy(block->ln1_scale, h_ln1_scale, size_ln, cudaMemcpyHostToDevice));
-    CHECK_CUDA(cudaMalloc(&block->ln1_bias, size_ln));
-    CHECK_CUDA(cudaMemcpy(block->ln1_bias, h_ln1_bias, size_ln, cudaMemcpyHostToDevice));
-    
-    free(h_ln1_scale);
-    free(h_ln1_bias);
-    
-    // Allocate gradient and optimizer state for LN1
-    CHECK_CUDA(cudaMalloc(&block->ln1_scale_grad, size_ln));
-    CHECK_CUDA(cudaMemset(block->ln1_scale_grad, 0, size_ln));
-    CHECK_CUDA(cudaMalloc(&block->ln1_bias_grad, size_ln));
-    CHECK_CUDA(cudaMemset(block->ln1_bias_grad, 0, size_ln));
-    CHECK_CUDA(cudaMalloc(&block->ln1_scale_m, size_ln));
-    CHECK_CUDA(cudaMemset(block->ln1_scale_m, 0, size_ln));
-    CHECK_CUDA(cudaMalloc(&block->ln1_scale_v, size_ln));
-    CHECK_CUDA(cudaMemset(block->ln1_scale_v, 0, size_ln));
-    CHECK_CUDA(cudaMalloc(&block->ln1_bias_m, size_ln));
-    CHECK_CUDA(cudaMemset(block->ln1_bias_m, 0, size_ln));
-    CHECK_CUDA(cudaMalloc(&block->ln1_bias_v, size_ln));
-    CHECK_CUDA(cudaMemset(block->ln1_bias_v, 0, size_ln));
-    
-    // Initialize LN2 weights (channel mixing)
-    float* h_ln2_scale = (float*)malloc(size_ln);
-    float* h_ln2_bias = (float*)malloc(size_ln);
-    for (int i = 0; i < embed_dim; i++) {
-        h_ln2_scale[i] = 1.0f;  // Initialize scale to 1.0
-        h_ln2_bias[i] = 0.0f;   // Initialize bias to 0.0
-    }
-    
-    CHECK_CUDA(cudaMalloc(&block->ln2_scale, size_ln));
-    CHECK_CUDA(cudaMemcpy(block->ln2_scale, h_ln2_scale, size_ln, cudaMemcpyHostToDevice));
-    CHECK_CUDA(cudaMalloc(&block->ln2_bias, size_ln));
-    CHECK_CUDA(cudaMemcpy(block->ln2_bias, h_ln2_bias, size_ln, cudaMemcpyHostToDevice));
-    
-    free(h_ln2_scale);
-    free(h_ln2_bias);
-    
-    // Allocate gradient and optimizer state for LN2
-    CHECK_CUDA(cudaMalloc(&block->ln2_scale_grad, size_ln));
-    CHECK_CUDA(cudaMemset(block->ln2_scale_grad, 0, size_ln));
-    CHECK_CUDA(cudaMalloc(&block->ln2_bias_grad, size_ln));
-    CHECK_CUDA(cudaMemset(block->ln2_bias_grad, 0, size_ln));
-    CHECK_CUDA(cudaMalloc(&block->ln2_scale_m, size_ln));
-    CHECK_CUDA(cudaMemset(block->ln2_scale_m, 0, size_ln));
-    CHECK_CUDA(cudaMalloc(&block->ln2_scale_v, size_ln));
-    CHECK_CUDA(cudaMemset(block->ln2_scale_v, 0, size_ln));
-    CHECK_CUDA(cudaMalloc(&block->ln2_bias_m, size_ln));
-    CHECK_CUDA(cudaMemset(block->ln2_bias_m, 0, size_ln));
-    CHECK_CUDA(cudaMalloc(&block->ln2_bias_v, size_ln));
-    CHECK_CUDA(cudaMemset(block->ln2_bias_v, 0, size_ln));
-    
     // Allocate forward pass buffers
     size_t tensor_size = batch_size * seq_length * embed_dim * sizeof(float);
     CHECK_CUDA(cudaMalloc(&block->input_buffer, tensor_size));
     CHECK_CUDA(cudaMalloc(&block->residual, tensor_size));
-    CHECK_CUDA(cudaMalloc(&block->ln1_output, tensor_size));
-    CHECK_CUDA(cudaMalloc(&block->ln2_output, tensor_size));
     
     size_t tensor_size_trans = batch_size * embed_dim * seq_length * sizeof(float);
     CHECK_CUDA(cudaMalloc(&block->transposed, tensor_size_trans));
@@ -577,20 +346,11 @@ MixerBlock* init_mixer_block(int embed_dim, int seq_length, int batch_size) {
     CHECK_CUDA(cudaMalloc(&block->channel_mixed, tensor_size));
     CHECK_CUDA(cudaMalloc(&block->channel_mix_activated, tensor_size));
     
-    // Allocate layer norm buffers
-    size_t bs_size = batch_size * seq_length * sizeof(float);
-    CHECK_CUDA(cudaMalloc(&block->ln1_mean, bs_size));
-    CHECK_CUDA(cudaMalloc(&block->ln1_var, bs_size));
-    CHECK_CUDA(cudaMalloc(&block->ln2_mean, bs_size));
-    CHECK_CUDA(cudaMalloc(&block->ln2_var, bs_size));
-    
     // Allocate backward pass buffers
     CHECK_CUDA(cudaMalloc(&block->d_output, tensor_size));
     CHECK_CUDA(cudaMalloc(&block->d_token_mixed, tensor_size_trans));
     CHECK_CUDA(cudaMalloc(&block->d_channel_mixed, tensor_size));
     CHECK_CUDA(cudaMalloc(&block->d_input, tensor_size));
-    CHECK_CUDA(cudaMalloc(&block->d_ln1_input, tensor_size));
-    CHECK_CUDA(cudaMalloc(&block->d_ln2_input, tensor_size));
     
     // Allocate additional buffers
     CHECK_CUDA(cudaMalloc(&block->d_channel_activated, tensor_size));
@@ -615,49 +375,20 @@ void free_mixer_block(MixerBlock* block) {
     CHECK_CUDA(cudaFree(block->channel_mixing_m));
     CHECK_CUDA(cudaFree(block->channel_mixing_v));
     
-    // Free layer normalization parameters
-    CHECK_CUDA(cudaFree(block->ln1_scale));
-    CHECK_CUDA(cudaFree(block->ln1_bias));
-    CHECK_CUDA(cudaFree(block->ln1_scale_grad));
-    CHECK_CUDA(cudaFree(block->ln1_bias_grad));
-    CHECK_CUDA(cudaFree(block->ln1_scale_m));
-    CHECK_CUDA(cudaFree(block->ln1_scale_v));
-    CHECK_CUDA(cudaFree(block->ln1_bias_m));
-    CHECK_CUDA(cudaFree(block->ln1_bias_v));
-    
-    CHECK_CUDA(cudaFree(block->ln2_scale));
-    CHECK_CUDA(cudaFree(block->ln2_bias));
-    CHECK_CUDA(cudaFree(block->ln2_scale_grad));
-    CHECK_CUDA(cudaFree(block->ln2_bias_grad));
-    CHECK_CUDA(cudaFree(block->ln2_scale_m));
-    CHECK_CUDA(cudaFree(block->ln2_scale_v));
-    CHECK_CUDA(cudaFree(block->ln2_bias_m));
-    CHECK_CUDA(cudaFree(block->ln2_bias_v));
-    
     // Free forward pass buffers
     CHECK_CUDA(cudaFree(block->input_buffer));
     CHECK_CUDA(cudaFree(block->residual));
-    CHECK_CUDA(cudaFree(block->ln1_output));
-    CHECK_CUDA(cudaFree(block->ln2_output));
     CHECK_CUDA(cudaFree(block->transposed));
     CHECK_CUDA(cudaFree(block->token_mixed));
     CHECK_CUDA(cudaFree(block->token_mix_activated));
     CHECK_CUDA(cudaFree(block->channel_mixed));
     CHECK_CUDA(cudaFree(block->channel_mix_activated));
     
-    // Free layer norm buffers
-    CHECK_CUDA(cudaFree(block->ln1_mean));
-    CHECK_CUDA(cudaFree(block->ln1_var));
-    CHECK_CUDA(cudaFree(block->ln2_mean));
-    CHECK_CUDA(cudaFree(block->ln2_var));
-    
     // Free backward pass buffers
     CHECK_CUDA(cudaFree(block->d_output));
     CHECK_CUDA(cudaFree(block->d_token_mixed));
     CHECK_CUDA(cudaFree(block->d_channel_mixed));
     CHECK_CUDA(cudaFree(block->d_input));
-    CHECK_CUDA(cudaFree(block->d_ln1_input));
-    CHECK_CUDA(cudaFree(block->d_ln2_input));
     
     // Free additional buffers
     CHECK_CUDA(cudaFree(block->masked_weights));
@@ -818,22 +549,12 @@ void mixer_block_forward(MixerBlock* block, float* input, float* output, int bat
     CHECK_CUDA(cudaMemcpy(block->input_buffer, input, total * sizeof(float), cudaMemcpyDeviceToDevice));
     CHECK_CUDA(cudaMemcpy(block->residual, input, total * sizeof(float), cudaMemcpyDeviceToDevice));
     
-    // --- Token Mixing with Layer Normalization ---
+    // --- Token Mixing ---
     
-    // Layer Normalization 1
+    // Transpose input: [batch, seq, embed] -> [batch, embed, seq]
     int threads = 256;
-    int nblocks = (batch_size * seq + threads - 1) / threads;
-    layer_norm_mean_var_kernel<<<nblocks, threads>>>(input, block->ln1_mean, block->ln1_var, 
-                                                   batch_size, seq, embed);
-    
-    nblocks = (total + threads - 1) / threads;
-    layer_norm_kernel<<<nblocks, threads>>>(input, block->ln1_mean, block->ln1_var,
-                                          block->ln1_scale, block->ln1_bias, block->ln1_output,
-                                          batch_size, seq, embed);
-    
-    // Transpose normalized input: [batch, seq, embed] -> [batch, embed, seq]
-    nblocks = (total + threads - 1) / threads;
-    transpose_BSE_to_BES_kernel<<<nblocks, threads>>>(block->ln1_output, block->transposed, batch_size, seq, embed);
+    int nblocks = (total + threads - 1) / threads;
+    transpose_BSE_to_BES_kernel<<<nblocks, threads>>>(input, block->transposed, batch_size, seq, embed);
     
     // Copy weights to masked_weights and apply lower triangular mask
     CHECK_CUDA(cudaMemcpy(block->masked_weights, block->token_mixing_weight, seq * seq * sizeof(float), cudaMemcpyDeviceToDevice));
@@ -862,28 +583,18 @@ void mixer_block_forward(MixerBlock* block, float* input, float* output, int bat
     // Add residual
     CHECK_CUBLAS(cublasSaxpy(handle, total, &alpha, block->residual, 1, output, 1));
     
-    // --- Channel Mixing with Layer Normalization ---
+    // --- Channel Mixing ---
     
     // Save current output as residual
     CHECK_CUDA(cudaMemcpy(block->residual, output, total * sizeof(float), cudaMemcpyDeviceToDevice));
     
-    // Layer Normalization 2
-    nblocks = (batch_size * seq + threads - 1) / threads;
-    layer_norm_mean_var_kernel<<<nblocks, threads>>>(output, block->ln2_mean, block->ln2_var, 
-                                                   batch_size, seq, embed);
-    
-    nblocks = (total + threads - 1) / threads;
-    layer_norm_kernel<<<nblocks, threads>>>(output, block->ln2_mean, block->ln2_var,
-                                          block->ln2_scale, block->ln2_bias, block->ln2_output,
-                                          batch_size, seq, embed);
-    
-    // Channel mixing GEMM: channel_mixed = ln2_output * (channel_mixing_weight)^T
+    // Channel mixing GEMM: channel_mixed = output * (channel_mixing_weight)^T
     int combined_batch = batch_size * seq;
     CHECK_CUBLAS(cublasSgemm(handle, CUBLAS_OP_T, CUBLAS_OP_N,
                 embed, combined_batch, embed,
                 &alpha,
                 block->channel_mixing_weight, embed,
-                block->ln2_output, embed,
+                output, embed,
                 &beta,
                 block->channel_mixed, embed));
     
@@ -992,34 +703,18 @@ void mixer_block_backward(MixerBlock* block, float* d_output, float* d_input, in
                 embed, embed, combined_batch,
                 &alpha,
                 block->d_channel_mixed, embed,
-                block->ln2_output, embed,
+                block->residual, embed,
                 &beta,
                 block->channel_mixing_weight_grad, embed));
     
-    // Gradient w.r.t. LN2 output
+    // Gradient w.r.t. residual
     CHECK_CUBLAS(cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N,
                 embed, combined_batch, embed,
                 &alpha,
                 block->channel_mixing_weight, embed,
                 block->d_channel_mixed, embed,
                 &beta,
-                block->d_ln2_input, embed));
-    
-    // Gradient through Layer Norm 2
-    // First, compute gradients for scale and bias
-    nblocks = embed;
-    layer_norm_backward_kernel<<<nblocks, threads, 2 * embed * sizeof(float)>>>(
-        block->residual, block->ln2_mean, block->ln2_var,
-        block->ln2_scale, block->d_ln2_input,
-        block->d_ln2_input, block->ln2_scale_grad, block->ln2_bias_grad,
-        batch_size, seq, embed);
-    
-    // Then finalize gradients with respect to input
-    nblocks = (batch_size * seq + threads - 1) / threads;
-    layer_norm_backward_finalize_kernel<<<nblocks, threads>>>(
-        block->residual, block->ln2_mean, block->ln2_var,
-        block->d_ln2_input, d_input,
-        batch_size, seq, embed);
+                d_input, embed));
     
     // Add d_output to d_input for residual connection
     CHECK_CUBLAS(cublasSaxpy(handle, total, &alpha, block->d_output, 1, d_input, 1));
@@ -1064,23 +759,7 @@ void mixer_block_backward(MixerBlock* block, float* d_output, float* d_input, in
     
     // Transpose gradient back: [batch, embed, seq] -> [batch, seq, embed]
     nblocks = (total + threads - 1) / threads;
-    transpose_BES_to_BSE_kernel<<<nblocks, threads>>>(block->d_input_transposed, block->d_ln1_input, batch_size, embed, seq);
-    
-    // Gradient through Layer Norm 1
-    // First, compute gradients for scale and bias
-    nblocks = embed;
-    layer_norm_backward_kernel<<<nblocks, threads, 2 * embed * sizeof(float)>>>(
-        block->input_buffer, block->ln1_mean, block->ln1_var,
-        block->ln1_scale, block->d_ln1_input,
-        block->d_ln1_input, block->ln1_scale_grad, block->ln1_bias_grad,
-        batch_size, seq, embed);
-    
-    // Then finalize gradients with respect to input
-    nblocks = (batch_size * seq + threads - 1) / threads;
-    layer_norm_backward_finalize_kernel<<<nblocks, threads>>>(
-        block->input_buffer, block->ln1_mean, block->ln1_var,
-        block->d_ln1_input, d_input,
-        batch_size, seq, embed);
+    transpose_BES_to_BSE_kernel<<<nblocks, threads>>>(block->d_input_transposed, d_input, batch_size, embed, seq);
     
     // Add d_output to d_input for residual connection
     CHECK_CUBLAS(cublasSaxpy(handle, total, &alpha, block->d_output, 1, d_input, 1));
@@ -1196,33 +875,6 @@ void update_weights_adamw(MixerModel* model, float learning_rate) {
                                                 model->beta1, model->beta2, model->epsilon,
                                                 learning_rate, model->weight_decay, alpha_t,
                                                 size_channel, scale);
-        
-        // Layer norm 1 parameters
-        blocks = (embed + threads - 1) / threads;
-        adamw_update_kernel<<<blocks, threads>>>(block->ln1_scale, block->ln1_scale_grad,
-                                                block->ln1_scale_m, block->ln1_scale_v,
-                                                model->beta1, model->beta2, model->epsilon,
-                                                learning_rate, model->weight_decay, alpha_t,
-                                                embed, scale);
-        
-        adamw_update_kernel<<<blocks, threads>>>(block->ln1_bias, block->ln1_bias_grad,
-                                                block->ln1_bias_m, block->ln1_bias_v,
-                                                model->beta1, model->beta2, model->epsilon,
-                                                learning_rate, 0.0f, alpha_t, // No weight decay for biases
-                                                embed, scale);
-        
-        // Layer norm 2 parameters
-        adamw_update_kernel<<<blocks, threads>>>(block->ln2_scale, block->ln2_scale_grad,
-                                                block->ln2_scale_m, block->ln2_scale_v,
-                                                model->beta1, model->beta2, model->epsilon,
-                                                learning_rate, model->weight_decay, alpha_t,
-                                                embed, scale);
-        
-        adamw_update_kernel<<<blocks, threads>>>(block->ln2_bias, block->ln2_bias_grad,
-                                                block->ln2_bias_m, block->ln2_bias_v,
-                                                model->beta1, model->beta2, model->epsilon,
-                                                learning_rate, 0.0f, alpha_t, // No weight decay for biases
-                                                embed, scale);
     }
 }
 
@@ -1238,15 +890,9 @@ void zero_gradients(MixerModel* model) {
         MixerBlock* block = model->blocks[l];
         size_t size_tok = block->seq_length * block->seq_length * sizeof(float);
         size_t size_chan = block->embed_dim * block->embed_dim * sizeof(float);
-        size_t size_ln = block->embed_dim * sizeof(float);
         
         CHECK_CUDA(cudaMemset(block->token_mixing_weight_grad, 0, size_tok));
         CHECK_CUDA(cudaMemset(block->channel_mixing_weight_grad, 0, size_chan));
-        
-        CHECK_CUDA(cudaMemset(block->ln1_scale_grad, 0, size_ln));
-        CHECK_CUDA(cudaMemset(block->ln1_bias_grad, 0, size_ln));
-        CHECK_CUDA(cudaMemset(block->ln2_scale_grad, 0, size_ln));
-        CHECK_CUDA(cudaMemset(block->ln2_bias_grad, 0, size_ln));
     }
 }
 
@@ -1313,8 +959,6 @@ int count_parameters(MixerModel* model) {
     for (int i = 0; i < model->num_layers; i++) {
         total_params += model->seq_length * model->seq_length;  // Token mixing
         total_params += model->embed_dim * model->embed_dim;    // Channel mixing
-        total_params += 2 * model->embed_dim;  // LN1 (scale and bias)
-        total_params += 2 * model->embed_dim;  // LN2 (scale and bias)
     }
     
     return total_params;
@@ -1375,27 +1019,6 @@ void save_model(MixerModel* model, const char* filename) {
                    size_channel * sizeof(float), cudaMemcpyDeviceToHost));
         fwrite(h_channel_mixing_weight, sizeof(float), size_channel, file);
         free(h_channel_mixing_weight);
-        
-        // Copy layer norm parameters from device to host and write to file
-        float* h_ln_params = (float*)malloc(embed * sizeof(float));
-        
-        // LN1 scale
-        CHECK_CUDA(cudaMemcpy(h_ln_params, block->ln1_scale, embed * sizeof(float), cudaMemcpyDeviceToHost));
-        fwrite(h_ln_params, sizeof(float), embed, file);
-        
-        // LN1 bias
-        CHECK_CUDA(cudaMemcpy(h_ln_params, block->ln1_bias, embed * sizeof(float), cudaMemcpyDeviceToHost));
-        fwrite(h_ln_params, sizeof(float), embed, file);
-        
-        // LN2 scale
-        CHECK_CUDA(cudaMemcpy(h_ln_params, block->ln2_scale, embed * sizeof(float), cudaMemcpyDeviceToHost));
-        fwrite(h_ln_params, sizeof(float), embed, file);
-        
-        // LN2 bias
-        CHECK_CUDA(cudaMemcpy(h_ln_params, block->ln2_bias, embed * sizeof(float), cudaMemcpyDeviceToHost));
-        fwrite(h_ln_params, sizeof(float), embed, file);
-        
-        free(h_ln_params);
     }
     
     fclose(file);
@@ -1463,31 +1086,6 @@ MixerModel* load_model(const char* filename) {
         CHECK_CUDA(cudaMemcpy(block->channel_mixing_weight, h_channel_mixing_weight, 
                    size_channel * sizeof(float), cudaMemcpyHostToDevice));
         free(h_channel_mixing_weight);
-        
-        // Read layer norm parameters
-        float* h_ln_params = (float*)malloc(embed_dim * sizeof(float));
-        
-        // LN1 scale
-        fread(h_ln_params, sizeof(float), embed_dim, file);
-        CHECK_CUDA(cudaMemcpy(block->ln1_scale, h_ln_params, 
-                   embed_dim * sizeof(float), cudaMemcpyHostToDevice));
-        
-        // LN1 bias
-        fread(h_ln_params, sizeof(float), embed_dim, file);
-        CHECK_CUDA(cudaMemcpy(block->ln1_bias, h_ln_params, 
-                   embed_dim * sizeof(float), cudaMemcpyHostToDevice));
-        
-        // LN2 scale
-        fread(h_ln_params, sizeof(float), embed_dim, file);
-        CHECK_CUDA(cudaMemcpy(block->ln2_scale, h_ln_params, 
-                   embed_dim * sizeof(float), cudaMemcpyHostToDevice));
-        
-        // LN2 bias
-        fread(h_ln_params, sizeof(float), embed_dim, file);
-        CHECK_CUDA(cudaMemcpy(block->ln2_bias, h_ln_params, 
-                   embed_dim * sizeof(float), cudaMemcpyHostToDevice));
-        
-        free(h_ln_params);
     }
     
     fclose(file);
@@ -1583,14 +1181,6 @@ void generate_text(MixerModel* model, const char* corpus, size_t corpus_size, in
     free(h_tokens);
 }
 
-// Calculate cosine learning rate schedule
-float get_cosine_lr(float initial_lr, float min_lr, int current_step, int total_steps) {
-    // Implement cosine annealing schedule
-    float progress = (float)current_step / (float)total_steps;
-    // Cosine decay from initial_lr to min_lr
-    return min_lr + 0.5f * (initial_lr - min_lr) * (1.0f + cosf(M_PI * progress));
-}
-
 ////////////////////////////////////////////////////////////////////////////////
 // Main function.
 int main(int argc, char** argv) {
@@ -1619,12 +1209,11 @@ int main(int argc, char** argv) {
     char* text = load_text_file("gutenberg_texts/combined_corpus.txt", &text_size);
     printf("Loaded text corpus with %zu bytes\n", text_size);
     
-    float initial_lr = 0.0001f;
-    float min_lr = 0.00001f;
+    float learning_rate = 0.0001f;
     int total_training_steps = 100000;
     
-    printf("Training for %d total steps with cosine learning rate schedule (%.6f to %.6f)\n", 
-           total_training_steps, initial_lr, min_lr);
+    printf("Training for %d total steps with learning rate %.6f\n", 
+           total_training_steps, learning_rate);
     
     int* h_input_tokens = (int*)malloc(batch_size * seq_length * sizeof(int));
     int* h_target_tokens = (int*)malloc(batch_size * seq_length * sizeof(int));
@@ -1632,9 +1221,6 @@ int main(int argc, char** argv) {
     time_t start_time = time(NULL);
 
     for (int step = 0; step < total_training_steps; step++) {
-        // Calculate learning rate for this step
-        float learning_rate = get_cosine_lr(initial_lr, min_lr, step, total_training_steps);
-        
         // Get random batch from text
         get_random_batch(text, text_size, batch_size, seq_length, h_input_tokens, h_target_tokens);
         
@@ -1658,10 +1244,10 @@ int main(int argc, char** argv) {
         zero_gradients(model);
         
         if (step % 10 == 0) {
-            printf("Step %d/%d, LR: %.6f, Loss: %.4f\n", step, total_training_steps, learning_rate, step_loss);
+            printf("Step %d/%d, Loss: %.4f\n", step, total_training_steps, step_loss);
         }
         
-        if (step % 200 == 0 && step > 0) {
+        if (step % 10000 == 0 && step > 0) {
             time_t current_time = time(NULL);
             printf("\n======= Sample generation at step %d after %ld seconds =======\n", step, current_time - start_time);
             generate_text(model, text, text_size, 128, 0.8f);
