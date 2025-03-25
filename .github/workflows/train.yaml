@@ -11,7 +11,7 @@ on:
       batch_size:
         description: 'Batch size for training'
         required: true
-        default: '64'
+        default: '6'
         type: string
       learning_rate:
         description: 'Learning rate'
@@ -46,7 +46,7 @@ jobs:
           
           # Set training parameters in the SLM code
           sed -i "s/int total_training_steps = 1000000;/int total_training_steps = $TRAINING_STEPS;/" slm.c
-          sed -i "s/int batch_size = 64;/int batch_size = $BATCH_SIZE;/" slm.c
+          sed -i "s/int batch_size = 6;/int batch_size = $BATCH_SIZE;/" slm.c
           sed -i "s/float learning_rate = 0.0001f;/float learning_rate = ${LEARNING_RATE}f;/" slm.c
           
           # Create a training log file with timestamp at the beginning
