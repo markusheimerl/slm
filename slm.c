@@ -1170,7 +1170,7 @@ int main(int argc, char** argv) {
     
     int vocab_size = 256;
     int embed_dim = 2048;
-    int num_layers = 12;
+    int num_layers = 13;
     int seq_length = 2048;
     int batch_size = 6;
     
