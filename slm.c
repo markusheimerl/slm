@@ -123,9 +123,6 @@ typedef struct {
     cublasHandle_t cublas_handle;
 } MixerModel;
 
-////////////////////////////////////////////////////////////////////////////////
-// Device helper functions and CUDA kernels
-
 // Kernel: elementwise SiLU activation: out[i] = x * sigmoid(x)
 __global__ void silu_kernel(const float* input, float* output, int N) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -187,7 +184,7 @@ __global__ void apply_lower_triangular_mask_kernel(float* matrix, int seq_length
     }
 }
 
-// Kernel: embedding lookup. For each token in input, copy its embedding row into output.
+// Kernel: embedding lookup. For each token in input, copy its embedding row into output
 __global__ void apply_embedding_kernel(const int* input_tokens, const float* embedding_weight, float* embeddings,
                                          int batch_size, int seq_length, int embed_dim, int vocab_size) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -277,9 +274,7 @@ __global__ void adamw_update_kernel(float* weight, const float* grad, float* m, 
     }
 }
 
-////////////////////////////////////////////////////////////////////////////////
-// Initialization and free functions for MixerBlock and MixerModel.
-
+// Initialization and free functions for MixerBlock and MixerModel
 MixerBlock* init_mixer_block(int embed_dim, int seq_length, int batch_size) {
     MixerBlock* block = (MixerBlock*)malloc(sizeof(MixerBlock));
     block->embed_dim = embed_dim;
@@ -534,7 +529,6 @@ void free_mixer_model(MixerModel* model) {
     free(model);
 }
 
-////////////////////////////////////////////////////////////////////////////////
 // Forward pass through one MixerBlock.
 // Performs token mixing (with transposition, GEMM using masked weights, SiLU,
 // transposing the result back and adding the residual) and then channel mixing.
@@ -609,7 +603,6 @@ void mixer_block_forward(MixerBlock* block, float* input, float* output, int bat
     CHECK_CUBLAS(cublasSaxpy(handle, total, &alpha, block->residual, 1, output, 1));
 }
 
-//
 // Forward pass through the entire model.
 void mixer_model_forward(MixerModel* model, int* d_input_tokens) {
     int batch = model->batch_size;
@@ -647,7 +640,6 @@ void mixer_model_forward(MixerModel* model, int* d_input_tokens) {
                 model->logits, model->vocab_size));
 }
 
-////////////////////////////////////////////////////////////////////////////////
 // Compute cross-entropy loss and gradients
 float compute_loss_and_gradients(MixerModel* model, int* d_target_tokens) {
     int batch = model->batch_size;
@@ -675,7 +667,6 @@ float compute_loss_and_gradients(MixerModel* model, int* d_target_tokens) {
     return total_loss / (batch * seq);
 }
 
-//
 // Backward pass through one MixerBlock.
 void mixer_block_backward(MixerBlock* block, float* d_output, float* d_input, int batch_size, cublasHandle_t handle) {
     int seq = block->seq_length;
@@ -765,7 +756,6 @@ void mixer_block_backward(MixerBlock* block, float* d_output, float* d_input, in
     CHECK_CUBLAS(cublasSaxpy(handle, total, &alpha, block->d_output, 1, d_input, 1));
 }
 
-//
 // Backward pass through the entire model.
 void mixer_model_backward(MixerModel* model) {
     int batch = model->batch_size;
@@ -820,7 +810,6 @@ void mixer_model_backward(MixerModel* model) {
     );
 }
 
-//
 // Update weights using AdamW optimizer
 void update_weights_adamw(MixerModel* model, float learning_rate) {
     model->t++;  // Increment time step.
@@ -878,8 +867,7 @@ void update_weights_adamw(MixerModel* model, float learning_rate) {
     }
 }
 
-//
-// Zero out all gradients (call this after every update).
+// Zero out all gradients
 void zero_gradients(MixerModel* model) {
     int embed = model->embed_dim;
     int vocab = model->vocab_size;
@@ -896,8 +884,7 @@ void zero_gradients(MixerModel* model) {
     }
 }
 
-////////////////////////////////////////////////////////////////////////////////
-// Load text data from a file (CPU).
+// Load text data from a file
 char* load_text_file(const char* filename, size_t* size) {
     FILE* file = fopen(filename, "rb");
     if (!file) {
@@ -926,7 +913,6 @@ char* load_text_file(const char* filename, size_t* size) {
     return buffer;
 }
 
-////////////////////////////////////////////////////////////////////////////////
 // Get a batch of randomly sampled sequences from the text
 void get_random_batch(const char* text, size_t text_size, int batch_size, int seq_length, 
                       int* input_tokens, int* target_tokens) {
@@ -949,7 +935,6 @@ void get_random_batch(const char* text, size_t text_size, int batch_size, int se
     }
 }
 
-////////////////////////////////////////////////////////////////////////////////
 // Count model parameters.
 int count_parameters(MixerModel* model) {
     int total_params = 0;
@@ -964,7 +949,6 @@ int count_parameters(MixerModel* model) {
     return total_params;
 }
 
-////////////////////////////////////////////////////////////////////////////////
 // Save model to a binary file.
 void save_model(MixerModel* model, const char* filename) {
     FILE* file = fopen(filename, "wb");
@@ -1025,7 +1009,6 @@ void save_model(MixerModel* model, const char* filename) {
     printf("Model saved to %s\n", filename);
 }
 
-////////////////////////////////////////////////////////////////////////////////
 // Load model from a binary file.
 MixerModel* load_model(const char* filename) {
     FILE* file = fopen(filename, "rb");
@@ -1093,7 +1076,6 @@ MixerModel* load_model(const char* filename) {
     return model;
 }
 
-////////////////////////////////////////////////////////////////////////////////
 // Generate text from the model with temperature-based sampling
 void generate_text(MixerModel* model, const char* corpus, size_t corpus_size, int max_new_tokens, float temperature) {
     int seq_length = model->seq_length;
@@ -1181,7 +1163,6 @@ void generate_text(MixerModel* model, const char* corpus, size_t corpus_size, in
     free(h_tokens);
 }
 
-////////////////////////////////////////////////////////////////////////////////
 // Main function.
 int main(int argc, char** argv) {
     srand(time(NULL));
