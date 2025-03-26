@@ -1371,7 +1371,7 @@ int main(int argc, char** argv) {
     printf("Model with %d parameters\n", count_parameters(model));
     
     size_t text_size;
-    char* text = load_text_file("gutenberg_texts/combined_corpus.txt", &text_size);
+    char* text = load_text_file("combined_corpus.txt", &text_size);
     printf("Loaded text corpus with %zu bytes\n", text_size);
     
     float learning_rate = 0.0001f;

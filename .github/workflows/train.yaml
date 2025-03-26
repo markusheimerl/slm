@@ -66,7 +66,7 @@ jobs:
           echo "" | tee -a $TRAINING_LOG
           
           # Process data
-          make data 2>&1 | tee -a $TRAINING_LOG
+          gzip -dk combined_corpus.txt.gz
           
           # Direct API access for checking releases
           echo "Checking for previous releases via API..." | tee -a $TRAINING_LOG
