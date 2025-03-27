@@ -37,12 +37,14 @@ jobs:
           echo "deb-src http://apt.llvm.org/jammy/ llvm-toolchain-jammy-17 main" >> /etc/apt/sources.list.d/llvm-17.list
           wget -q -O - https://apt.llvm.org/llvm-snapshot.gpg.key | apt-key add -
           apt update
-          apt install -y time tree htop nvtop libcurl4-openssl-dev clang-17 gh curl jq
+          apt install -y time tree htop nvtop libcurl4-openssl-dev clang-17 gh curl jq git-lfs
           update-alternatives --install /usr/bin/clang clang /usr/bin/clang-17 100
           
           mkdir -p slm
           cd slm
           git clone --recursive https://github.com/$REPO_OWNER/$REPO_NAME.git .
+          git-lfs install
+          git-lfs pull
           
           # Set training parameters in the SLM code
           sed -i "s/int total_training_steps = 1000000;/int total_training_steps = $TRAINING_STEPS;/" slm.c
