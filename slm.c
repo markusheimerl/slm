@@ -535,6 +535,7 @@ MixerModel* init_mixer_model(int vocab_size, int embed_dim, int num_layers, int 
     
     // Initialize cuBLAS
     CHECK_CUBLAS(cublasCreate(&model->cublas_handle));
+    CHECK_CUBLAS(cublasSetMathMode(model->cublas_handle, CUBLAS_TENSOR_OP_MATH));
     
     // Embedding parameters
     size_t embed_matrix_size = vocab_size * embed_dim * sizeof(float);
