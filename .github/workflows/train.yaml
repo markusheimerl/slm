@@ -18,6 +18,15 @@ on:
         required: true
         default: '0.0001'
         type: string
+      gpu_type:
+        description: 'GPU Type'
+        required: true
+        type: choice
+        options:
+          - 'NVIDIA GeForce RTX 4090'
+          - 'NVIDIA H100 NVL'
+          - 'NVIDIA L40S'
+        default: 'NVIDIA GeForce RTX 4090'
 
 permissions:
   contents: write
@@ -65,6 +74,7 @@ jobs:
           echo "Training Steps: $TRAINING_STEPS" | tee -a $TRAINING_LOG
           echo "Batch Size: $BATCH_SIZE" | tee -a $TRAINING_LOG
           echo "Learning Rate: $LEARNING_RATE" | tee -a $TRAINING_LOG
+          echo "GPU Type: $GPU_TYPE" | tee -a $TRAINING_LOG
           echo "" | tee -a $TRAINING_LOG
           
           # Process data
@@ -145,6 +155,7 @@ jobs:
           - Training Steps: $TRAINING_STEPS
           - Batch Size: $BATCH_SIZE
           - Learning Rate: $LEARNING_RATE
+          - GPU Type: $GPU_TYPE
           
           ## Model Information
           - Model file: $MODEL_FILE
@@ -164,7 +175,7 @@ jobs:
           ENCODED_SCRIPT=$(base64 -w 0 setup_script.sh)
           
           # Create the command that will be run inside the pod
-          DOCKER_ARGS="bash -c 'echo $ENCODED_SCRIPT | base64 -d > /workspace/setup.sh && chmod +x /workspace/setup.sh && REPO_OWNER=${{ github.repository_owner }} REPO_NAME=${{ github.event.repository.name }} USER_PAT=${{ secrets.USER_PAT }} TRAINING_STEPS=${{ inputs.training_steps }} BATCH_SIZE=${{ inputs.batch_size }} LEARNING_RATE=${{ inputs.learning_rate }} /workspace/setup.sh'"
+          DOCKER_ARGS="bash -c 'echo $ENCODED_SCRIPT | base64 -d > /workspace/setup.sh && chmod +x /workspace/setup.sh && REPO_OWNER=${{ github.repository_owner }} REPO_NAME=${{ github.event.repository.name }} USER_PAT=${{ secrets.USER_PAT }} TRAINING_STEPS=${{ inputs.training_steps }} BATCH_SIZE=${{ inputs.batch_size }} LEARNING_RATE=${{ inputs.learning_rate }} GPU_TYPE=\"${{ inputs.gpu_type }}\" /workspace/setup.sh'"
 
           # Submit the pod creation request to RunPod
           RESPONSE=$(curl --request POST \
@@ -172,6 +183,7 @@ jobs:
             --url "https://api.runpod.io/graphql?api_key=${{ secrets.RUNPOD_API_KEY }}" \
             --data "$(jq -n \
               --arg docker_args "$DOCKER_ARGS" \
+              --arg gpu_type "${{ inputs.gpu_type }}" \
               '{
                 "query": "mutation($input: PodFindAndDeployOnDemandInput!) { podFindAndDeployOnDemand(input: $input) { id imageName machineId } }",
                 "variables": {
@@ -182,7 +194,7 @@ jobs:
                     "containerDiskInGb": 20,
                     "minVcpuCount": 4,
                     "minMemoryInGb": 20,
-                    "gpuTypeId": "NVIDIA GeForce RTX 4090",
+                    "gpuTypeId": $gpu_type,
                     "name": "slm-training",
                     "imageName": "runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04",
                     "ports": "8888/http,22/tcp,8080/http",
