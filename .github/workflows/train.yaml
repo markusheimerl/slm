@@ -57,7 +57,7 @@ jobs:
           
           # Set training parameters in the SLM code
           sed -i "s/int total_training_steps = 100000;/int total_training_steps = $TRAINING_STEPS;/" slm.c
-          sed -i "s/int batch_size = 3;/int batch_size = $BATCH_SIZE;/" slm.c
+          sed -i "s/int batch_size = 6;/int batch_size = $BATCH_SIZE;/" slm.c
           sed -i "s/float learning_rate = 0.0001f;/float learning_rate = ${LEARNING_RATE}f;/" slm.c
           
           # Create a training log file with timestamp at the beginning
