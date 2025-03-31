@@ -32,25 +32,26 @@
 
 // MixerBlock structure – all pointers refer to device memory.
 typedef struct {
-    // Token mixing parameters
-    float* token_mixing_weight;         // [seq_length x seq_length]
-    float* token_mixing_weight_grad;
-    float* token_mixing_m;
-    float* token_mixing_v;
+    // Causal convolution parameters
+    float* conv_weight;               // [kernel_size x embed_dim]
+    float* conv_weight_grad;
+    float* conv_m;
+    float* conv_v;
+    int kernel_size;                  // Size of the convolution kernel
     
     // Channel mixing parameters
-    float* channel_mixing_weight;       // [embed_dim x embed_dim]
+    float* channel_mixing_weight;     // [embed_dim x embed_dim]
     float* channel_mixing_weight_grad;
     float* channel_mixing_m;
     float* channel_mixing_v;
     
     // RMSNorm parameters
-    float* rmsnorm1_weight;             // [embed_dim]
+    float* rmsnorm1_weight;           // [embed_dim]
     float* rmsnorm1_weight_grad;
     float* rmsnorm1_m;
     float* rmsnorm1_v;
     
-    float* rmsnorm2_weight;             // [embed_dim]
+    float* rmsnorm2_weight;           // [embed_dim]
     float* rmsnorm2_weight_grad;
     float* rmsnorm2_m;
     float* rmsnorm2_v;
@@ -60,25 +61,19 @@ typedef struct {
     float* residual;       // [batch, seq, embed]
     float* normalized1;    // [batch, seq, embed]
     float* normalized2;    // [batch, seq, embed]
-    float* transposed;     // [batch, embed, seq] temporary for token mixing
-    float* token_mixed;    // [batch, embed, seq]
-    float* token_mix_activated; // [batch, embed, seq]
+    float* conv_out;       // [batch, seq, embed]
     float* channel_mixed;  // [batch, seq, embed]
     
     // Backward pass buffers
     float* d_output;       // gradient from next layer [batch, seq, embed]
-    float* d_token_mixed;  // [batch, embed, seq]
+    float* d_conv_out;     // [batch, seq, embed]
     float* d_channel_mixed; // [batch, seq, embed]
     float* d_input;         // [batch, seq, embed]
     float* d_normalized1;   // [batch, seq, embed]
     float* d_normalized2;   // [batch, seq, embed]
     
     // Additional buffers
-    float* masked_weights;   // [seq, seq] = token_mixing_weight with lower triangular masking
-    float* d_output_transposed; // [batch, embed, seq]
-    float* d_input_transposed;  // [batch, embed, seq]
-    float* temp_grad;           // [seq, seq] temporary
-    float* rms_vars;           // [batch, seq] for RMSNorm variance caching
+    float* rms_vars;       // [batch, seq] for RMSNorm variance caching
      
     // Dimensions:
     int embed_dim;
@@ -132,6 +127,7 @@ typedef struct {
     int num_layers;
     int seq_length;
     int batch_size;
+    int kernel_size;      // Convolution kernel size
     
     // cuBLAS handle
     cublasHandle_t cublas_handle;
@@ -217,43 +213,73 @@ __global__ void rmsnorm_backward_kernel(const float* input, const float* grad_ou
     }
 }
 
-// Kernel: transpose from [batch, seq, embed] to [batch, embed, seq]
-__global__ void transpose_BSE_to_BES_kernel(const float* input, float* output, int batch, int seq, int embed) {
+// Kernel for 1D causal convolution forward pass
+__global__ void causal_conv1d_forward_kernel(const float* input, const float* weight,
+                                            float* output, int batch_size, int seq_length,
+                                            int embed_dim, int kernel_size) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int total = batch * seq * embed;
-    if(idx < total) {
-        int b = idx / (seq * embed);
-        int rem = idx % (seq * embed);
-        int s = rem / embed;
-        int e = rem % embed;
-        output[b * embed * seq + e * seq + s] = input[b * seq * embed + s * embed + e];
-    }
-}
-
-// Kernel: transpose from [batch, embed, seq] to [batch, seq, embed]
-__global__ void transpose_BES_to_BSE_kernel(const float* input, float* output, int batch, int embed, int seq) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int total = batch * embed * seq;
-    if(idx < total) {
-        int b = idx / (embed * seq);
-        int rem = idx % (embed * seq);
-        int e = rem / seq;
-        int s = rem % seq;
-        output[b * seq * embed + s * embed + e] = input[b * embed * seq + e * seq + s];
-    }
-}
-
-// Kernel: Apply lower triangular mask directly to a matrix
-__global__ void apply_lower_triangular_mask_kernel(float* matrix, int seq_length) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if(idx < seq_length * seq_length) {
-        int row = idx / seq_length;
-        int col = idx % seq_length;
+    if (idx < batch_size * seq_length * embed_dim) {
+        int b = idx / (seq_length * embed_dim);
+        int remainder = idx % (seq_length * embed_dim);
+        int s = remainder / embed_dim;
+        int e = remainder % embed_dim;
         
-        // Apply lower triangular mask: set to zero if col > row
-        if(col > row) {
-            matrix[idx] = 0.0f;
+        float result = 0.0f;
+        for (int k = 0; k < kernel_size; k++) {
+            int pos = s - k;
+            // Apply causal padding (only look at current and past positions)
+            if (pos >= 0) {
+                result += input[(b * seq_length + pos) * embed_dim + e] * weight[k * embed_dim + e];
+            }
         }
+        output[idx] = result;
+    }
+}
+
+// Kernel for 1D causal convolution backward pass w.r.t. input
+__global__ void causal_conv1d_backward_input_kernel(const float* grad_out, const float* weight,
+                                                  float* grad_input, int batch_size, int seq_length,
+                                                  int embed_dim, int kernel_size) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < batch_size * seq_length * embed_dim) {
+        int b = idx / (seq_length * embed_dim);
+        int remainder = idx % (seq_length * embed_dim);
+        int s = remainder / embed_dim;
+        int e = remainder % embed_dim;
+        
+        float grad = 0.0f;
+        for (int k = 0; k < kernel_size; k++) {
+            int pos = s + k;
+            // Only consider valid positions within sequence length
+            if (pos < seq_length) {
+                grad += grad_out[(b * seq_length + pos) * embed_dim + e] * weight[k * embed_dim + e];
+            }
+        }
+        grad_input[idx] = grad;
+    }
+}
+
+// Kernel for 1D causal convolution backward pass w.r.t. weight
+__global__ void causal_conv1d_backward_weight_kernel(const float* input, const float* grad_out,
+                                                   float* grad_weight, int batch_size, int seq_length,
+                                                   int embed_dim, int kernel_size) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < kernel_size * embed_dim) {
+        int k = idx / embed_dim;
+        int e = idx % embed_dim;
+        
+        float grad = 0.0f;
+        for (int b = 0; b < batch_size; b++) {
+            for (int s = 0; s < seq_length; s++) {
+                int pos = s - k;
+                // Apply causal padding (only look at current and past positions)
+                if (pos >= 0) {
+                    grad += input[(b * seq_length + pos) * embed_dim + e] * 
+                           grad_out[(b * seq_length + s) * embed_dim + e];
+                }
+            }
+        }
+        grad_weight[idx] = grad;
     }
 }
 
@@ -348,36 +374,34 @@ __global__ void adamw_update_kernel(float* weight, const float* grad, float* m, 
 }
 
 // Initialization and free functions for MixerBlock and MixerModel
-MixerBlock* init_mixer_block(int embed_dim, int seq_length, int batch_size) {
+MixerBlock* init_mixer_block(int embed_dim, int seq_length, int kernel_size, int batch_size) {
     MixerBlock* block = (MixerBlock*)malloc(sizeof(MixerBlock));
     block->embed_dim = embed_dim;
     block->seq_length = seq_length;
+    block->kernel_size = kernel_size;
     
-    // Token mixing parameters
-    size_t size_tok = seq_length * seq_length * sizeof(float);
-    float scale_token = 1.0f / sqrtf((float)seq_length);
+    // Convolution parameters
+    size_t conv_size = kernel_size * embed_dim * sizeof(float);
+    float scale_conv = 1.0f / sqrtf((float)(kernel_size * embed_dim));
     
-    // Initialize token mixing weights on host
-    float* h_token_mixing_weight = (float*)malloc(size_tok);
-    for (int i = 0; i < seq_length * seq_length; i++) {
-        h_token_mixing_weight[i] = (((float)rand()/(float)RAND_MAX * 2.0f - 1.0f) * scale_token);
+    // Initialize convolution weights on host
+    float* h_conv_weight = (float*)malloc(conv_size);
+    for (int i = 0; i < kernel_size * embed_dim; i++) {
+        h_conv_weight[i] = (((float)rand()/(float)RAND_MAX * 2.0f - 1.0f) * scale_conv);
     }
     
-    // Allocate and initialize token mixing weights
-    CHECK_CUDA(cudaMalloc(&block->token_mixing_weight, size_tok));
-    CHECK_CUDA(cudaMemcpy(block->token_mixing_weight, h_token_mixing_weight, size_tok, cudaMemcpyHostToDevice));
-    free(h_token_mixing_weight);
+    // Allocate and initialize convolution weights
+    CHECK_CUDA(cudaMalloc(&block->conv_weight, conv_size));
+    CHECK_CUDA(cudaMemcpy(block->conv_weight, h_conv_weight, conv_size, cudaMemcpyHostToDevice));
+    free(h_conv_weight);
     
-    // Allocate gradient and optimizer state for token mixing
-    CHECK_CUDA(cudaMalloc(&block->token_mixing_weight_grad, size_tok));
-    CHECK_CUDA(cudaMemset(block->token_mixing_weight_grad, 0, size_tok));
-    CHECK_CUDA(cudaMalloc(&block->token_mixing_m, size_tok));
-    CHECK_CUDA(cudaMemset(block->token_mixing_m, 0, size_tok));
-    CHECK_CUDA(cudaMalloc(&block->token_mixing_v, size_tok));
-    CHECK_CUDA(cudaMemset(block->token_mixing_v, 0, size_tok));
-    
-    // Allocate masked weights buffer
-    CHECK_CUDA(cudaMalloc(&block->masked_weights, size_tok));
+    // Allocate gradient and optimizer state for convolution
+    CHECK_CUDA(cudaMalloc(&block->conv_weight_grad, conv_size));
+    CHECK_CUDA(cudaMemset(block->conv_weight_grad, 0, conv_size));
+    CHECK_CUDA(cudaMalloc(&block->conv_m, conv_size));
+    CHECK_CUDA(cudaMemset(block->conv_m, 0, conv_size));
+    CHECK_CUDA(cudaMalloc(&block->conv_v, conv_size));
+    CHECK_CUDA(cudaMemset(block->conv_v, 0, conv_size));
     
     // Channel mixing parameters
     size_t size_channel = embed_dim * embed_dim * sizeof(float);
@@ -437,26 +461,16 @@ MixerBlock* init_mixer_block(int embed_dim, int seq_length, int batch_size) {
     CHECK_CUDA(cudaMalloc(&block->residual, tensor_size));
     CHECK_CUDA(cudaMalloc(&block->normalized1, tensor_size));
     CHECK_CUDA(cudaMalloc(&block->normalized2, tensor_size));
-    
-    size_t tensor_size_trans = batch_size * embed_dim * seq_length * sizeof(float);
-    CHECK_CUDA(cudaMalloc(&block->transposed, tensor_size_trans));
-    CHECK_CUDA(cudaMalloc(&block->token_mixed, tensor_size_trans));
-    CHECK_CUDA(cudaMalloc(&block->token_mix_activated, tensor_size_trans));
+    CHECK_CUDA(cudaMalloc(&block->conv_out, tensor_size));
     CHECK_CUDA(cudaMalloc(&block->channel_mixed, tensor_size));
     
     // Allocate backward pass buffers
     CHECK_CUDA(cudaMalloc(&block->d_output, tensor_size));
-    CHECK_CUDA(cudaMalloc(&block->d_token_mixed, tensor_size_trans));
+    CHECK_CUDA(cudaMalloc(&block->d_conv_out, tensor_size));
     CHECK_CUDA(cudaMalloc(&block->d_channel_mixed, tensor_size));
     CHECK_CUDA(cudaMalloc(&block->d_input, tensor_size));
     CHECK_CUDA(cudaMalloc(&block->d_normalized1, tensor_size));
     CHECK_CUDA(cudaMalloc(&block->d_normalized2, tensor_size));
-    
-    // Allocate additional buffers
-    CHECK_CUDA(cudaMalloc(&block->d_output_transposed, tensor_size_trans));
-    CHECK_CUDA(cudaMalloc(&block->d_input_transposed, tensor_size_trans));
-    CHECK_CUDA(cudaMalloc(&block->temp_grad, size_tok));
-    CHECK_CUDA(cudaMemset(block->temp_grad, 0, size_tok));
     
     // Allocate RMSNorm variance cache
     CHECK_CUDA(cudaMalloc(&block->rms_vars, batch_size * seq_length * sizeof(float)));
@@ -465,11 +479,11 @@ MixerBlock* init_mixer_block(int embed_dim, int seq_length, int batch_size) {
 }
 
 void free_mixer_block(MixerBlock* block) {
-    // Free token mixing parameters
-    CHECK_CUDA(cudaFree(block->token_mixing_weight));
-    CHECK_CUDA(cudaFree(block->token_mixing_weight_grad));
-    CHECK_CUDA(cudaFree(block->token_mixing_m));
-    CHECK_CUDA(cudaFree(block->token_mixing_v));
+    // Free convolution parameters
+    CHECK_CUDA(cudaFree(block->conv_weight));
+    CHECK_CUDA(cudaFree(block->conv_weight_grad));
+    CHECK_CUDA(cudaFree(block->conv_m));
+    CHECK_CUDA(cudaFree(block->conv_v));
     
     // Free channel mixing parameters
     CHECK_CUDA(cudaFree(block->channel_mixing_weight));
@@ -493,30 +507,24 @@ void free_mixer_block(MixerBlock* block) {
     CHECK_CUDA(cudaFree(block->residual));
     CHECK_CUDA(cudaFree(block->normalized1));
     CHECK_CUDA(cudaFree(block->normalized2));
-    CHECK_CUDA(cudaFree(block->transposed));
-    CHECK_CUDA(cudaFree(block->token_mixed));
-    CHECK_CUDA(cudaFree(block->token_mix_activated));
+    CHECK_CUDA(cudaFree(block->conv_out));
     CHECK_CUDA(cudaFree(block->channel_mixed));
     
     // Free backward pass buffers
     CHECK_CUDA(cudaFree(block->d_output));
-    CHECK_CUDA(cudaFree(block->d_token_mixed));
+    CHECK_CUDA(cudaFree(block->d_conv_out));
     CHECK_CUDA(cudaFree(block->d_channel_mixed));
     CHECK_CUDA(cudaFree(block->d_input));
     CHECK_CUDA(cudaFree(block->d_normalized1));
     CHECK_CUDA(cudaFree(block->d_normalized2));
     
-    // Free additional buffers
-    CHECK_CUDA(cudaFree(block->masked_weights));
-    CHECK_CUDA(cudaFree(block->d_output_transposed));
-    CHECK_CUDA(cudaFree(block->d_input_transposed));
-    CHECK_CUDA(cudaFree(block->temp_grad));
+    // Free RMSNorm variance cache
     CHECK_CUDA(cudaFree(block->rms_vars));
     
     free(block);
 }
 
-MixerModel* init_mixer_model(int vocab_size, int embed_dim, int num_layers, int seq_length, int batch_size) {
+MixerModel* init_mixer_model(int vocab_size, int embed_dim, int num_layers, int seq_length, int batch_size, int kernel_size) {
     MixerModel* model = (MixerModel*)malloc(sizeof(MixerModel));
     
     // Store dimensions
@@ -525,6 +533,7 @@ MixerModel* init_mixer_model(int vocab_size, int embed_dim, int num_layers, int 
     model->num_layers = num_layers;
     model->seq_length = seq_length;
     model->batch_size = batch_size;
+    model->kernel_size = kernel_size;
     
     // Initialize Adam optimizer parameters
     model->beta1 = 0.9f;
@@ -583,7 +592,7 @@ MixerModel* init_mixer_model(int vocab_size, int embed_dim, int num_layers, int 
     // Initialize MixerBlocks
     model->blocks = (MixerBlock**)malloc(num_layers * sizeof(MixerBlock*));
     for (int i = 0; i < num_layers; i++) {
-        model->blocks[i] = init_mixer_block(embed_dim, seq_length, batch_size);
+        model->blocks[i] = init_mixer_block(embed_dim, seq_length, kernel_size, batch_size);
     }
     
     // Allocate forward pass buffers
@@ -655,8 +664,8 @@ void free_mixer_model(MixerModel* model) {
 void mixer_block_forward(MixerBlock* block, float* input, float* output, int batch_size, cublasHandle_t handle) {
     int seq = block->seq_length;
     int embed = block->embed_dim;
+    int kernel = block->kernel_size;
     int total = batch_size * seq * embed;
-    int total_trans = batch_size * embed * seq;
     float alpha = 1.0f, beta = 0.0f;
     
     // Save input for backward
@@ -668,37 +677,18 @@ void mixer_block_forward(MixerBlock* block, float* input, float* output, int bat
     rmsnorm_forward_kernel<<<nblocks, threads>>>(input, block->normalized1, block->rms_vars, 
                                                 block->rmsnorm1_weight, batch_size, seq, embed);
     
-    // --- Token Mixing ---
+    // --- Apply 1D Causal Convolution ---
     
-    // Transpose normalized: [batch, seq, embed] -> [batch, embed, seq]
+    // Apply causal convolution
     nblocks = (total + threads - 1) / threads;
-    transpose_BSE_to_BES_kernel<<<nblocks, threads>>>(block->normalized1, block->transposed, batch_size, seq, embed);
-    
-    // Copy weights to masked_weights and apply lower triangular mask
-    CHECK_CUDA(cudaMemcpy(block->masked_weights, block->token_mixing_weight, seq * seq * sizeof(float), cudaMemcpyDeviceToDevice));
-    int mask_blocks = (seq * seq + threads - 1) / threads;
-    apply_lower_triangular_mask_kernel<<<mask_blocks, threads>>>(block->masked_weights, seq);
-    
-    // Token mixing GEMM:
-    // Compute: token_mixed = transposed * (masked_weights)^T
-    int combined_batch_embed = batch_size * embed;
-    CHECK_CUBLAS(cublasSgemm(handle, CUBLAS_OP_T, CUBLAS_OP_N,
-                seq, combined_batch_embed, seq,
-                &alpha,
-                block->masked_weights, seq,
-                block->transposed, seq,
-                &beta,
-                block->token_mixed, seq));
+    causal_conv1d_forward_kernel<<<nblocks, threads>>>(block->normalized1, block->conv_weight,
+                                                     block->conv_out, batch_size, seq, embed, kernel);
     
     // Apply SiLU activation
-    nblocks = (total_trans + threads - 1) / threads;
-    silu_kernel<<<nblocks, threads>>>(block->token_mixed, block->token_mix_activated, total_trans);
-    
-    // Transpose back: [batch, embed, seq] -> [batch, seq, embed]
     nblocks = (total + threads - 1) / threads;
-    transpose_BES_to_BSE_kernel<<<nblocks, threads>>>(block->token_mix_activated, block->residual, batch_size, embed, seq);
+    silu_kernel<<<nblocks, threads>>>(block->conv_out, block->residual, total);
     
-    // Add residual
+    // Add input to residual
     CHECK_CUBLAS(cublasSaxpy(handle, total, &alpha, input, 1, block->residual, 1));
     
     // --- Channel Mixing ---
@@ -794,10 +784,9 @@ float compute_loss_and_gradients(MixerModel* model, int* d_target_tokens) {
 void mixer_block_backward(MixerBlock* block, float* d_output, float* d_input, int batch_size, cublasHandle_t handle) {
     int seq = block->seq_length;
     int embed = block->embed_dim;
+    int kernel = block->kernel_size;
     int total = batch_size * seq * embed;
-    int total_trans = batch_size * embed * seq;
     int combined_batch = batch_size * seq;
-    int combined_batch_embed = batch_size * embed;
     int threads = 256;
     int nblocks;
     float alpha = 1.0f, beta = 0.0f;
@@ -841,47 +830,30 @@ void mixer_block_backward(MixerBlock* block, float* d_output, float* d_input, in
     // Add d_output to d_input for residual connection
     CHECK_CUBLAS(cublasSaxpy(handle, total, &alpha, block->d_output, 1, d_input, 1));
     
-    // --- Token Mixing Backward ---
+    // --- Causal Convolution Backward ---
     
     // Save d_input for residual gradient
     CHECK_CUDA(cudaMemcpy(block->d_output, d_input, total * sizeof(float), cudaMemcpyDeviceToDevice));
     
-    // Transpose d_input: [batch, seq, embed] -> [batch, embed, seq]
+    // Gradient through SiLU activation for convolution
     nblocks = (total + threads - 1) / threads;
-    transpose_BSE_to_BES_kernel<<<nblocks, threads>>>(d_input, block->d_output_transposed, batch_size, seq, embed);
+    silu_deriv_mult_kernel<<<nblocks, threads>>>(block->conv_out, d_input, block->d_conv_out, total);
     
-    // Gradient through SiLU activation
-    nblocks = (total_trans + threads - 1) / threads;
-    silu_deriv_mult_kernel<<<nblocks, threads>>>(block->token_mixed, block->d_output_transposed, block->d_token_mixed, total_trans);
+    // Gradient w.r.t. convolution weights
+    nblocks = (kernel * embed + threads - 1) / threads;
+    CHECK_CUDA(cudaMemset(block->conv_weight_grad, 0, kernel * embed * sizeof(float)));
+    causal_conv1d_backward_weight_kernel<<<nblocks, threads>>>(
+        block->normalized1, block->d_conv_out, block->conv_weight_grad,
+        batch_size, seq, embed, kernel
+    );
     
-    // Gradient w.r.t. token mixing weights
-    CHECK_CUBLAS(cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_T,
-                seq, seq, combined_batch_embed,
-                &alpha,
-                block->transposed, seq,
-                block->d_token_mixed, seq,
-                &beta,
-                block->temp_grad, seq));
-    
-    // Apply lower triangular mask to gradients
-    nblocks = ((seq * seq) + threads - 1) / threads;
-    apply_lower_triangular_mask_kernel<<<nblocks, threads>>>(block->temp_grad, seq);
-    
-    // Add temp_grad to token_mixing_weight_grad
-    CHECK_CUBLAS(cublasSaxpy(handle, seq * seq, &alpha, block->temp_grad, 1, block->token_mixing_weight_grad, 1));
-    
-    // Gradient w.r.t. transposed input
-    CHECK_CUBLAS(cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N,
-                seq, combined_batch_embed, seq,
-                &alpha,
-                block->masked_weights, seq,
-                block->d_token_mixed, seq,
-                &beta,
-                block->d_input_transposed, seq));
-    
-    // Transpose gradient back: [batch, embed, seq] -> [batch, seq, embed]
+    // Gradient w.r.t. normalized1 input
     nblocks = (total + threads - 1) / threads;
-    transpose_BES_to_BSE_kernel<<<nblocks, threads>>>(block->d_input_transposed, block->d_normalized1, batch_size, embed, seq);
+    CHECK_CUDA(cudaMemset(block->d_normalized1, 0, total * sizeof(float)));
+    causal_conv1d_backward_input_kernel<<<nblocks, threads>>>(
+        block->d_conv_out, block->conv_weight, block->d_normalized1,
+        batch_size, seq, embed, kernel
+    );
     
     // Gradient through RMSNorm1
     nblocks = (batch_size * seq + threads - 1) / threads;
@@ -986,16 +958,17 @@ void update_weights_adamw(MixerModel* model, float learning_rate) {
     // Update MixerBlock weights
     for (int l = 0; l < model->num_layers; l++) {
         MixerBlock* block = model->blocks[l];
-        int size_tok = block->seq_length * block->seq_length;
+        int kernel = block->kernel_size;
+        int size_conv = kernel * block->embed_dim;
         int size_channel = block->embed_dim * block->embed_dim;
         
-        // Token mixing weights
-        blocks = (size_tok + threads - 1) / threads;
-        adamw_update_kernel<<<blocks, threads>>>(block->token_mixing_weight, block->token_mixing_weight_grad,
-                                                block->token_mixing_m, block->token_mixing_v,
+        // Convolution weights
+        blocks = (size_conv + threads - 1) / threads;
+        adamw_update_kernel<<<blocks, threads>>>(block->conv_weight, block->conv_weight_grad,
+                                                block->conv_m, block->conv_v,
                                                 model->beta1, model->beta2, model->epsilon,
                                                 learning_rate, model->weight_decay, alpha_t,
-                                                size_tok, scale);
+                                                size_conv, scale);
         
         // Channel mixing weights
         blocks = (size_channel + threads - 1) / threads;
@@ -1034,11 +1007,11 @@ void zero_gradients(MixerModel* model) {
     
     for (int l = 0; l < model->num_layers; l++) {
         MixerBlock* block = model->blocks[l];
-        size_t size_tok = block->seq_length * block->seq_length * sizeof(float);
+        size_t size_conv = block->kernel_size * block->embed_dim * sizeof(float);
         size_t size_chan = block->embed_dim * block->embed_dim * sizeof(float);
         size_t size_norm = block->embed_dim * sizeof(float);
         
-        CHECK_CUDA(cudaMemset(block->token_mixing_weight_grad, 0, size_tok));
+        CHECK_CUDA(cudaMemset(block->conv_weight_grad, 0, size_conv));
         CHECK_CUDA(cudaMemset(block->channel_mixing_weight_grad, 0, size_chan));
         CHECK_CUDA(cudaMemset(block->rmsnorm1_weight_grad, 0, size_norm));
         CHECK_CUDA(cudaMemset(block->rmsnorm2_weight_grad, 0, size_norm));
@@ -1103,7 +1076,7 @@ int count_parameters(MixerModel* model) {
     total_params += model->vocab_size * model->embed_dim;  // Output projection
     
     for (int i = 0; i < model->num_layers; i++) {
-        total_params += model->seq_length * model->seq_length;  // Token mixing
+        total_params += model->kernel_size * model->embed_dim;  // Causal convolution
         total_params += model->embed_dim * model->embed_dim;    // Channel mixing
         total_params += model->embed_dim * 2;  // RMSNorm1 and RMSNorm2
     }
@@ -1125,6 +1098,7 @@ void save_model(MixerModel* model, const char* filename) {
     fwrite(&model->num_layers, sizeof(int), 1, file);
     fwrite(&model->seq_length, sizeof(int), 1, file);
     fwrite(&model->batch_size, sizeof(int), 1, file);
+    fwrite(&model->kernel_size, sizeof(int), 1, file);
     
     // Allocate temporary host buffers for parameter transfer
     int vocab = model->vocab_size, embed = model->embed_dim;
@@ -1145,15 +1119,15 @@ void save_model(MixerModel* model, const char* filename) {
     // For each mixer block, copy weights to host and write
     for (int i = 0; i < model->num_layers; i++) {
         MixerBlock* block = model->blocks[i];
-        int seq = block->seq_length, embed = block->embed_dim;
-        int size_tok = seq * seq;
+        int kernel = block->kernel_size, embed = block->embed_dim;
+        int size_conv = kernel * embed;
         
-        // Copy token mixing weights from device to host and write to file
-        float* h_token_mixing_weight = (float*)malloc(size_tok * sizeof(float));
-        CHECK_CUDA(cudaMemcpy(h_token_mixing_weight, block->token_mixing_weight, 
-                   size_tok * sizeof(float), cudaMemcpyDeviceToHost));
-        fwrite(h_token_mixing_weight, sizeof(float), size_tok, file);
-        free(h_token_mixing_weight);
+        // Copy convolution weights from device to host and write to file
+        float* h_conv_weight = (float*)malloc(size_conv * sizeof(float));
+        CHECK_CUDA(cudaMemcpy(h_conv_weight, block->conv_weight, 
+                   size_conv * sizeof(float), cudaMemcpyDeviceToHost));
+        fwrite(h_conv_weight, sizeof(float), size_conv, file);
+        free(h_conv_weight);
         
         // Copy channel mixing weights from device to host and write to file
         int size_channel = embed * embed;
@@ -1192,15 +1166,16 @@ MixerModel* load_model(const char* filename) {
     }
     
     // Read model dimensions
-    int vocab_size, embed_dim, num_layers, seq_length, batch_size;
+    int vocab_size, embed_dim, num_layers, seq_length, batch_size, kernel_size;
     fread(&vocab_size, sizeof(int), 1, file);
     fread(&embed_dim, sizeof(int), 1, file);
     fread(&num_layers, sizeof(int), 1, file);
     fread(&seq_length, sizeof(int), 1, file);
     fread(&batch_size, sizeof(int), 1, file);
+    fread(&kernel_size, sizeof(int), 1, file);
     
     // Initialize a new model with read dimensions
-    MixerModel* model = init_mixer_model(vocab_size, embed_dim, num_layers, seq_length, batch_size);
+    MixerModel* model = init_mixer_model(vocab_size, embed_dim, num_layers, seq_length, batch_size, kernel_size);
     
     // Allocate temporary host buffers for parameter transfer
     float* h_embedding_weight = (float*)malloc(vocab_size * embed_dim * sizeof(float));
@@ -1222,15 +1197,15 @@ MixerModel* load_model(const char* filename) {
     // For each layer, read weights and upload to device
     for (int i = 0; i < model->num_layers; i++) {
         MixerBlock* block = model->blocks[i];
-        int size_tok = seq_length * seq_length;
+        int size_conv = kernel_size * embed_dim;
         
-        // Read token mixing weights to host buffer
-        float* h_token_mixing_weight = (float*)malloc(size_tok * sizeof(float));
-        fread(h_token_mixing_weight, sizeof(float), size_tok, file);
+        // Read convolution weights to host buffer
+        float* h_conv_weight = (float*)malloc(size_conv * sizeof(float));
+        fread(h_conv_weight, sizeof(float), size_conv, file);
         // Copy from host to device
-        CHECK_CUDA(cudaMemcpy(block->token_mixing_weight, h_token_mixing_weight, 
-                   size_tok * sizeof(float), cudaMemcpyHostToDevice));
-        free(h_token_mixing_weight);
+        CHECK_CUDA(cudaMemcpy(block->conv_weight, h_conv_weight, 
+                   size_conv * sizeof(float), cudaMemcpyHostToDevice));
+        free(h_conv_weight);
         
         // Read channel mixing weights to host buffer
         int size_channel = embed_dim * embed_dim;
@@ -1355,9 +1330,10 @@ int main(int argc, char** argv) {
     
     int vocab_size = 256;
     int embed_dim = 2048;
-    int num_layers = 12;
+    int num_layers = 16;
     int seq_length = 2048;
     int batch_size = 6;
+    int kernel_size = 16;
     
     MixerModel* model;
     
@@ -1366,7 +1342,7 @@ int main(int argc, char** argv) {
         model = load_model(argv[1]);
     } else {
         // Create new model
-        model = init_mixer_model(vocab_size, embed_dim, num_layers, seq_length, batch_size);
+        model = init_mixer_model(vocab_size, embed_dim, num_layers, seq_length, batch_size, kernel_size);
     }
     
     printf("Model with %d parameters\n", count_parameters(model));
@@ -1423,7 +1399,7 @@ int main(int argc, char** argv) {
     
     char model_fname[64];
     time_t now = time(NULL);
-    strftime(model_fname, sizeof(model_fname), "%Y%m%d_%H%M%S_mixer_model.bin", localtime(&now));
+    strftime(model_fname, sizeof(model_fname), "%Y%m%d_%H%M%S_convmixer_model.bin", localtime(&now));
     save_model(model, model_fname);
     
     free(h_input_tokens);
