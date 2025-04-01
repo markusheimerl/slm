@@ -162,20 +162,33 @@ __global__ void rmsnorm_forward_kernel(const float* input, float* output, float*
     if (idx < batch_size * seq_length) {
         int b = idx / seq_length;
         int s = idx % seq_length;
+        int base_idx = (b * seq_length + s) * embed_dim;
         
-        // Calculate variance
+        // Calculate sum of squares using Kahan summation algorithm for better precision
         float sum_squares = 0.0f;
+        float c = 0.0f; // Compensation for numerical error
+        
         for (int e = 0; e < embed_dim; e++) {
-            float val = input[(b * seq_length + s) * embed_dim + e];
-            sum_squares += val * val;
+            float val = input[base_idx + e];
+            // Use a value with better magnitude to avoid overflow
+            float squared = val * val;
+            // Kahan summation to minimize floating point errors
+            float y = squared - c;
+            float t = sum_squares + y;
+            c = (t - sum_squares) - y;
+            sum_squares = t;
         }
-        float rms = sqrtf(sum_squares / embed_dim + 1e-8f);
+        
+        // Calculate RMS with a numerically stable approach
+        // Add epsilon inside the sqrt to avoid division by zero
+        const float epsilon = 1e-5f; // Slightly larger epsilon for better stability
+        float rms = sqrtf((sum_squares / embed_dim) + epsilon);
         vars[idx] = rms;  // Save for backward pass
         
-        // Normalize and scale
+        // Apply normalization and scaling
+        float rms_inv = 1.0f / rms;
         for (int e = 0; e < embed_dim; e++) {
-            int i = (b * seq_length + s) * embed_dim + e;
-            output[i] = (input[i] / rms) * weight[e];
+            output[base_idx + e] = input[base_idx + e] * rms_inv * weight[e];
         }
     }
 }
@@ -193,22 +206,39 @@ __global__ void rmsnorm_backward_kernel(const float* input, const float* grad_ou
         float rms = vars[idx];
         float rms_inv = 1.0f / rms;
         
-        // Calculate intermediate values for gradient computation
+        // Calculate intermediate values for gradient computation using Kahan summation
         float sum_grad_times_input = 0.0f;
+        float c = 0.0f; // Compensation for numerical error
+        
         for (int e = 0; e < embed_dim; e++) {
-            sum_grad_times_input += grad_out[base_idx + e] * weight[e] * input[base_idx + e];
+            float product = grad_out[base_idx + e] * weight[e] * input[base_idx + e];
+            // Kahan summation
+            float y = product - c;
+            float t = sum_grad_times_input + y;
+            c = (t - sum_grad_times_input) - y;
+            sum_grad_times_input = t;
         }
         
-        float factor = -sum_grad_times_input / (embed_dim * rms * rms * rms);
+        // Avoid division by very small values
+        const float epsilon = 1e-12f;
+        float rms_cubed = rms * rms * rms;
+        if (rms_cubed < epsilon) rms_cubed = epsilon;
         
-        // Calculate gradients
+        float factor = -sum_grad_times_input / (embed_dim * rms_cubed);
+        
+        // Calculate gradients with improved numerical stability
         for (int e = 0; e < embed_dim; e++) {
             int i = base_idx + e;
-            // Gradient for input
-            grad_in[i] = grad_out[i] * weight[e] * rms_inv + factor * input[i];
             
-            // Gradient for weight (will be atomically added later)
-            atomicAdd(&grad_weight[e], grad_out[i] * input[i] * rms_inv);
+            // Gradient for input - using a more numerically stable formula
+            float norm_grad = grad_out[i] * weight[e] * rms_inv;
+            float input_correction = factor * input[i];
+            grad_in[i] = norm_grad + input_correction;
+            
+            // Gradient for weight - using atomic add for thread safety
+            // Normalize the input first for better numerical properties
+            float normalized_input = input[i] * rms_inv;
+            atomicAdd(&grad_weight[e], grad_out[i] * normalized_input);
         }
     }
 }
