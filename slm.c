@@ -38,11 +38,16 @@ typedef struct {
     float* token_mixing_m;
     float* token_mixing_v;
     
-    // Channel mixing parameters
-    float* channel_mixing_weight;       // [embed_dim x embed_dim]
-    float* channel_mixing_weight_grad;
-    float* channel_mixing_m;
-    float* channel_mixing_v;
+    // Channel mixing parameters - modified to include up/down projection
+    float* channel_up_weight;          // [embed_dim x (embed_dim*4)]
+    float* channel_up_weight_grad;
+    float* channel_up_m;
+    float* channel_up_v;
+    
+    float* channel_down_weight;        // [(embed_dim*4) x embed_dim]
+    float* channel_down_weight_grad;
+    float* channel_down_m;
+    float* channel_down_v;
     
     // RMSNorm parameters
     float* rmsnorm1_weight;             // [embed_dim]
@@ -63,12 +68,16 @@ typedef struct {
     float* transposed;     // [batch, embed, seq] temporary for token mixing
     float* token_mixed;    // [batch, embed, seq]
     float* token_mix_activated; // [batch, embed, seq]
+    float* channel_up_output;   // [batch, seq, embed*4]
+    float* channel_up_activated; // [batch, seq, embed*4]
     float* channel_mixed;  // [batch, seq, embed]
     
     // Backward pass buffers
     float* d_output;       // gradient from next layer [batch, seq, embed]
     float* d_token_mixed;  // [batch, embed, seq]
     float* d_channel_mixed; // [batch, seq, embed]
+    float* d_channel_up_output; // [batch, seq, embed*4]
+    float* d_channel_up_activated; // [batch, seq, embed*4]
     float* d_input;         // [batch, seq, embed]
     float* d_normalized1;   // [batch, seq, embed]
     float* d_normalized2;   // [batch, seq, embed]
@@ -82,6 +91,7 @@ typedef struct {
      
     // Dimensions:
     int embed_dim;
+    int hidden_dim;        // typically 4x embed_dim for MLP
     int seq_length;
 } MixerBlock;
 
@@ -129,6 +139,7 @@ typedef struct {
     // Dimensions/hyperparameters
     int vocab_size;
     int embed_dim;
+    int hidden_dim;        // MLP hidden dimension
     int num_layers;
     int seq_length;
     int batch_size;
@@ -352,6 +363,7 @@ MixerBlock* init_mixer_block(int embed_dim, int seq_length, int batch_size) {
     MixerBlock* block = (MixerBlock*)malloc(sizeof(MixerBlock));
     block->embed_dim = embed_dim;
     block->seq_length = seq_length;
+    block->hidden_dim = embed_dim * 4;
     
     // Token mixing parameters
     size_t size_tok = seq_length * seq_length * sizeof(float);
@@ -379,28 +391,51 @@ MixerBlock* init_mixer_block(int embed_dim, int seq_length, int batch_size) {
     // Allocate masked weights buffer
     CHECK_CUDA(cudaMalloc(&block->masked_weights, size_tok));
     
-    // Channel mixing parameters
-    size_t size_channel = embed_dim * embed_dim * sizeof(float);
-    float scale_channel = 1.0f / sqrtf((float)embed_dim);
+    // Channel mixing up-projection parameters
+    size_t size_up_channel = embed_dim * block->hidden_dim * sizeof(float);
+    float scale_up_channel = 1.0f / sqrtf((float)embed_dim);
     
-    // Initialize channel mixing weights on host
-    float* h_channel_mixing_weight = (float*)malloc(size_channel);
-    for (int i = 0; i < embed_dim * embed_dim; i++){
-        h_channel_mixing_weight[i] = (((float)rand()/(float)RAND_MAX * 2.0f - 1.0f) * scale_channel);
+    // Initialize channel up-projection weights on host
+    float* h_channel_up_weight = (float*)malloc(size_up_channel);
+    for (int i = 0; i < embed_dim * block->hidden_dim; i++){
+        h_channel_up_weight[i] = (((float)rand()/(float)RAND_MAX * 2.0f - 1.0f) * scale_up_channel);
     }
     
-    // Allocate and initialize channel mixing weights
-    CHECK_CUDA(cudaMalloc(&block->channel_mixing_weight, size_channel));
-    CHECK_CUDA(cudaMemcpy(block->channel_mixing_weight, h_channel_mixing_weight, size_channel, cudaMemcpyHostToDevice));
-    free(h_channel_mixing_weight);
+    // Allocate and initialize channel up-projection weights
+    CHECK_CUDA(cudaMalloc(&block->channel_up_weight, size_up_channel));
+    CHECK_CUDA(cudaMemcpy(block->channel_up_weight, h_channel_up_weight, size_up_channel, cudaMemcpyHostToDevice));
+    free(h_channel_up_weight);
     
-    // Allocate gradient and optimizer state for channel mixing
-    CHECK_CUDA(cudaMalloc(&block->channel_mixing_weight_grad, size_channel));
-    CHECK_CUDA(cudaMemset(block->channel_mixing_weight_grad, 0, size_channel));
-    CHECK_CUDA(cudaMalloc(&block->channel_mixing_m, size_channel));
-    CHECK_CUDA(cudaMemset(block->channel_mixing_m, 0, size_channel));
-    CHECK_CUDA(cudaMalloc(&block->channel_mixing_v, size_channel));
-    CHECK_CUDA(cudaMemset(block->channel_mixing_v, 0, size_channel));
+    // Allocate gradient and optimizer state for channel up-projection
+    CHECK_CUDA(cudaMalloc(&block->channel_up_weight_grad, size_up_channel));
+    CHECK_CUDA(cudaMemset(block->channel_up_weight_grad, 0, size_up_channel));
+    CHECK_CUDA(cudaMalloc(&block->channel_up_m, size_up_channel));
+    CHECK_CUDA(cudaMemset(block->channel_up_m, 0, size_up_channel));
+    CHECK_CUDA(cudaMalloc(&block->channel_up_v, size_up_channel));
+    CHECK_CUDA(cudaMemset(block->channel_up_v, 0, size_up_channel));
+    
+    // Channel mixing down-projection parameters
+    size_t size_down_channel = block->hidden_dim * embed_dim * sizeof(float);
+    float scale_down_channel = 1.0f / sqrtf((float)block->hidden_dim);
+    
+    // Initialize channel down-projection weights on host
+    float* h_channel_down_weight = (float*)malloc(size_down_channel);
+    for (int i = 0; i < block->hidden_dim * embed_dim; i++){
+        h_channel_down_weight[i] = (((float)rand()/(float)RAND_MAX * 2.0f - 1.0f) * scale_down_channel);
+    }
+    
+    // Allocate and initialize channel down-projection weights
+    CHECK_CUDA(cudaMalloc(&block->channel_down_weight, size_down_channel));
+    CHECK_CUDA(cudaMemcpy(block->channel_down_weight, h_channel_down_weight, size_down_channel, cudaMemcpyHostToDevice));
+    free(h_channel_down_weight);
+    
+    // Allocate gradient and optimizer state for channel down-projection
+    CHECK_CUDA(cudaMalloc(&block->channel_down_weight_grad, size_down_channel));
+    CHECK_CUDA(cudaMemset(block->channel_down_weight_grad, 0, size_down_channel));
+    CHECK_CUDA(cudaMalloc(&block->channel_down_m, size_down_channel));
+    CHECK_CUDA(cudaMemset(block->channel_down_m, 0, size_down_channel));
+    CHECK_CUDA(cudaMalloc(&block->channel_down_v, size_down_channel));
+    CHECK_CUDA(cudaMemset(block->channel_down_v, 0, size_down_channel));
     
     // Initialize RMSNorm weights (gamma) to 1.0
     size_t rmsnorm_size = embed_dim * sizeof(float);
@@ -433,6 +468,8 @@ MixerBlock* init_mixer_block(int embed_dim, int seq_length, int batch_size) {
     
     // Allocate forward pass buffers
     size_t tensor_size = batch_size * seq_length * embed_dim * sizeof(float);
+    size_t tensor_size_hidden = batch_size * seq_length * block->hidden_dim * sizeof(float);
+    
     CHECK_CUDA(cudaMalloc(&block->input_buffer, tensor_size));
     CHECK_CUDA(cudaMalloc(&block->residual, tensor_size));
     CHECK_CUDA(cudaMalloc(&block->normalized1, tensor_size));
@@ -442,12 +479,18 @@ MixerBlock* init_mixer_block(int embed_dim, int seq_length, int batch_size) {
     CHECK_CUDA(cudaMalloc(&block->transposed, tensor_size_trans));
     CHECK_CUDA(cudaMalloc(&block->token_mixed, tensor_size_trans));
     CHECK_CUDA(cudaMalloc(&block->token_mix_activated, tensor_size_trans));
+    
+    // New buffers for the up-projection and activation
+    CHECK_CUDA(cudaMalloc(&block->channel_up_output, tensor_size_hidden));
+    CHECK_CUDA(cudaMalloc(&block->channel_up_activated, tensor_size_hidden));
     CHECK_CUDA(cudaMalloc(&block->channel_mixed, tensor_size));
     
     // Allocate backward pass buffers
     CHECK_CUDA(cudaMalloc(&block->d_output, tensor_size));
     CHECK_CUDA(cudaMalloc(&block->d_token_mixed, tensor_size_trans));
     CHECK_CUDA(cudaMalloc(&block->d_channel_mixed, tensor_size));
+    CHECK_CUDA(cudaMalloc(&block->d_channel_up_output, tensor_size_hidden));
+    CHECK_CUDA(cudaMalloc(&block->d_channel_up_activated, tensor_size_hidden));
     CHECK_CUDA(cudaMalloc(&block->d_input, tensor_size));
     CHECK_CUDA(cudaMalloc(&block->d_normalized1, tensor_size));
     CHECK_CUDA(cudaMalloc(&block->d_normalized2, tensor_size));
@@ -471,11 +514,17 @@ void free_mixer_block(MixerBlock* block) {
     CHECK_CUDA(cudaFree(block->token_mixing_m));
     CHECK_CUDA(cudaFree(block->token_mixing_v));
     
-    // Free channel mixing parameters
-    CHECK_CUDA(cudaFree(block->channel_mixing_weight));
-    CHECK_CUDA(cudaFree(block->channel_mixing_weight_grad));
-    CHECK_CUDA(cudaFree(block->channel_mixing_m));
-    CHECK_CUDA(cudaFree(block->channel_mixing_v));
+    // Free channel mixing parameters - up projection
+    CHECK_CUDA(cudaFree(block->channel_up_weight));
+    CHECK_CUDA(cudaFree(block->channel_up_weight_grad));
+    CHECK_CUDA(cudaFree(block->channel_up_m));
+    CHECK_CUDA(cudaFree(block->channel_up_v));
+    
+    // Free channel mixing parameters - down projection
+    CHECK_CUDA(cudaFree(block->channel_down_weight));
+    CHECK_CUDA(cudaFree(block->channel_down_weight_grad));
+    CHECK_CUDA(cudaFree(block->channel_down_m));
+    CHECK_CUDA(cudaFree(block->channel_down_v));
     
     // Free RMSNorm parameters
     CHECK_CUDA(cudaFree(block->rmsnorm1_weight));
@@ -496,12 +545,16 @@ void free_mixer_block(MixerBlock* block) {
     CHECK_CUDA(cudaFree(block->transposed));
     CHECK_CUDA(cudaFree(block->token_mixed));
     CHECK_CUDA(cudaFree(block->token_mix_activated));
+    CHECK_CUDA(cudaFree(block->channel_up_output));
+    CHECK_CUDA(cudaFree(block->channel_up_activated));
     CHECK_CUDA(cudaFree(block->channel_mixed));
     
     // Free backward pass buffers
     CHECK_CUDA(cudaFree(block->d_output));
     CHECK_CUDA(cudaFree(block->d_token_mixed));
     CHECK_CUDA(cudaFree(block->d_channel_mixed));
+    CHECK_CUDA(cudaFree(block->d_channel_up_output));
+    CHECK_CUDA(cudaFree(block->d_channel_up_activated));
     CHECK_CUDA(cudaFree(block->d_input));
     CHECK_CUDA(cudaFree(block->d_normalized1));
     CHECK_CUDA(cudaFree(block->d_normalized2));
@@ -522,6 +575,7 @@ MixerModel* init_mixer_model(int vocab_size, int embed_dim, int num_layers, int 
     // Store dimensions
     model->vocab_size = vocab_size;
     model->embed_dim = embed_dim;
+    model->hidden_dim = embed_dim * 4;  // Set hidden dimension for MLP
     model->num_layers = num_layers;
     model->seq_length = seq_length;
     model->batch_size = batch_size;
@@ -655,7 +709,9 @@ void free_mixer_model(MixerModel* model) {
 void mixer_block_forward(MixerBlock* block, float* input, float* output, int batch_size, cublasHandle_t handle) {
     int seq = block->seq_length;
     int embed = block->embed_dim;
+    int hidden = block->hidden_dim;
     int total = batch_size * seq * embed;
+    int total_hidden = batch_size * seq * hidden;
     int total_trans = batch_size * embed * seq;
     float alpha = 1.0f, beta = 0.0f;
     
@@ -701,26 +757,38 @@ void mixer_block_forward(MixerBlock* block, float* input, float* output, int bat
     // Add residual
     CHECK_CUBLAS(cublasSaxpy(handle, total, &alpha, input, 1, block->residual, 1));
     
-    // --- Channel Mixing ---
+    // --- Channel Mixing with Up/Down Projection ---
     
     // Apply RMSNorm
     nblocks = (batch_size * seq + threads - 1) / threads;
     rmsnorm_forward_kernel<<<nblocks, threads>>>(block->residual, block->normalized2, block->rms_vars, 
                                                 block->rmsnorm2_weight, batch_size, seq, embed);
     
-    // Channel mixing GEMM: channel_mixed = normalized2 * (channel_mixing_weight)^T
+    // Up-projection GEMM: channel_up_output = normalized2 * (channel_up_weight)^T
     int combined_batch = batch_size * seq;
     CHECK_CUBLAS(cublasSgemm(handle, CUBLAS_OP_T, CUBLAS_OP_N,
-                embed, combined_batch, embed,
+                hidden, combined_batch, embed,
                 &alpha,
-                block->channel_mixing_weight, embed,
+                block->channel_up_weight, embed,
                 block->normalized2, embed,
+                &beta,
+                block->channel_up_output, hidden));
+    
+    // Apply SiLU activation to up-projected output
+    nblocks = (total_hidden + threads - 1) / threads;
+    silu_kernel<<<nblocks, threads>>>(block->channel_up_output, block->channel_up_activated, total_hidden);
+    
+    // Down-projection GEMM: channel_mixed = channel_up_activated * (channel_down_weight)^T
+    CHECK_CUBLAS(cublasSgemm(handle, CUBLAS_OP_T, CUBLAS_OP_N,
+                embed, combined_batch, hidden,
+                &alpha,
+                block->channel_down_weight, hidden,
+                block->channel_up_activated, hidden,
                 &beta,
                 block->channel_mixed, embed));
     
-    // Apply SiLU activation
-    nblocks = (total + threads - 1) / threads;
-    silu_kernel<<<nblocks, threads>>>(block->channel_mixed, output, total);
+    // Copy to output
+    CHECK_CUDA(cudaMemcpy(output, block->channel_mixed, total * sizeof(float), cudaMemcpyDeviceToDevice));
     
     // Add residual
     CHECK_CUBLAS(cublasSaxpy(handle, total, &alpha, block->residual, 1, output, 1));
@@ -794,7 +862,9 @@ float compute_loss_and_gradients(MixerModel* model, int* d_target_tokens) {
 void mixer_block_backward(MixerBlock* block, float* d_output, float* d_input, int batch_size, cublasHandle_t handle) {
     int seq = block->seq_length;
     int embed = block->embed_dim;
+    int hidden = block->hidden_dim;
     int total = batch_size * seq * embed;
+    int total_hidden = batch_size * seq * hidden;
     int total_trans = batch_size * embed * seq;
     int combined_batch = batch_size * seq;
     int combined_batch_embed = batch_size * embed;
@@ -807,25 +877,44 @@ void mixer_block_backward(MixerBlock* block, float* d_output, float* d_input, in
     // Save d_output for residual gradient
     CHECK_CUDA(cudaMemcpy(block->d_output, d_output, total * sizeof(float), cudaMemcpyDeviceToDevice));
     
-    // Gradient through SiLU activation
-    nblocks = (total + threads - 1) / threads;
-    silu_deriv_mult_kernel<<<nblocks, threads>>>(block->channel_mixed, block->d_output, block->d_channel_mixed, total);
-    
-    // Gradient w.r.t. channel mixing weights
+    // Gradient w.r.t. down-projection weights
     CHECK_CUBLAS(cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_T,
-                embed, embed, combined_batch,
+                hidden, embed, combined_batch,
                 &alpha,
-                block->d_channel_mixed, embed,
-                block->normalized2, embed,
+                block->channel_up_activated, hidden,
+                block->d_output, embed,
                 &beta,
-                block->channel_mixing_weight_grad, embed));
+                block->channel_down_weight_grad, hidden));
+    
+    // Gradient w.r.t. channel_up_activated
+    CHECK_CUBLAS(cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N,
+                hidden, combined_batch, embed,
+                &alpha,
+                block->channel_down_weight, hidden,
+                block->d_output, embed,
+                &beta,
+                block->d_channel_up_activated, hidden));
+    
+    // Gradient through SiLU activation
+    nblocks = (total_hidden + threads - 1) / threads;
+    silu_deriv_mult_kernel<<<nblocks, threads>>>(block->channel_up_output, block->d_channel_up_activated, 
+                                               block->d_channel_up_output, total_hidden);
+    
+    // Gradient w.r.t. up-projection weights
+    CHECK_CUBLAS(cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_T,
+                embed, hidden, combined_batch,
+                &alpha,
+                block->normalized2, embed,
+                block->d_channel_up_output, hidden,
+                &beta,
+                block->channel_up_weight_grad, embed));
     
     // Gradient w.r.t. normalized2 input
     CHECK_CUBLAS(cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N,
-                embed, combined_batch, embed,
+                embed, combined_batch, hidden,
                 &alpha,
-                block->channel_mixing_weight, embed,
-                block->d_channel_mixed, embed,
+                block->channel_up_weight, embed,
+                block->d_channel_up_output, hidden,
                 &beta,
                 block->d_normalized2, embed));
     
@@ -987,7 +1076,8 @@ void update_weights_adamw(MixerModel* model, float learning_rate) {
     for (int l = 0; l < model->num_layers; l++) {
         MixerBlock* block = model->blocks[l];
         int size_tok = block->seq_length * block->seq_length;
-        int size_channel = block->embed_dim * block->embed_dim;
+        int size_up = block->embed_dim * block->hidden_dim;
+        int size_down = block->hidden_dim * block->embed_dim;
         
         // Token mixing weights
         blocks = (size_tok + threads - 1) / threads;
@@ -997,13 +1087,21 @@ void update_weights_adamw(MixerModel* model, float learning_rate) {
                                                 learning_rate, model->weight_decay, alpha_t,
                                                 size_tok, scale);
         
-        // Channel mixing weights
-        blocks = (size_channel + threads - 1) / threads;
-        adamw_update_kernel<<<blocks, threads>>>(block->channel_mixing_weight, block->channel_mixing_weight_grad,
-                                                block->channel_mixing_m, block->channel_mixing_v,
+        // Channel up-projection weights
+        blocks = (size_up + threads - 1) / threads;
+        adamw_update_kernel<<<blocks, threads>>>(block->channel_up_weight, block->channel_up_weight_grad,
+                                                block->channel_up_m, block->channel_up_v,
                                                 model->beta1, model->beta2, model->epsilon,
                                                 learning_rate, model->weight_decay, alpha_t,
-                                                size_channel, scale);
+                                                size_up, scale);
+        
+        // Channel down-projection weights
+        blocks = (size_down + threads - 1) / threads;
+        adamw_update_kernel<<<blocks, threads>>>(block->channel_down_weight, block->channel_down_weight_grad,
+                                                block->channel_down_m, block->channel_down_v,
+                                                model->beta1, model->beta2, model->epsilon,
+                                                learning_rate, model->weight_decay, alpha_t,
+                                                size_down, scale);
         
         // RMSNorm1 weights
         blocks = (embed + threads - 1) / threads;
@@ -1035,11 +1133,13 @@ void zero_gradients(MixerModel* model) {
     for (int l = 0; l < model->num_layers; l++) {
         MixerBlock* block = model->blocks[l];
         size_t size_tok = block->seq_length * block->seq_length * sizeof(float);
-        size_t size_chan = block->embed_dim * block->embed_dim * sizeof(float);
+        size_t size_up = block->embed_dim * block->hidden_dim * sizeof(float);
+        size_t size_down = block->hidden_dim * block->embed_dim * sizeof(float);
         size_t size_norm = block->embed_dim * sizeof(float);
         
         CHECK_CUDA(cudaMemset(block->token_mixing_weight_grad, 0, size_tok));
-        CHECK_CUDA(cudaMemset(block->channel_mixing_weight_grad, 0, size_chan));
+        CHECK_CUDA(cudaMemset(block->channel_up_weight_grad, 0, size_up));
+        CHECK_CUDA(cudaMemset(block->channel_down_weight_grad, 0, size_down));
         CHECK_CUDA(cudaMemset(block->rmsnorm1_weight_grad, 0, size_norm));
         CHECK_CUDA(cudaMemset(block->rmsnorm2_weight_grad, 0, size_norm));
     }
@@ -1104,7 +1204,8 @@ int count_parameters(MixerModel* model) {
     
     for (int i = 0; i < model->num_layers; i++) {
         total_params += model->seq_length * model->seq_length;  // Token mixing
-        total_params += model->embed_dim * model->embed_dim;    // Channel mixing
+        total_params += model->embed_dim * model->hidden_dim;   // Channel up-projection
+        total_params += model->hidden_dim * model->embed_dim;   // Channel down-projection
         total_params += model->embed_dim * 2;  // RMSNorm1 and RMSNorm2
     }
     
@@ -1122,6 +1223,7 @@ void save_model(MixerModel* model, const char* filename) {
     // Write model dimensions
     fwrite(&model->vocab_size, sizeof(int), 1, file);
     fwrite(&model->embed_dim, sizeof(int), 1, file);
+    fwrite(&model->hidden_dim, sizeof(int), 1, file);
     fwrite(&model->num_layers, sizeof(int), 1, file);
     fwrite(&model->seq_length, sizeof(int), 1, file);
     fwrite(&model->batch_size, sizeof(int), 1, file);
@@ -1145,7 +1247,7 @@ void save_model(MixerModel* model, const char* filename) {
     // For each mixer block, copy weights to host and write
     for (int i = 0; i < model->num_layers; i++) {
         MixerBlock* block = model->blocks[i];
-        int seq = block->seq_length, embed = block->embed_dim;
+        int seq = block->seq_length, embed = block->embed_dim, hidden = block->hidden_dim;
         int size_tok = seq * seq;
         
         // Copy token mixing weights from device to host and write to file
@@ -1155,13 +1257,21 @@ void save_model(MixerModel* model, const char* filename) {
         fwrite(h_token_mixing_weight, sizeof(float), size_tok, file);
         free(h_token_mixing_weight);
         
-        // Copy channel mixing weights from device to host and write to file
-        int size_channel = embed * embed;
-        float* h_channel_mixing_weight = (float*)malloc(size_channel * sizeof(float));
-        CHECK_CUDA(cudaMemcpy(h_channel_mixing_weight, block->channel_mixing_weight, 
-                   size_channel * sizeof(float), cudaMemcpyDeviceToHost));
-        fwrite(h_channel_mixing_weight, sizeof(float), size_channel, file);
-        free(h_channel_mixing_weight);
+        // Copy channel up-projection weights from device to host and write to file
+        int size_up = embed * hidden;
+        float* h_channel_up_weight = (float*)malloc(size_up * sizeof(float));
+        CHECK_CUDA(cudaMemcpy(h_channel_up_weight, block->channel_up_weight, 
+                   size_up * sizeof(float), cudaMemcpyDeviceToHost));
+        fwrite(h_channel_up_weight, sizeof(float), size_up, file);
+        free(h_channel_up_weight);
+        
+        // Copy channel down-projection weights from device to host and write to file
+        int size_down = hidden * embed;
+        float* h_channel_down_weight = (float*)malloc(size_down * sizeof(float));
+        CHECK_CUDA(cudaMemcpy(h_channel_down_weight, block->channel_down_weight, 
+                   size_down * sizeof(float), cudaMemcpyDeviceToHost));
+        fwrite(h_channel_down_weight, sizeof(float), size_down, file);
+        free(h_channel_down_weight);
         
         // Copy RMSNorm1 weights
         CHECK_CUDA(cudaMemcpy(h_rmsnorm_weight, block->rmsnorm1_weight, 
@@ -1192,9 +1302,10 @@ MixerModel* load_model(const char* filename) {
     }
     
     // Read model dimensions
-    int vocab_size, embed_dim, num_layers, seq_length, batch_size;
+    int vocab_size, embed_dim, hidden_dim, num_layers, seq_length, batch_size;
     fread(&vocab_size, sizeof(int), 1, file);
     fread(&embed_dim, sizeof(int), 1, file);
+    fread(&hidden_dim, sizeof(int), 1, file);
     fread(&num_layers, sizeof(int), 1, file);
     fread(&seq_length, sizeof(int), 1, file);
     fread(&batch_size, sizeof(int), 1, file);
@@ -1232,14 +1343,23 @@ MixerModel* load_model(const char* filename) {
                    size_tok * sizeof(float), cudaMemcpyHostToDevice));
         free(h_token_mixing_weight);
         
-        // Read channel mixing weights to host buffer
-        int size_channel = embed_dim * embed_dim;
-        float* h_channel_mixing_weight = (float*)malloc(size_channel * sizeof(float));
-        fread(h_channel_mixing_weight, sizeof(float), size_channel, file);
+        // Read channel up-projection weights to host buffer
+        int size_up = embed_dim * hidden_dim;
+        float* h_channel_up_weight = (float*)malloc(size_up * sizeof(float));
+        fread(h_channel_up_weight, sizeof(float), size_up, file);
         // Copy from host to device
-        CHECK_CUDA(cudaMemcpy(block->channel_mixing_weight, h_channel_mixing_weight, 
-                   size_channel * sizeof(float), cudaMemcpyHostToDevice));
-        free(h_channel_mixing_weight);
+        CHECK_CUDA(cudaMemcpy(block->channel_up_weight, h_channel_up_weight, 
+                   size_up * sizeof(float), cudaMemcpyHostToDevice));
+        free(h_channel_up_weight);
+        
+        // Read channel down-projection weights to host buffer
+        int size_down = hidden_dim * embed_dim;
+        float* h_channel_down_weight = (float*)malloc(size_down * sizeof(float));
+        fread(h_channel_down_weight, sizeof(float), size_down, file);
+        // Copy from host to device
+        CHECK_CUDA(cudaMemcpy(block->channel_down_weight, h_channel_down_weight, 
+                   size_down * sizeof(float), cudaMemcpyHostToDevice));
+        free(h_channel_down_weight);
         
         // Read RMSNorm1 weights
         fread(h_rmsnorm_weight, sizeof(float), embed_dim, file);
@@ -1354,7 +1474,7 @@ int main(int argc, char** argv) {
     CHECK_CUDA(cudaSetDevice(0));
     
     int vocab_size = 256;
-    int embed_dim = 2048;
+    int embed_dim = 1024;
     int num_layers = 12;
     int seq_length = 2048;
     int batch_size = 6;
