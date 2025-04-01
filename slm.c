@@ -38,7 +38,7 @@ typedef struct {
     float* token_mixing_m;
     float* token_mixing_v;
     
-    // Channel mixing parameters - modified to include up/down projection
+    // Channel mixing parameters
     float* channel_up_weight;          // [embed_dim x (embed_dim*4)]
     float* channel_up_weight_grad;
     float* channel_up_m;
@@ -480,7 +480,7 @@ MixerBlock* init_mixer_block(int embed_dim, int seq_length, int batch_size) {
     CHECK_CUDA(cudaMalloc(&block->token_mixed, tensor_size_trans));
     CHECK_CUDA(cudaMalloc(&block->token_mix_activated, tensor_size_trans));
     
-    // New buffers for the up-projection and activation
+    // Buffers for up-projection and activation
     CHECK_CUDA(cudaMalloc(&block->channel_up_output, tensor_size_hidden));
     CHECK_CUDA(cudaMalloc(&block->channel_up_activated, tensor_size_hidden));
     CHECK_CUDA(cudaMalloc(&block->channel_mixed, tensor_size));
@@ -757,7 +757,7 @@ void mixer_block_forward(MixerBlock* block, float* input, float* output, int bat
     // Add residual
     CHECK_CUBLAS(cublasSaxpy(handle, total, &alpha, input, 1, block->residual, 1));
     
-    // --- Channel Mixing with Up/Down Projection ---
+    // --- Channel Mixing ---
     
     // Apply RMSNorm
     nblocks = (batch_size * seq + threads - 1) / threads;
@@ -785,10 +785,7 @@ void mixer_block_forward(MixerBlock* block, float* input, float* output, int bat
                 block->channel_down_weight, hidden,
                 block->channel_up_activated, hidden,
                 &beta,
-                block->channel_mixed, embed));
-    
-    // Copy to output
-    CHECK_CUDA(cudaMemcpy(output, block->channel_mixed, total * sizeof(float), cudaMemcpyDeviceToDevice));
+                output, embed));
     
     // Add residual
     CHECK_CUBLAS(cublasSaxpy(handle, total, &alpha, block->residual, 1, output, 1));
