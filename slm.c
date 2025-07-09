@@ -2,22 +2,21 @@
 #include <stdlib.h>
 #include <math.h>
 #include <time.h>
+#include "data.h"
 #include "slm.h"
-
-// Model hyperparameters
-#define VOCAB_SIZE 256
-#define EMBEDDING_DIM 128
-#define SEQ_LEN 512
-#define BATCH_SIZE 32
-#define NUM_EPOCHS 100
-#define LEARNING_RATE 0.0005f
-#define DATA_BATCHES 50
 
 int main() {
     srand(time(NULL));
+
+    // Model hyperparameters
+    const int vocab_size = 256;
+    const int embedding_dim = 128;
+    const int seq_len = 512;
+    const int batch_size = 32;
+    const int data_batches = 50;
     
     printf("Initializing SLM with vocab_size=%d, embedding_dim=%d, seq_len=%d, batch_size=%d\n",
-           VOCAB_SIZE, EMBEDDING_DIM, SEQ_LEN, BATCH_SIZE);
+           vocab_size, embedding_dim, seq_len, batch_size);
     
     // Load training data
     int* d_input_ids;
@@ -25,21 +24,25 @@ int main() {
     int num_batches;
     
     load_text_data("combined_corpus.txt", &d_input_ids, &d_target_ids, 
-                   &num_batches, SEQ_LEN, BATCH_SIZE, DATA_BATCHES);
+                   &num_batches, seq_len, batch_size, data_batches);
     
     // Initialize model
-    SLM* slm = init_slm(VOCAB_SIZE, EMBEDDING_DIM, SEQ_LEN, BATCH_SIZE);
+    SLM* slm = init_slm(vocab_size, embedding_dim, seq_len, batch_size);
     
-    printf("Starting training for %d epochs with %d batches...\n", NUM_EPOCHS, num_batches);
+    // Training parameters
+    const int num_epochs = 100;
+    const float learning_rate = 0.0005f;
+    
+    printf("Starting training for %d epochs with %d batches...\n", num_epochs, num_batches);
     
     // Training loop
-    for (int epoch = 0; epoch <= NUM_EPOCHS; epoch++) {
+    for (int epoch = 0; epoch < num_epochs + 1; epoch++) {
         float epoch_loss = 0.0f;
         
         for (int batch = 0; batch < num_batches; batch++) {
             // Get batch pointers
-            int* batch_input = d_input_ids + batch * BATCH_SIZE * SEQ_LEN;
-            int* batch_target = d_target_ids + batch * BATCH_SIZE * SEQ_LEN;
+            int* batch_input = d_input_ids + batch * batch_size * seq_len;
+            int* batch_target = d_target_ids + batch * batch_size * seq_len;
             
             // Forward pass
             forward_pass_slm(slm, batch_input);
@@ -49,12 +52,12 @@ int main() {
             epoch_loss += loss;
             
             // Skip weight updates on final evaluation epoch
-            if (epoch == NUM_EPOCHS) continue;
+            if (epoch == num_epochs) continue;
             
             // Backward pass and weight update
             zero_gradients_slm(slm);
             backward_pass_slm(slm, batch_input);
-            update_weights_slm(slm, LEARNING_RATE);
+            update_weights_slm(slm, learning_rate);
         }
         
         epoch_loss /= num_batches;
@@ -62,7 +65,7 @@ int main() {
         // Print progress
         if (epoch % 10 == 0) {
             printf("Epoch [%d/%d], Loss: %.6f, Perplexity: %.2f\n", 
-                   epoch, NUM_EPOCHS, epoch_loss, expf(epoch_loss));
+                   epoch, num_epochs, epoch_loss, expf(epoch_loss));
         }
     }
     
@@ -79,7 +82,7 @@ int main() {
     // Test model loading and verification
     printf("\nTesting model loading and verification...\n");
     
-    SLM* loaded_slm = load_slm(model_filename, BATCH_SIZE);
+    SLM* loaded_slm = load_slm(model_filename, batch_size);
     if (loaded_slm) {
         // Test with first batch
         int* test_input = d_input_ids;
@@ -93,10 +96,12 @@ int main() {
         // Sample text generation test
         printf("\nSample predictions (first 10 tokens):\n");
         
+        // Allocate host memory for predictions
+        float* h_logits = (float*)malloc(seq_len * batch_size * vocab_size * sizeof(float));
+        
         // Copy logits to host for inspection
-        float* h_logits = (float*)malloc(SEQ_LEN * BATCH_SIZE * VOCAB_SIZE * sizeof(float));
         CHECK_CUDA(cudaMemcpy(h_logits, loaded_slm->d_logits, 
-                             SEQ_LEN * BATCH_SIZE * VOCAB_SIZE * sizeof(float), 
+                             seq_len * batch_size * vocab_size * sizeof(float), 
                              cudaMemcpyDeviceToHost));
         
         // Copy input and target tokens to host
@@ -111,11 +116,11 @@ int main() {
         for (int t = 0; t < 10; t++) {
             // Find predicted token (argmax)
             int pred_token = 0;
-            float max_logit = h_logits[t * BATCH_SIZE * VOCAB_SIZE];
+            float max_logit = h_logits[t * batch_size * vocab_size];
             
-            for (int v = 1; v < VOCAB_SIZE; v++) {
-                if (h_logits[t * BATCH_SIZE * VOCAB_SIZE + v] > max_logit) {
-                    max_logit = h_logits[t * BATCH_SIZE * VOCAB_SIZE + v];
+            for (int v = 1; v < vocab_size; v++) {
+                if (h_logits[t * batch_size * vocab_size + v] > max_logit) {
+                    max_logit = h_logits[t * batch_size * vocab_size + v];
                     pred_token = v;
                 }
             }
