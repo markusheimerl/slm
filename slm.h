@@ -11,6 +11,9 @@
 #include "ssm/gpu/ssm.h"
 
 typedef struct {
+    // Embedded SSM instance
+    SSM* ssm;
+    
     // Device pointers for language model matrices
     float* d_embeddings;        // vocab_size x embedding_dim
     float* d_output_weights;    // embedding_dim x vocab_size
@@ -32,9 +35,6 @@ typedef struct {
     float* d_logits;           // seq_len x batch_size x vocab_size
     float* d_loss;             // single loss value
     float* d_logit_grad;       // seq_len x batch_size x vocab_size
-    
-    // cuBLAS handle (shared with SSM)
-    cublasHandle_t cublas_handle;
     
     // Dimensions
     int vocab_size;
@@ -142,7 +142,7 @@ __global__ void adamw_update_kernel_slm(
 }
 
 // Initialize the language model
-SLM* init_slm(int vocab_size, int embedding_dim, int seq_len, int batch_size, cublasHandle_t cublas_handle) {
+SLM* init_slm(int vocab_size, int embedding_dim, int seq_len, int batch_size) {
     SLM* slm = (SLM*)malloc(sizeof(SLM));
     
     // Store dimensions
@@ -150,7 +150,9 @@ SLM* init_slm(int vocab_size, int embedding_dim, int seq_len, int batch_size, cu
     slm->embedding_dim = embedding_dim;
     slm->seq_len = seq_len;
     slm->batch_size = batch_size;
-    slm->cublas_handle = cublas_handle;
+    
+    // Initialize embedded SSM (embedding_dim as both input and output)
+    slm->ssm = init_ssm(embedding_dim, 256, embedding_dim, seq_len, batch_size);
     
     // Initialize Adam parameters
     slm->beta1 = 0.9f;
@@ -214,6 +216,9 @@ SLM* init_slm(int vocab_size, int embedding_dim, int seq_len, int batch_size, cu
 
 // Free memory
 void free_slm(SLM* slm) {
+    // Free embedded SSM
+    free_ssm(slm->ssm);
+    
     // Free device memory
     cudaFree(slm->d_embeddings); 
     cudaFree(slm->d_output_weights);
@@ -240,19 +245,22 @@ void forward_pass_slm(SLM* slm, int* d_input_ids) {
         slm->d_embedded, slm->d_embeddings, d_input_ids,
         slm->seq_len, slm->batch_size, slm->embedding_dim
     );
+    
+    // Run through SSM
+    forward_pass_ssm(slm->ssm, slm->d_embedded);
 }
 
 // Calculate loss
-float calculate_loss_slm(SLM* slm, SSM* ssm, int* d_target_ids) {
+float calculate_loss_slm(SLM* slm, int* d_target_ids) {
     const float alpha = 1.0f;
     const float beta = 0.0f;
     
     // Output projection: logits = predictions * output_weights^T
-    CHECK_CUBLAS(cublasSgemm(slm->cublas_handle,
+    CHECK_CUBLAS(cublasSgemm(slm->ssm->cublas_handle,
                             CUBLAS_OP_T, CUBLAS_OP_N,
                             slm->vocab_size, slm->seq_len * slm->batch_size, slm->embedding_dim,
                             &alpha, slm->d_output_weights, slm->embedding_dim,
-                            ssm->d_predictions, slm->embedding_dim,
+                            slm->ssm->d_predictions, slm->embedding_dim,
                             &beta, slm->d_logits, slm->vocab_size));
     
     // Cross-entropy loss
@@ -273,35 +281,39 @@ float calculate_loss_slm(SLM* slm, SSM* ssm, int* d_target_ids) {
 void zero_gradients_slm(SLM* slm) {
     CHECK_CUDA(cudaMemset(slm->d_embed_grad, 0, slm->vocab_size * slm->embedding_dim * sizeof(float)));
     CHECK_CUDA(cudaMemset(slm->d_output_grad, 0, slm->embedding_dim * slm->vocab_size * sizeof(float)));
+    zero_gradients_ssm(slm->ssm);
 }
 
 // Backward pass
-void backward_pass_slm(SLM* slm, SSM* ssm, int* d_input_ids) {
+void backward_pass_slm(SLM* slm, int* d_input_ids) {
     const float alpha = 1.0f;
     const float beta = 0.0f;
     const float beta_add = 1.0f;
     
     // Output weight gradient
-    CHECK_CUBLAS(cublasSgemm(slm->cublas_handle,
+    CHECK_CUBLAS(cublasSgemm(slm->ssm->cublas_handle,
                             CUBLAS_OP_N, CUBLAS_OP_T,
                             slm->embedding_dim, slm->vocab_size, slm->seq_len * slm->batch_size,
-                            &alpha, ssm->d_predictions, slm->embedding_dim,
+                            &alpha, slm->ssm->d_predictions, slm->embedding_dim,
                             slm->d_logit_grad, slm->vocab_size,
                             &beta_add, slm->d_output_grad, slm->embedding_dim));
     
     // SSM output gradient
-    CHECK_CUBLAS(cublasSgemm(slm->cublas_handle,
+    CHECK_CUBLAS(cublasSgemm(slm->ssm->cublas_handle,
                             CUBLAS_OP_N, CUBLAS_OP_N,
                             slm->embedding_dim, slm->seq_len * slm->batch_size, slm->vocab_size,
                             &alpha, slm->d_output_weights, slm->embedding_dim,
                             slm->d_logit_grad, slm->vocab_size,
-                            &beta, ssm->d_error, slm->embedding_dim));
+                            &beta, slm->ssm->d_error, slm->embedding_dim));
+    
+    // Backward through SSM
+    backward_pass_ssm(slm->ssm, slm->d_embedded);
     
     // Embedding gradient
     int block_size = 256;
     int num_blocks = (slm->seq_len * slm->batch_size * slm->embedding_dim + block_size - 1) / block_size;
     embedding_backward_kernel_slm<<<num_blocks, block_size>>>(
-        slm->d_embed_grad, ssm->d_error, d_input_ids,
+        slm->d_embed_grad, slm->ssm->d_error, d_input_ids,
         slm->seq_len, slm->batch_size, slm->embedding_dim
     );
 }
@@ -333,6 +345,9 @@ void update_weights_slm(SLM* slm, float learning_rate) {
         slm->beta1, slm->beta2, slm->epsilon, learning_rate, slm->weight_decay,
         alpha_t, output_size, slm->batch_size
     );
+    
+    // Update SSM weights
+    update_weights_ssm(slm->ssm, learning_rate);
 }
 
 // Load text and prepare sequences (streaming approach for memory efficiency)
