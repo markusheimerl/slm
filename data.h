@@ -4,84 +4,106 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <math.h>
+#include <cuda_runtime.h>
 
-// Load text data with memory streaming
-void load_text_data(const char* filename, int** d_input_ids, int** d_target_ids, 
-                   int* num_batches, int seq_len, int batch_size, int max_batches) {
+typedef struct {
+    char* text;
+    size_t text_size;
+    size_t* book_starts;
+    int num_books;
+} TextData;
+
+// Find book boundaries by searching for "START OF THE PROJECT GUTENBERG EBOOK"
+void find_book_boundaries(TextData* data) {
+    const char* marker = "START OF THE PROJECT GUTENBERG EBOOK";
+    size_t marker_len = strlen(marker);
+    
+    // Count occurrences first
+    data->num_books = 0;
+    for (size_t i = 0; i < data->text_size - marker_len; i++) {
+        if (strncmp(&data->text[i], marker, marker_len) == 0) {
+            data->num_books++;
+        }
+    }
+    
+    if (data->num_books == 0) {
+        // Fallback: create artificial boundaries every 100KB
+        data->num_books = data->text_size / 100000;
+        data->book_starts = (size_t*)malloc(data->num_books * sizeof(size_t));
+        for (int i = 0; i < data->num_books; i++) {
+            data->book_starts[i] = i * 100000;
+        }
+        printf("No book markers found, created %d artificial boundaries\n", data->num_books);
+        return;
+    }
+    
+    // Allocate and fill book starts
+    data->book_starts = (size_t*)malloc(data->num_books * sizeof(size_t));
+    int book_idx = 0;
+    for (size_t i = 0; i < data->text_size - marker_len; i++) {
+        if (strncmp(&data->text[i], marker, marker_len) == 0) {
+            data->book_starts[book_idx++] = i;
+        }
+    }
+    
+    printf("Found %d book boundaries\n", data->num_books);
+}
+
+// Load text data
+TextData* load_text_data(const char* filename) {
     FILE* file = fopen(filename, "rb");
     if (!file) {
         fprintf(stderr, "Error: Could not open %s\n", filename);
-        exit(1);
+        return NULL;
     }
     
     // Get file size
     fseek(file, 0, SEEK_END);
-    long file_size = ftell(file);
+    size_t file_size = ftell(file);
     fseek(file, 0, SEEK_SET);
     
-    // Calculate available sequences
-    int max_sequences = (file_size - 1) / seq_len;
-    int available_batches = max_sequences / batch_size;
-    
-    *num_batches = (max_batches > 0 && max_batches < available_batches) ? 
-                   max_batches : available_batches;
-    
-    int total_sequences = (*num_batches) * batch_size;
-    
-    printf("File size: %ld bytes, using %d batches of %d sequences\n", 
-           file_size, *num_batches, batch_size);
-    
-    // Allocate host memory
-    int* h_input_ids = (int*)malloc(total_sequences * seq_len * sizeof(int));
-    int* h_target_ids = (int*)malloc(total_sequences * seq_len * sizeof(int));
-    
-    // Load data
-    for (int seq = 0; seq < total_sequences; seq++) {
-        unsigned char buffer[seq_len + 1];
-        size_t bytes_read = fread(buffer, 1, seq_len + 1, file);
-        
-        if (bytes_read < (size_t)(seq_len + 1)) {
-            fprintf(stderr, "Warning: Not enough data for sequence %d\n", seq);
-            break;
-        }
-        
-        for (int pos = 0; pos < seq_len; pos++) {
-            h_input_ids[seq * seq_len + pos] = (int)buffer[pos];
-            h_target_ids[seq * seq_len + pos] = (int)buffer[pos + 1];
-        }
-    }
+    // Allocate and read text
+    TextData* data = (TextData*)malloc(sizeof(TextData));
+    data->text = (char*)malloc(file_size + 1);
+    data->text_size = fread(data->text, 1, file_size, file);
+    data->text[data->text_size] = '\0';
     
     fclose(file);
     
-    // Allocate device memory and copy data
-    cudaMalloc(d_input_ids, total_sequences * seq_len * sizeof(int));
-    cudaMalloc(d_target_ids, total_sequences * seq_len * sizeof(int));
-    cudaMemcpy(*d_input_ids, h_input_ids, total_sequences * seq_len * sizeof(int), cudaMemcpyHostToDevice);
-    cudaMemcpy(*d_target_ids, h_target_ids, total_sequences * seq_len * sizeof(int), cudaMemcpyHostToDevice);
+    // Find book boundaries
+    find_book_boundaries(data);
     
-    free(h_input_ids);
-    free(h_target_ids);
+    printf("Loaded %zu bytes of text with %d books\n", data->text_size, data->num_books);
+    return data;
 }
 
-// Reshape data from [batch][time] to [time][batch]
-void reshape_data_for_batch_processing(int* input_ids, int* target_ids,
-                                     int** input_reshaped, int** target_reshaped,
-                                     int num_sequences, int seq_len) {
-    *input_reshaped = (int*)malloc(seq_len * num_sequences * sizeof(int));
-    *target_reshaped = (int*)malloc(seq_len * num_sequences * sizeof(int));
-    
-    for (int t = 0; t < seq_len; t++) {
-        for (int b = 0; b < num_sequences; b++) {
-            // Original layout: [seq][time]
-            int orig_idx = b * seq_len + t;
-            
-            // New layout: [time][seq] 
-            int new_idx = t * num_sequences + b;
-            
-            (*input_reshaped)[new_idx] = input_ids[orig_idx];
-            (*target_reshaped)[new_idx] = target_ids[orig_idx];
+// Get batch of character sequences
+void get_batch(TextData* data, int* h_chars, int* h_next_chars,
+               int batch_size, int context_length) {
+    for (int b = 0; b < batch_size; b++) {
+        // Pick a random book start
+        int book_idx = rand() % data->num_books;
+        size_t start_pos = data->book_starts[book_idx];
+        
+        // Make sure we don't go past end of text
+        if (start_pos + context_length + 1 >= data->text_size) {
+            start_pos = data->text_size - context_length - 2;
         }
+        
+        // Copy characters
+        for (int t = 0; t < context_length; t++) {
+            h_chars[t * batch_size + b] = (int)(unsigned char)data->text[start_pos + t];
+            h_next_chars[t * batch_size + b] = (int)(unsigned char)data->text[start_pos + t + 1];
+        }
+    }
+}
+
+// Free text data
+void free_text_data(TextData* data) {
+    if (data) {
+        free(data->text);
+        free(data->book_starts);
+        free(data);
     }
 }
 
