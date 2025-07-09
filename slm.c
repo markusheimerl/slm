@@ -7,97 +7,30 @@
 #define VOCAB_SIZE 256
 #define EMBEDDING_DIM 128
 #define STATE_DIM 256
-#define SEQ_LEN 512      // Reduced from 1024
-#define BATCH_SIZE 32    // Reduced from 64
-#define MAX_BATCHES 50   // Limit number of batches to reduce memory usage
+#define SEQ_LEN 512
+#define BATCH_SIZE 32
+#define MAX_BATCHES 50
 
-// Training step
-float train_step_slm(SLM* slm, int* d_input_batch, int* d_target_batch, float learning_rate) {
-    // Clear gradients
-    zero_gradients_slm(slm);
+// Reshape data for batch processing
+void reshape_data_for_batch_processing(int* input_ids, int* target_ids, 
+                                     int** input_reshaped, int** target_reshaped,
+                                     int num_sequences, int seq_len) {
+    // Reshape to: seq_len tensors of size (batch_size x 1)
+    *input_reshaped = (int*)malloc(seq_len * num_sequences * sizeof(int));
+    *target_reshaped = (int*)malloc(seq_len * num_sequences * sizeof(int));
     
-    // Forward pass
-    forward_pass_slm(slm, d_input_batch);
-    
-    // Calculate loss
-    float loss = calculate_loss_slm(slm, d_target_batch);
-    
-    // Backward pass
-    backward_pass_slm(slm, d_input_batch);
-    
-    // Update weights
-    update_weights_slm(slm, learning_rate);
-    
-    return loss;
-}
-
-// Simple text generation
-void generate_text_slm(SLM* slm, int start_token, int length) {
-    int* d_input;
-    float* d_embedded;
-    float* d_logits;
-    float* h_logits = (float*)malloc(slm->vocab_size * sizeof(float));
-    
-    CHECK_CUDA(cudaMalloc(&d_input, sizeof(int)));
-    CHECK_CUDA(cudaMalloc(&d_embedded, slm->embedding_dim * sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&d_logits, slm->vocab_size * sizeof(float)));
-    
-    CHECK_CUDA(cudaMemcpy(d_input, &start_token, sizeof(int), cudaMemcpyHostToDevice));
-    
-    printf("Generated text: ");
-    printf("%c", (char)start_token);
-    
-    // Create a single-sequence SSM for generation
-    SSM* gen_ssm = init_ssm(slm->embedding_dim, STATE_DIM, slm->embedding_dim, 1, 1);
-    
-    // Copy weights from trained model
-    CHECK_CUDA(cudaMemcpy(gen_ssm->d_A, slm->ssm->d_A, STATE_DIM * STATE_DIM * sizeof(float), cudaMemcpyDeviceToDevice));
-    CHECK_CUDA(cudaMemcpy(gen_ssm->d_B, slm->ssm->d_B, STATE_DIM * slm->embedding_dim * sizeof(float), cudaMemcpyDeviceToDevice));
-    CHECK_CUDA(cudaMemcpy(gen_ssm->d_C, slm->ssm->d_C, slm->embedding_dim * STATE_DIM * sizeof(float), cudaMemcpyDeviceToDevice));
-    CHECK_CUDA(cudaMemcpy(gen_ssm->d_D, slm->ssm->d_D, slm->embedding_dim * slm->embedding_dim * sizeof(float), cudaMemcpyDeviceToDevice));
-    
-    for (int i = 0; i < length - 1; i++) {
-        // Embed
-        embedding_forward_kernel_slm<<<1, slm->embedding_dim>>>(
-            d_embedded, slm->d_embeddings, d_input, 1, 1, slm->embedding_dim
-        );
-        
-        // SSM forward
-        forward_pass_ssm(gen_ssm, d_embedded);
-        
-        // Project to vocab
-        const float alpha = 1.0f;
-        const float beta = 0.0f;
-        CHECK_CUBLAS(cublasSgemv(slm->ssm->cublas_handle, CUBLAS_OP_T,
-                                slm->embedding_dim, slm->vocab_size,
-                                &alpha, slm->d_output_weights, slm->embedding_dim,
-                                gen_ssm->d_predictions, 1,
-                                &beta, d_logits, 1));
-        
-        // Get logits and sample
-        CHECK_CUDA(cudaMemcpy(h_logits, d_logits, slm->vocab_size * sizeof(float), cudaMemcpyDeviceToHost));
-        
-        // Simple argmax sampling
-        int next_token = 0;
-        float max_logit = h_logits[0];
-        for (int j = 1; j < slm->vocab_size; j++) {
-            if (h_logits[j] > max_logit) {
-                max_logit = h_logits[j];
-                next_token = j;
-            }
+    for (int t = 0; t < seq_len; t++) {
+        for (int b = 0; b < num_sequences; b++) {
+            // Original layout: [seq][time]
+            int orig_idx = b * seq_len + t;
+            
+            // New layout: [time][seq]
+            int new_idx = t * num_sequences + b;
+            
+            (*input_reshaped)[new_idx] = input_ids[orig_idx];
+            (*target_reshaped)[new_idx] = target_ids[orig_idx];
         }
-        
-        printf("%c", (char)next_token);
-        CHECK_CUDA(cudaMemcpy(d_input, &next_token, sizeof(int), cudaMemcpyHostToDevice));
     }
-    printf("\n");
-    
-    // Cleanup
-    free(h_logits);
-    cudaFree(d_input);
-    cudaFree(d_embedded);
-    cudaFree(d_logits);
-    free_ssm(gen_ssm);
 }
 
 int main() {
@@ -114,12 +47,13 @@ int main() {
     SLM* slm = init_slm(VOCAB_SIZE, EMBEDDING_DIM, SEQ_LEN, BATCH_SIZE);
     
     // Training parameters
-    const int num_epochs = 50;     // Reduced from 100
-    const float learning_rate = 0.001f;
+    const int num_epochs = 100;
+    const float learning_rate = 0.0005f;
     
     printf("Starting training with %d batches...\n", num_batches);
     
-    for (int epoch = 0; epoch < num_epochs; epoch++) {
+    // Training loop
+    for (int epoch = 0; epoch < num_epochs + 1; epoch++) {
         float epoch_loss = 0.0f;
         
         for (int batch = 0; batch < num_batches; batch++) {
@@ -127,36 +61,152 @@ int main() {
             int* d_input_batch = d_all_inputs + batch * BATCH_SIZE * SEQ_LEN;
             int* d_target_batch = d_all_targets + batch * BATCH_SIZE * SEQ_LEN;
             
-            float loss = train_step_slm(slm, d_input_batch, d_target_batch, learning_rate);
+            // Forward pass
+            forward_pass_slm(slm, d_input_batch);
+            
+            // Calculate loss
+            float loss = calculate_loss_slm(slm, d_target_batch);
             epoch_loss += loss;
+            
+            // Don't update weights after final evaluation
+            if (epoch == num_epochs) continue;
+            
+            // Backward pass
+            zero_gradients_slm(slm);
+            backward_pass_slm(slm, d_input_batch);
+            
+            // Update weights
+            update_weights_slm(slm, learning_rate);
         }
         
         epoch_loss /= num_batches;
         
-        if (epoch % 5 == 0) {
-            printf("Epoch %d/%d, Loss: %.4f, Perplexity: %.2f\n", 
-                   epoch + 1, num_epochs, epoch_loss, expf(epoch_loss));
-            
-            // Generate sample
-            generate_text_slm(slm, 'T', 100);
+        if (epoch % 10 == 0) {
+            printf("Epoch [%d/%d], Loss: %.8f, Perplexity: %.2f\n", 
+                   epoch, num_epochs, epoch_loss, expf(epoch_loss));
         }
     }
     
-    // Save model
-    char timestamp[32];
+    // Get timestamp for filenames
+    char model_fname[64], ssm_fname[64];
     time_t now = time(NULL);
-    strftime(timestamp, sizeof(timestamp), "%Y%m%d_%H%M%S", localtime(&now));
+    strftime(model_fname, sizeof(model_fname), "%Y%m%d_%H%M%S_slm.bin", 
+             localtime(&now));
+    strftime(ssm_fname, sizeof(ssm_fname), "%Y%m%d_%H%M%S_ssm.bin", 
+             localtime(&now));
     
-    char model_path[64];
-    snprintf(model_path, sizeof(model_path), "slm_%s.bin", timestamp);
-    save_ssm(slm->ssm, model_path);
+    // Save model and SSM with timestamped filenames
+    save_slm(slm, model_fname);
+    save_ssm(slm->ssm, ssm_fname);
     
-    printf("Model saved to %s\n", model_path);
+    // Load the model back and verify
+    printf("\nVerifying saved model...\n");
+    
+    // Load the model back with original batch_size
+    SLM* loaded_slm = load_slm(model_fname, BATCH_SIZE);
+    
+    // Test with first batch
+    int* d_input_batch = d_all_inputs;
+    int* d_target_batch = d_all_targets;
+    
+    // Forward pass with loaded model
+    forward_pass_slm(loaded_slm, d_input_batch);
+    
+    // Calculate and print loss with loaded model
+    float verification_loss = calculate_loss_slm(loaded_slm, d_target_batch);
+    printf("Loss with loaded model: %.8f\n", verification_loss);
+    
+    // Simple text generation
+    printf("\nGenerating text...\n");
+    
+    // Copy first few tokens to host for generation
+    int* h_input_sample = (int*)malloc(10 * sizeof(int));
+    CHECK_CUDA(cudaMemcpy(h_input_sample, d_input_batch, 10 * sizeof(int), cudaMemcpyDeviceToHost));
+    
+    printf("Sample input tokens: ");
+    for (int i = 0; i < 10; i++) {
+        printf("%c", (char)h_input_sample[i]);
+    }
+    printf("\n");
+    
+    // Allocate host memory for predictions
+    float* predictions = (float*)malloc(SEQ_LEN * BATCH_SIZE * VOCAB_SIZE * sizeof(float));
+    
+    // Copy predictions from device to host
+    CHECK_CUDA(cudaMemcpy(predictions, loaded_slm->d_logits, 
+                         SEQ_LEN * BATCH_SIZE * VOCAB_SIZE * sizeof(float),
+                         cudaMemcpyDeviceToHost));
+    
+    // Print sample predictions from first sequence
+    printf("\nSample Predictions (first sequence, first 10 time steps):\n");
+    printf("Time\tPredicted Token\tActual Token\n");
+    printf("---------------------------------------\n");
+    
+    int* h_target_sample = (int*)malloc(10 * sizeof(int));
+    CHECK_CUDA(cudaMemcpy(h_target_sample, d_target_batch, 10 * sizeof(int), cudaMemcpyDeviceToHost));
+    
+    for (int t = 0; t < 10; t++) {
+        // First sequence (b=0) in reshaped format
+        int idx = t * BATCH_SIZE * VOCAB_SIZE + 0 * VOCAB_SIZE;
+        
+        // Find argmax
+        int predicted_token = 0;
+        float max_logit = predictions[idx];
+        for (int v = 1; v < VOCAB_SIZE; v++) {
+            if (predictions[idx + v] > max_logit) {
+                max_logit = predictions[idx + v];
+                predicted_token = v;
+            }
+        }
+        
+        int actual_token = h_target_sample[t];
+        
+        printf("t=%d\t%c (%d)\t\t%c (%d)\n", 
+               t, (char)predicted_token, predicted_token, 
+               (char)actual_token, actual_token);
+    }
+    
+    // Calculate accuracy
+    int correct = 0;
+    int total = 0;
+    
+    for (int t = 0; t < SEQ_LEN; t++) {
+        for (int b = 0; b < BATCH_SIZE; b++) {
+            int idx = t * BATCH_SIZE * VOCAB_SIZE + b * VOCAB_SIZE;
+            
+            // Find argmax
+            int predicted_token = 0;
+            float max_logit = predictions[idx];
+            for (int v = 1; v < VOCAB_SIZE; v++) {
+                if (predictions[idx + v] > max_logit) {
+                    max_logit = predictions[idx + v];
+                    predicted_token = v;
+                }
+            }
+            
+            int actual_token_idx = t * BATCH_SIZE + b;
+            int actual_token;
+            CHECK_CUDA(cudaMemcpy(&actual_token, d_target_batch + actual_token_idx, 
+                                 sizeof(int), cudaMemcpyDeviceToHost));
+            
+            if (predicted_token == actual_token) {
+                correct++;
+            }
+            total++;
+        }
+    }
+    
+    printf("\nOverall Accuracy: %.2f%% (%d/%d)\n", 
+           (float)correct * 100.0f / total, correct, total);
     
     // Cleanup
+    free(h_input_sample);
+    free(h_target_sample);
+    free(predictions);
     cudaFree(d_all_inputs);
     cudaFree(d_all_targets);
     free_slm(slm);
+    free_slm(loaded_slm);
     
     return 0;
 }
