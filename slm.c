@@ -9,15 +9,13 @@ int main() {
     srand(time(NULL));
     
     // Hyperparameters
-    const int embedding_dim = 128;
-    const int context_length = 256;
+    const int embed_dim = 128;
     const int batch_size = 32;
     const int num_epochs = 100;
-    const int batches_per_epoch = 100;
+    const int steps_per_epoch = 1000;
     const float learning_rate = 0.001f;
     
-    printf("Initializing SLM with embedding_dim=%d, context_length=%d, batch_size=%d\n",
-           embedding_dim, context_length, batch_size);
+    printf("Initializing SLM with embed_dim=%d, batch_size=%d\n", embed_dim, batch_size);
     
     // Load text data
     TextData* text_data = load_text_data("combined_corpus.txt");
@@ -27,22 +25,22 @@ int main() {
     }
     
     // Initialize model
-    SLM* slm = init_slm(embedding_dim, context_length, batch_size);
+    SLM* slm = init_slm(embed_dim, batch_size, text_data);
     
-    printf("Starting training for %d epochs with %d batches per epoch...\n", 
-           num_epochs, batches_per_epoch);
+    printf("Starting training for %d epochs with %d steps per epoch...\n", 
+           num_epochs, steps_per_epoch);
     
     // Training loop
     for (int epoch = 0; epoch < num_epochs; epoch++) {
         float epoch_loss = 0.0f;
         
-        for (int batch = 0; batch < batches_per_epoch; batch++) {
-            float batch_loss = train_batch(slm, text_data, learning_rate);
-            epoch_loss += batch_loss;
+        for (int step = 0; step < steps_per_epoch; step++) {
+            float step_loss = train_step(slm, text_data, learning_rate);
+            epoch_loss += step_loss;
         }
         
-        epoch_loss /= batches_per_epoch;
-        float perplexity = expf(epoch_loss / batch_size);
+        epoch_loss /= steps_per_epoch;
+        float perplexity = expf(epoch_loss);
         
         printf("Epoch [%d/%d], Loss: %.4f, Perplexity: %.2f\n", 
                epoch + 1, num_epochs, epoch_loss, perplexity);

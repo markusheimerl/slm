@@ -40,12 +40,12 @@ typedef struct {
     SSM* ssm;
     
     // Model parameters (on device)
-    float* d_embed;      // 256 × embedding_dim
-    float* d_proj;       // embedding_dim × 256
+    float* d_embed;      // 256 × embed_dim
+    float* d_proj;       // embed_dim × 256
     
     // Gradients (on device)
-    float* d_embed_grad; // 256 × embedding_dim
-    float* d_proj_grad;  // embedding_dim × 256
+    float* d_embed_grad; // 256 × embed_dim
+    float* d_proj_grad;  // embed_dim × 256
     
     // Adam states
     float* d_embed_m, *d_embed_v;
@@ -54,23 +54,24 @@ typedef struct {
     int t;
     float weight_decay;
     
-    // Working buffers (on device)
-    float* d_embedded;   // batch_size × embedding_dim
-    float* d_logits;     // batch_size × 256
-    float* d_logit_grad; // batch_size × 256
-    float* d_loss;       // single loss value
+    // Working buffers for single timestep
+    float* d_X;          // batch_size × embed_dim (input)
+    float* d_logits;     // batch_size × 256 (output)
+    float* d_probs;      // batch_size × 256 (softmax output)
+    float* d_targets;    // batch_size × 256 (one-hot targets)
+    float* d_loss;       // scalar loss value
     
-    // Host buffers for data loading
-    int* h_chars;        // context_length × batch_size
-    int* h_next_chars;   // context_length × batch_size
+    // Character buffers
+    int* h_chars;        // batch_size current characters
+    int* h_next_chars;   // batch_size next characters
+    int* d_chars;        // batch_size current characters (device)
+    int* d_next_chars;   // batch_size next characters (device)
     
-    // Device buffers for characters
-    int* d_chars;        // context_length × batch_size
-    int* d_next_chars;   // context_length × batch_size
+    // Corpus positions
+    size_t* positions;   // batch_size positions in corpus
     
     // Hyperparameters
-    int embedding_dim;
-    int context_length;
+    int embed_dim;
     int batch_size;
     
     // cuBLAS handle
@@ -78,25 +79,34 @@ typedef struct {
 } SLM;
 
 // CUDA kernel for character embedding
-__global__ void embed_chars_kernel(float* embedded, const float* embed_matrix, 
+__global__ void embed_chars_kernel(float* X, const float* embed_matrix, 
                                   const int* chars, int batch_size, int embed_dim) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < batch_size * embed_dim) {
         int batch_idx = idx / embed_dim;
         int dim_idx = idx % embed_dim;
         int char_val = chars[batch_idx];
-        embedded[idx] = embed_matrix[char_val * embed_dim + dim_idx];
+        X[idx] = embed_matrix[char_val * embed_dim + dim_idx];
     }
 }
 
-// CUDA kernel for cross-entropy loss and gradient computation
-__global__ void cross_entropy_kernel(float* loss, float* grad, const float* logits,
-                                    const int* targets, int batch_size) {
+// CUDA kernel for creating one-hot targets
+__global__ void create_onehot_kernel(float* targets, const int* chars, int batch_size) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < batch_size * VOCAB_SIZE) {
+        int batch_idx = idx / VOCAB_SIZE;
+        int vocab_idx = idx % VOCAB_SIZE;
+        int target_char = chars[batch_idx];
+        targets[idx] = (vocab_idx == target_char) ? 1.0f : 0.0f;
+    }
+}
+
+// CUDA kernel for softmax
+__global__ void softmax_kernel(float* probs, const float* logits, int batch_size) {
     int batch_idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (batch_idx < batch_size) {
         const float* logit_row = logits + batch_idx * VOCAB_SIZE;
-        float* grad_row = grad + batch_idx * VOCAB_SIZE;
-        int target = targets[batch_idx];
+        float* prob_row = probs + batch_idx * VOCAB_SIZE;
         
         // Find max for numerical stability
         float max_logit = logit_row[0];
@@ -104,33 +114,51 @@ __global__ void cross_entropy_kernel(float* loss, float* grad, const float* logi
             max_logit = fmaxf(max_logit, logit_row[i]);
         }
         
-        // Compute softmax denominator
+        // Compute softmax
         float sum_exp = 0.0f;
         for (int i = 0; i < VOCAB_SIZE; i++) {
-            sum_exp += expf(logit_row[i] - max_logit);
+            prob_row[i] = expf(logit_row[i] - max_logit);
+            sum_exp += prob_row[i];
         }
         
-        // Loss for this sample
-        float sample_loss = -logit_row[target] + max_logit + logf(sum_exp);
-        atomicAdd(loss, sample_loss);
-        
-        // Gradient (softmax - one_hot)
+        // Normalize
         for (int i = 0; i < VOCAB_SIZE; i++) {
-            float prob = expf(logit_row[i] - max_logit) / sum_exp;
-            grad_row[i] = prob - (i == target ? 1.0f : 0.0f);
+            prob_row[i] /= sum_exp;
+        }
+    }
+}
+
+// CUDA kernel for cross-entropy loss and gradient
+__global__ void cross_entropy_loss_kernel(float* loss, float* grad_logits, 
+                                         const float* probs, const float* targets, 
+                                         int batch_size) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < batch_size * VOCAB_SIZE) {
+        int batch_idx = idx / VOCAB_SIZE;
+        int vocab_idx = idx % VOCAB_SIZE;
+        
+        float prob = probs[idx];
+        float target = targets[idx];
+        
+        // Gradient: prob - target
+        grad_logits[idx] = prob - target;
+        
+        // Loss contribution (only for target class)
+        if (target > 0.5f) { // This is the target class
+            atomicAdd(loss, -logf(fmaxf(prob, 1e-8f)));
         }
     }
 }
 
 // CUDA kernel for embedding gradient accumulation
-__global__ void accumulate_embed_grad_kernel(float* embed_grad, const float* output_grad,
+__global__ void accumulate_embed_grad_kernel(float* embed_grad, const float* grad_X,
                                            const int* chars, int batch_size, int embed_dim) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < batch_size * embed_dim) {
         int batch_idx = idx / embed_dim;
         int dim_idx = idx % embed_dim;
         int char_val = chars[batch_idx];
-        atomicAdd(&embed_grad[char_val * embed_dim + dim_idx], output_grad[idx]);
+        atomicAdd(&embed_grad[char_val * embed_dim + dim_idx], grad_X[idx]);
     }
 }
 
@@ -159,12 +187,11 @@ __global__ void adamw_update_kernel(float* weights, float* gradients, float* m, 
 }
 
 // Initialize the language model
-SLM* init_slm(int embedding_dim, int context_length, int batch_size) {
+SLM* init_slm(int embed_dim, int batch_size, TextData* text_data) {
     SLM* slm = (SLM*)malloc(sizeof(SLM));
     
     // Store hyperparameters
-    slm->embedding_dim = embedding_dim;
-    slm->context_length = context_length;
+    slm->embed_dim = embed_dim;
     slm->batch_size = batch_size;
     
     // Initialize Adam parameters
@@ -172,67 +199,74 @@ SLM* init_slm(int embedding_dim, int context_length, int batch_size) {
     slm->beta2 = 0.999f;
     slm->epsilon = 1e-8f;
     slm->t = 0;
-    slm->weight_decay = 0.001f;
+    slm->weight_decay = 0.01f;
     
     // Initialize cuBLAS handle
     CHECK_CUBLAS(cublasCreate(&slm->cublas_handle));
     
-    // Initialize SSM (state_dim = embedding_dim for simplicity)
-    slm->ssm = init_ssm(embedding_dim, embedding_dim, embedding_dim, 1, batch_size);
+    // Initialize SSM with seq_len=1 (single timestep)
+    slm->ssm = init_ssm(embed_dim, embed_dim, embed_dim, 1, batch_size);
     
-    // Allocate host memory for data loading
-    slm->h_chars = (int*)malloc(context_length * batch_size * sizeof(int));
-    slm->h_next_chars = (int*)malloc(context_length * batch_size * sizeof(int));
+    // Initialize random positions in corpus
+    slm->positions = (size_t*)malloc(batch_size * sizeof(size_t));
+    for (int i = 0; i < batch_size; i++) {
+        slm->positions[i] = rand() % (text_data->text_size - 1);
+    }
+    
+    // Allocate host memory
+    slm->h_chars = (int*)malloc(batch_size * sizeof(int));
+    slm->h_next_chars = (int*)malloc(batch_size * sizeof(int));
     
     // Allocate device memory for characters
-    CHECK_CUDA(cudaMalloc(&slm->d_chars, context_length * batch_size * sizeof(int)));
-    CHECK_CUDA(cudaMalloc(&slm->d_next_chars, context_length * batch_size * sizeof(int)));
+    CHECK_CUDA(cudaMalloc(&slm->d_chars, batch_size * sizeof(int)));
+    CHECK_CUDA(cudaMalloc(&slm->d_next_chars, batch_size * sizeof(int)));
     
     // Allocate device memory for model parameters
-    CHECK_CUDA(cudaMalloc(&slm->d_embed, VOCAB_SIZE * embedding_dim * sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&slm->d_proj, embedding_dim * VOCAB_SIZE * sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&slm->d_embed, VOCAB_SIZE * embed_dim * sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&slm->d_proj, embed_dim * VOCAB_SIZE * sizeof(float)));
     
     // Allocate device memory for gradients
-    CHECK_CUDA(cudaMalloc(&slm->d_embed_grad, VOCAB_SIZE * embedding_dim * sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&slm->d_proj_grad, embedding_dim * VOCAB_SIZE * sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&slm->d_embed_grad, VOCAB_SIZE * embed_dim * sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&slm->d_proj_grad, embed_dim * VOCAB_SIZE * sizeof(float)));
     
     // Allocate device memory for Adam states
-    CHECK_CUDA(cudaMalloc(&slm->d_embed_m, VOCAB_SIZE * embedding_dim * sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&slm->d_embed_v, VOCAB_SIZE * embedding_dim * sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&slm->d_proj_m, embedding_dim * VOCAB_SIZE * sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&slm->d_proj_v, embedding_dim * VOCAB_SIZE * sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&slm->d_embed_m, VOCAB_SIZE * embed_dim * sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&slm->d_embed_v, VOCAB_SIZE * embed_dim * sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&slm->d_proj_m, embed_dim * VOCAB_SIZE * sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&slm->d_proj_v, embed_dim * VOCAB_SIZE * sizeof(float)));
     
     // Allocate device memory for working buffers
-    CHECK_CUDA(cudaMalloc(&slm->d_embedded, batch_size * embedding_dim * sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&slm->d_X, batch_size * embed_dim * sizeof(float)));
     CHECK_CUDA(cudaMalloc(&slm->d_logits, batch_size * VOCAB_SIZE * sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&slm->d_logit_grad, batch_size * VOCAB_SIZE * sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&slm->d_probs, batch_size * VOCAB_SIZE * sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&slm->d_targets, batch_size * VOCAB_SIZE * sizeof(float)));
     CHECK_CUDA(cudaMalloc(&slm->d_loss, sizeof(float)));
     
     // Initialize parameters on host
-    float* h_embed = (float*)malloc(VOCAB_SIZE * embedding_dim * sizeof(float));
-    float* h_proj = (float*)malloc(embedding_dim * VOCAB_SIZE * sizeof(float));
+    float* h_embed = (float*)malloc(VOCAB_SIZE * embed_dim * sizeof(float));
+    float* h_proj = (float*)malloc(embed_dim * VOCAB_SIZE * sizeof(float));
     
     // Xavier initialization
-    float embed_scale = sqrtf(2.0f / (VOCAB_SIZE + embedding_dim));
-    float proj_scale = sqrtf(2.0f / (embedding_dim + VOCAB_SIZE));
+    float embed_scale = sqrtf(2.0f / (VOCAB_SIZE + embed_dim));
+    float proj_scale = sqrtf(2.0f / (embed_dim + VOCAB_SIZE));
     
-    for (int i = 0; i < VOCAB_SIZE * embedding_dim; i++) {
-        h_embed[i] = ((float)rand() / RAND_MAX * 2.0f - 1.0f) * embed_scale;
+    for (int i = 0; i < VOCAB_SIZE * embed_dim; i++) {
+        h_embed[i] = ((float)rand() / (float)RAND_MAX * 2.0f - 1.0f) * embed_scale;
     }
     
-    for (int i = 0; i < embedding_dim * VOCAB_SIZE; i++) {
-        h_proj[i] = ((float)rand() / RAND_MAX * 2.0f - 1.0f) * proj_scale;
+    for (int i = 0; i < embed_dim * VOCAB_SIZE; i++) {
+        h_proj[i] = ((float)rand() / (float)RAND_MAX * 2.0f - 1.0f) * proj_scale;
     }
     
     // Copy to device
-    CHECK_CUDA(cudaMemcpy(slm->d_embed, h_embed, VOCAB_SIZE * embedding_dim * sizeof(float), cudaMemcpyHostToDevice));
-    CHECK_CUDA(cudaMemcpy(slm->d_proj, h_proj, embedding_dim * VOCAB_SIZE * sizeof(float), cudaMemcpyHostToDevice));
+    CHECK_CUDA(cudaMemcpy(slm->d_embed, h_embed, VOCAB_SIZE * embed_dim * sizeof(float), cudaMemcpyHostToDevice));
+    CHECK_CUDA(cudaMemcpy(slm->d_proj, h_proj, embed_dim * VOCAB_SIZE * sizeof(float), cudaMemcpyHostToDevice));
     
     // Initialize Adam states to zero
-    CHECK_CUDA(cudaMemset(slm->d_embed_m, 0, VOCAB_SIZE * embedding_dim * sizeof(float)));
-    CHECK_CUDA(cudaMemset(slm->d_embed_v, 0, VOCAB_SIZE * embedding_dim * sizeof(float)));
-    CHECK_CUDA(cudaMemset(slm->d_proj_m, 0, embedding_dim * VOCAB_SIZE * sizeof(float)));
-    CHECK_CUDA(cudaMemset(slm->d_proj_v, 0, embedding_dim * VOCAB_SIZE * sizeof(float)));
+    CHECK_CUDA(cudaMemset(slm->d_embed_m, 0, VOCAB_SIZE * embed_dim * sizeof(float)));
+    CHECK_CUDA(cudaMemset(slm->d_embed_v, 0, VOCAB_SIZE * embed_dim * sizeof(float)));
+    CHECK_CUDA(cudaMemset(slm->d_proj_m, 0, embed_dim * VOCAB_SIZE * sizeof(float)));
+    CHECK_CUDA(cudaMemset(slm->d_proj_v, 0, embed_dim * VOCAB_SIZE * sizeof(float)));
     
     free(h_embed);
     free(h_proj);
@@ -246,6 +280,7 @@ void free_slm(SLM* slm) {
     
     free_ssm(slm->ssm);
     
+    free(slm->positions);
     free(slm->h_chars);
     free(slm->h_next_chars);
     
@@ -259,101 +294,127 @@ void free_slm(SLM* slm) {
     cudaFree(slm->d_embed_v);
     cudaFree(slm->d_proj_m);
     cudaFree(slm->d_proj_v);
-    cudaFree(slm->d_embedded);
+    cudaFree(slm->d_X);
     cudaFree(slm->d_logits);
-    cudaFree(slm->d_logit_grad);
+    cudaFree(slm->d_probs);
+    cudaFree(slm->d_targets);
     cudaFree(slm->d_loss);
     
     cublasDestroy(slm->cublas_handle);
     free(slm);
 }
 
-// Reset SSM states for new sequences
-void reset_ssm_states(SLM* slm) {
-    CHECK_CUDA(cudaMemset(slm->ssm->d_states, 0, slm->batch_size * slm->embedding_dim * sizeof(float)));
+// Extract characters at current positions
+void extract_chars(SLM* slm, TextData* text_data) {
+    for (int i = 0; i < slm->batch_size; i++) {
+        size_t pos = slm->positions[i];
+        if (pos >= text_data->text_size - 1) {
+            pos = 0; // Wrap around
+            slm->positions[i] = pos;
+        }
+        
+        slm->h_chars[i] = (int)(unsigned char)text_data->text[pos];
+        slm->h_next_chars[i] = (int)(unsigned char)text_data->text[pos + 1];
+    }
+    
+    // Copy to device
+    CHECK_CUDA(cudaMemcpy(slm->d_chars, slm->h_chars, slm->batch_size * sizeof(int), cudaMemcpyHostToDevice));
+    CHECK_CUDA(cudaMemcpy(slm->d_next_chars, slm->h_next_chars, slm->batch_size * sizeof(int), cudaMemcpyHostToDevice));
 }
 
-// Forward pass for single timestep
-void forward_step(SLM* slm, int timestep) {
+// Advance positions
+void advance_positions(SLM* slm, TextData* text_data) {
+    for (int i = 0; i < slm->batch_size; i++) {
+        slm->positions[i] = (slm->positions[i] + 1) % (text_data->text_size - 1);
+    }
+}
+
+// Forward pass
+void forward_pass(SLM* slm) {
     const float alpha = 1.0f;
     const float beta = 0.0f;
     
-    // Get characters for this timestep
-    int* chars_t = slm->d_chars + timestep * slm->batch_size;
-    
     // Embed characters
     int block_size = 256;
-    int num_blocks = (slm->batch_size * slm->embedding_dim + block_size - 1) / block_size;
-    embed_chars_kernel<<<num_blocks, block_size>>>(
-        slm->d_embedded, slm->d_embed, chars_t, slm->batch_size, slm->embedding_dim
+    int embed_blocks = (slm->batch_size * slm->embed_dim + block_size - 1) / block_size;
+    
+    embed_chars_kernel<<<embed_blocks, block_size>>>(
+        slm->d_X, slm->d_embed, slm->d_chars, slm->batch_size, slm->embed_dim
     );
     
     // Forward through SSM (single timestep)
-    forward_pass_ssm(slm->ssm, slm->d_embedded);
+    forward_pass_ssm(slm->ssm, slm->d_X);
     
-    // Project to logits: logits = ssm_output * proj^T
+    // Project to logits: logits = ssm_predictions * proj^T
     CHECK_CUBLAS(cublasSgemm(slm->cublas_handle,
                             CUBLAS_OP_T, CUBLAS_OP_N,
-                            VOCAB_SIZE, slm->batch_size, slm->embedding_dim,
-                            &alpha, slm->d_proj, slm->embedding_dim,
-                            slm->ssm->d_predictions, slm->embedding_dim,
+                            VOCAB_SIZE, slm->batch_size, slm->embed_dim,
+                            &alpha, slm->d_proj, slm->embed_dim,
+                            slm->ssm->d_predictions, slm->embed_dim,
                             &beta, slm->d_logits, VOCAB_SIZE));
+    
+    // Compute softmax
+    int softmax_blocks = (slm->batch_size + block_size - 1) / block_size;
+    softmax_kernel<<<softmax_blocks, block_size>>>(
+        slm->d_probs, slm->d_logits, slm->batch_size
+    );
 }
 
-// Compute loss for single timestep
-float compute_loss(SLM* slm, int timestep) {
-    // Get target characters for this timestep
-    int* targets_t = slm->d_next_chars + timestep * slm->batch_size;
-    
-    // Reset loss buffer
-    CHECK_CUDA(cudaMemset(slm->d_loss, 0, sizeof(float)));
-    
-    // Compute cross-entropy loss and gradients
+// Compute loss and gradients
+float compute_loss(SLM* slm) {
     int block_size = 256;
-    int num_blocks = (slm->batch_size + block_size - 1) / block_size;
-    cross_entropy_kernel<<<num_blocks, block_size>>>(
-        slm->d_loss, slm->d_logit_grad, slm->d_logits, targets_t, slm->batch_size
+    
+    // Create one-hot targets
+    int onehot_blocks = (slm->batch_size * VOCAB_SIZE + block_size - 1) / block_size;
+    create_onehot_kernel<<<onehot_blocks, block_size>>>(
+        slm->d_targets, slm->d_next_chars, slm->batch_size
     );
     
-    // Copy loss back to host
+    // Reset loss
+    CHECK_CUDA(cudaMemset(slm->d_loss, 0, sizeof(float)));
+    
+    // Compute loss and gradients
+    cross_entropy_loss_kernel<<<onehot_blocks, block_size>>>(
+        slm->d_loss, slm->d_logits, slm->d_probs, slm->d_targets, slm->batch_size
+    );
+    
+    // Get loss value
     float loss_val;
     CHECK_CUDA(cudaMemcpy(&loss_val, slm->d_loss, sizeof(float), cudaMemcpyDeviceToHost));
     
-    return loss_val;
+    return loss_val / slm->batch_size;
 }
 
-// Backward pass for single timestep
-void backward_step(SLM* slm, int timestep) {
+// Backward pass
+void backward_pass(SLM* slm) {
     const float alpha = 1.0f;
-    const float beta = 1.0f; // Accumulate gradients
+    const float beta = 1.0f;
     
-    // Get characters for this timestep
-    int* chars_t = slm->d_chars + timestep * slm->batch_size;
-    
-    // Gradient w.r.t. projection weights: d_proj_grad += ssm_output^T * d_logit_grad
+    // Gradient w.r.t. projection weights: d_proj_grad += ssm_predictions^T * d_logits
     CHECK_CUBLAS(cublasSgemm(slm->cublas_handle,
                             CUBLAS_OP_N, CUBLAS_OP_T,
-                            slm->embedding_dim, VOCAB_SIZE, slm->batch_size,
-                            &alpha, slm->ssm->d_predictions, slm->embedding_dim,
-                            slm->d_logit_grad, VOCAB_SIZE,
-                            &beta, slm->d_proj_grad, slm->embedding_dim));
+                            slm->embed_dim, VOCAB_SIZE, slm->batch_size,
+                            &alpha, slm->ssm->d_predictions, slm->embed_dim,
+                            slm->d_logits, VOCAB_SIZE,
+                            &beta, slm->d_proj_grad, slm->embed_dim));
     
-    // Gradient w.r.t. SSM output: d_ssm_output = proj * d_logit_grad
+    // Gradient w.r.t. SSM output: d_error = proj * d_logits
     CHECK_CUBLAS(cublasSgemm(slm->cublas_handle,
                             CUBLAS_OP_N, CUBLAS_OP_N,
-                            slm->embedding_dim, slm->batch_size, VOCAB_SIZE,
-                            &alpha, slm->d_proj, slm->embedding_dim,
-                            slm->d_logit_grad, VOCAB_SIZE,
-                            &alpha, slm->ssm->d_error, slm->embedding_dim));
+                            slm->embed_dim, slm->batch_size, VOCAB_SIZE,
+                            &alpha, slm->d_proj, slm->embed_dim,
+                            slm->d_logits, VOCAB_SIZE,
+                            &alpha, slm->ssm->d_error, slm->embed_dim));
     
     // Backward through SSM
-    backward_pass_ssm(slm->ssm, slm->d_embedded);
+    backward_pass_ssm(slm->ssm, slm->d_X);
     
     // Accumulate embedding gradients
     int block_size = 256;
-    int num_blocks = (slm->batch_size * slm->embedding_dim + block_size - 1) / block_size;
-    accumulate_embed_grad_kernel<<<num_blocks, block_size>>>(
-        slm->d_embed_grad, slm->ssm->d_error, chars_t, slm->batch_size, slm->embedding_dim
+    int embed_blocks = (slm->batch_size * slm->embed_dim + block_size - 1) / block_size;
+    
+    accumulate_embed_grad_kernel<<<embed_blocks, block_size>>>(
+        slm->d_embed_grad, slm->ssm->d_error, slm->d_chars, slm->batch_size, slm->embed_dim
     );
 }
 
@@ -368,7 +429,7 @@ void update_weights(SLM* slm, float learning_rate) {
     int block_size = 256;
     
     // Update embeddings
-    int embed_size = VOCAB_SIZE * slm->embedding_dim;
+    int embed_size = VOCAB_SIZE * slm->embed_dim;
     int embed_blocks = (embed_size + block_size - 1) / block_size;
     adamw_update_kernel<<<embed_blocks, block_size>>>(
         slm->d_embed, slm->d_embed_grad, slm->d_embed_m, slm->d_embed_v,
@@ -377,7 +438,7 @@ void update_weights(SLM* slm, float learning_rate) {
     );
     
     // Update projection weights
-    int proj_size = slm->embedding_dim * VOCAB_SIZE;
+    int proj_size = slm->embed_dim * VOCAB_SIZE;
     int proj_blocks = (proj_size + block_size - 1) / block_size;
     adamw_update_kernel<<<proj_blocks, block_size>>>(
         slm->d_proj, slm->d_proj_grad, slm->d_proj_m, slm->d_proj_v,
@@ -387,86 +448,68 @@ void update_weights(SLM* slm, float learning_rate) {
     
     // Update SSM weights
     update_weights_ssm(slm->ssm, learning_rate);
-    
-    // Zero SSM gradients
-    zero_gradients_ssm(slm->ssm);
 }
 
-// Train for one batch
-float train_batch(SLM* slm, TextData* text_data, float learning_rate) {
-    // Get batch data
-    get_batch(text_data, slm->h_chars, slm->h_next_chars, slm->batch_size, slm->context_length);
-    
-    // Copy to device
-    CHECK_CUDA(cudaMemcpy(slm->d_chars, slm->h_chars, 
-                         slm->context_length * slm->batch_size * sizeof(int), 
-                         cudaMemcpyHostToDevice));
-    CHECK_CUDA(cudaMemcpy(slm->d_next_chars, slm->h_next_chars, 
-                         slm->context_length * slm->batch_size * sizeof(int), 
-                         cudaMemcpyHostToDevice));
-    
-    // Reset states for new sequences
-    reset_ssm_states(slm);
+// Train one step
+float train_step(SLM* slm, TextData* text_data, float learning_rate) {
+    // Extract characters at current positions
+    extract_chars(slm, text_data);
     
     // Zero gradients
-    CHECK_CUDA(cudaMemset(slm->d_embed_grad, 0, VOCAB_SIZE * slm->embedding_dim * sizeof(float)));
-    CHECK_CUDA(cudaMemset(slm->d_proj_grad, 0, slm->embedding_dim * VOCAB_SIZE * sizeof(float)));
+    CHECK_CUDA(cudaMemset(slm->d_embed_grad, 0, VOCAB_SIZE * slm->embed_dim * sizeof(float)));
+    CHECK_CUDA(cudaMemset(slm->d_proj_grad, 0, slm->embed_dim * VOCAB_SIZE * sizeof(float)));
     zero_gradients_ssm(slm->ssm);
     
-    float total_loss = 0.0f;
+    // Forward pass
+    forward_pass(slm);
     
-    // Process each timestep
-    for (int t = 0; t < slm->context_length; t++) {
-        // Forward pass
-        forward_step(slm, t);
-        
-        // Compute loss
-        float step_loss = compute_loss(slm, t);
-        total_loss += step_loss;
-        
-        // Backward pass
-        backward_step(slm, t);
-    }
+    // Compute loss
+    float loss = compute_loss(slm);
+    
+    // Backward pass
+    backward_pass(slm);
     
     // Update weights
     update_weights(slm, learning_rate);
     
-    return total_loss / slm->context_length;
+    // Advance positions
+    advance_positions(slm, text_data);
+    
+    return loss;
 }
 
-// Generate text (simple greedy decoding)
+// Generate text
 void generate_text(SLM* slm, const char* prompt, int length) {
     printf("Generating text with prompt: '%s'\n", prompt);
     
-    // Reset states
-    reset_ssm_states(slm);
+    // Reset SSM state
+    CHECK_CUDA(cudaMemset(slm->ssm->d_states, 0, slm->batch_size * slm->embed_dim * sizeof(float)));
     
-    // Process prompt
+    // Process prompt (use first batch slot)
     int prompt_len = strlen(prompt);
     for (int i = 0; i < prompt_len; i++) {
         int char_val = (int)(unsigned char)prompt[i];
         
-        // Create single-character batch
-        int h_char = char_val;
-        CHECK_CUDA(cudaMemcpy(slm->d_chars, &h_char, sizeof(int), cudaMemcpyHostToDevice));
+        // Set character for first batch slot
+        CHECK_CUDA(cudaMemcpy(slm->d_chars, &char_val, sizeof(int), cudaMemcpyHostToDevice));
         
         // Forward pass
-        forward_step(slm, 0);
+        forward_pass(slm);
     }
     
     // Generate new characters
     printf("Generated: ");
     for (int i = 0; i < length; i++) {
-        // Get logits from last forward pass
-        float* h_logits = (float*)malloc(VOCAB_SIZE * sizeof(float));
-        CHECK_CUDA(cudaMemcpy(h_logits, slm->d_logits, VOCAB_SIZE * sizeof(float), cudaMemcpyDeviceToHost));
+        // Get probabilities from logits
+        float* h_probs = (float*)malloc(VOCAB_SIZE * sizeof(float));
+        CHECK_CUDA(cudaMemcpy(h_probs, slm->d_probs, VOCAB_SIZE * sizeof(float), cudaMemcpyDeviceToHost));
         
         // Simple greedy sampling (pick max)
         int best_char = 0;
-        float best_score = h_logits[0];
+        float best_prob = h_probs[0];
         for (int j = 1; j < VOCAB_SIZE; j++) {
-            if (h_logits[j] > best_score) {
-                best_score = h_logits[j];
+            if (h_probs[j] > best_prob) {
+                best_prob = h_probs[j];
                 best_char = j;
             }
         }
@@ -476,9 +519,9 @@ void generate_text(SLM* slm, const char* prompt, int length) {
         
         // Feed back as input
         CHECK_CUDA(cudaMemcpy(slm->d_chars, &best_char, sizeof(int), cudaMemcpyHostToDevice));
-        forward_step(slm, 0);
+        forward_pass(slm);
         
-        free(h_logits);
+        free(h_probs);
     }
     printf("\n");
 }
