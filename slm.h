@@ -289,9 +289,11 @@ void update_weights_slm(SLM* slm, float learning_rate) {
 void save_slm(SLM* slm, const char* filename) {
     save_ssm(slm->ssm, filename);
     
-    // Save embeddings
     char embed_file[256];
-    snprintf(embed_file, sizeof(embed_file), "%s_embeddings.bin", filename);
+    strcpy(embed_file, filename);
+    char* dot = strrchr(embed_file, '.');
+    if (dot) *dot = '\0';
+    strcat(embed_file, "_embeddings.bin");
     
     float* h_embeddings = (float*)malloc(slm->vocab_size * slm->embed_dim * sizeof(float));
     CHECK_CUDA(cudaMemcpy(h_embeddings, slm->d_embeddings, 
@@ -329,10 +331,14 @@ SLM* load_slm(const char* filename, int custom_batch_size) {
     CHECK_CUDA(cudaMalloc(&slm->d_input_gradients, ssm->seq_len * ssm->batch_size * ssm->input_dim * sizeof(float)));
     CHECK_CUDA(cudaMalloc(&slm->d_losses, ssm->seq_len * ssm->batch_size * sizeof(float)));
     
-    // Load embeddings
+    // Create embeddings filename
     char embed_file[256];
-    snprintf(embed_file, sizeof(embed_file), "%s_embeddings.bin", filename);
+    strcpy(embed_file, filename);
+    char* dot = strrchr(embed_file, '.');
+    if (dot) *dot = '\0';
+    strcat(embed_file, "_embeddings.bin");
     
+    // Load embeddings
     FILE* f = fopen(embed_file, "rb");
     if (f) {
         int vocab_size, embed_dim;
@@ -348,17 +354,6 @@ SLM* load_slm(const char* filename, int custom_batch_size) {
         free(h_embeddings);
         fclose(f);
         printf("Embeddings loaded from %s\n", embed_file);
-    } else {
-        // Initialize embeddings if file doesn't exist
-        float* h_embeddings = (float*)malloc(slm->vocab_size * slm->embed_dim * sizeof(float));
-        float scale = sqrtf(2.0f / slm->embed_dim);
-        for (int i = 0; i < slm->vocab_size * slm->embed_dim; i++) {
-            h_embeddings[i] = ((float)rand() / (float)RAND_MAX * 2.0f - 1.0f) * scale;
-        }
-        CHECK_CUDA(cudaMemcpy(slm->d_embeddings, h_embeddings, 
-                             slm->vocab_size * slm->embed_dim * sizeof(float), cudaMemcpyHostToDevice));
-        free(h_embeddings);
-        printf("Embeddings initialized randomly\n");
     }
     
     CHECK_CUDA(cudaMemset(slm->d_embeddings_m, 0, slm->vocab_size * slm->embed_dim * sizeof(float)));
