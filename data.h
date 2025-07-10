@@ -35,47 +35,19 @@ char* load_corpus(const char* filename, size_t* corpus_size) {
     return corpus;
 }
 
-// Generate character sequence data
-void generate_char_sequences(unsigned char** input_chars, unsigned char** target_chars, 
-                            int num_sequences, int seq_len, const char* corpus_filename) {
-    // Load corpus
-    size_t corpus_size;
-    char* corpus = load_corpus(corpus_filename, &corpus_size);
-    if (!corpus) {
-        exit(1);
-    }
-    
+// Generate character sequences from pre-loaded corpus
+void generate_char_sequences_from_corpus(unsigned char** input_chars, unsigned char** target_chars, 
+                                        int num_sequences, int seq_len, char* corpus, size_t corpus_size) {
     // Ensure we have enough data
     if (corpus_size < (size_t)(seq_len + 1)) {
         printf("Error: Corpus too small. Need at least %d characters, got %zu\n", 
                seq_len + 1, corpus_size);
-        free(corpus);
         exit(1);
     }
     
     size_t usable_corpus_size = corpus_size - seq_len;
     
-    // Debug print
-    printf("\n=== SAMPLE SEQUENCES ===\n");
-    for (int seq = 0; seq < 3 && seq < num_sequences; seq++) {
-        size_t start_pos = rand() % usable_corpus_size;
-        printf("Seq %d: \"", seq);
-        for (int i = 0; i < 50 && i < seq_len; i++) {
-            char c = corpus[start_pos + i];
-            if (c >= 32 && c <= 126) printf("%c", c);
-            else if (c == '\n') printf("\\n");
-            else if (c == '\t') printf("\\t");
-            else printf(".");
-        }
-        printf("...\"\n");
-    }
-    printf("========================\n\n");
-    
-    // Allocate memory for sequences (just character indices)
-    *input_chars = (unsigned char*)malloc(num_sequences * seq_len * sizeof(unsigned char));
-    *target_chars = (unsigned char*)malloc(num_sequences * seq_len * sizeof(unsigned char));
-    
-    // Generate sequences
+    // Generate sequences from random locations
     for (int seq = 0; seq < num_sequences; seq++) {
         size_t start_pos = rand() % usable_corpus_size;
         
@@ -85,8 +57,6 @@ void generate_char_sequences(unsigned char** input_chars, unsigned char** target
             (*target_chars)[idx] = (unsigned char)corpus[start_pos + t + 1];
         }
     }
-
-    free(corpus);
 }
 
 // Save sequences to CSV
