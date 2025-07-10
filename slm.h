@@ -103,17 +103,17 @@ void forward_pass_slm(SLM* slm, float* d_X) {
 
 // Calculate cross-entropy loss
 float calculate_loss_slm(SLM* slm, float* d_y) {
+    int total_size = slm->ssm->seq_len * slm->ssm->batch_size * slm->ssm->output_dim;
     int total_batches = slm->ssm->seq_len * slm->ssm->batch_size;
-    int total_output_elements = slm->ssm->seq_len * slm->ssm->batch_size * slm->ssm->output_dim;
     int block_size = 256;
-    int num_blocks = (total_output_elements + block_size - 1) / block_size;
+    int num_blocks = (total_size + block_size - 1) / block_size;
 
     // Calculate error
     calc_error_kernel_ssm<<<num_blocks, block_size>>>(
         slm->ssm->d_error,
         slm->d_softmax,
         d_y,
-        total_output_elements
+        total_size
     );
 
     // Calculate loss
