@@ -12,7 +12,7 @@ int main() {
     const int embed_dim = 512;
     const int state_dim = 256;
     const int vocab_size = 256;
-    const int seq_len = 256;
+    const int seq_len = 1024;
     const int batch_size = 128;
     
     // Training parameters
