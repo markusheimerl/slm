@@ -161,7 +161,7 @@ void generate_text_sequence_data(float** X, float** y, int num_sequences, int se
     free(corpus);
 }
 
-// Save sequence data to CSV for inspection (no artificial truncation)
+// Save sequence data to CSV
 void save_text_sequence_data_to_csv(float* X, float* y, int num_sequences, int seq_len, 
                                    int input_dim, int output_dim, const char* filename) {
     FILE* file = fopen(filename, "w");
@@ -182,7 +182,6 @@ void save_text_sequence_data_to_csv(float* X, float* y, int num_sequences, int s
     for (int i = 0; i < output_dim - 1; i++) {
         fprintf(file, "y%d,", i);
     }
-    fprintf(file, "y%d,target_char\n", output_dim - 1);
     
     // Write data
     for (int seq = 0; seq < num_sequences; seq++) {
@@ -197,21 +196,10 @@ void save_text_sequence_data_to_csv(float* X, float* y, int num_sequences, int s
                 fprintf(file, "%.6f,", X[x_idx + j]);
             }
             
-            // Find target character (index with 1.0 in one-hot)
-            int target_char = 0;
-            for (int j = 0; j < output_dim; j++) {
-                if (y[y_idx + j] == 1.0f) {
-                    target_char = j;
-                    break;
-                }
-            }
-            
             // All output values (one-hot)
             for (int j = 0; j < output_dim - 1; j++) {
                 fprintf(file, "%.0f,", y[y_idx + j]);
             }
-            fprintf(file, "%.0f,%c\n", y[y_idx + output_dim - 1], 
-                    (target_char >= 32 && target_char < 127) ? target_char : '?');
         }
     }
     
