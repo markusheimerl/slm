@@ -7,13 +7,12 @@ typedef struct {
     SSM* ssm;                   // Reuse SSM implementation
     float* d_softmax;           // seq_len x batch_size x output_dim (probabilities)
     float* d_log_probs;         // seq_len x batch_size (log probabilities for targets)
-    float* d_loss_buffer;       // Temporary buffer for loss calculation
 } SLM;
 
-// CUDA kernel for softmax (per sequence element)
-__global__ void softmax_kernel_slm(float* output, float* input, int batch_size, int vocab_size) {
-    int batch_idx = blockIdx.x;
-    if (batch_idx >= batch_size) return;
+// CUDA kernel for softmax
+__global__ void softmax_kernel_slm(float* output, float* input, int total_batches, int vocab_size) {
+    int batch_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (batch_idx >= total_batches) return;
     
     float* input_ptr = input + batch_idx * vocab_size;
     float* output_ptr = output + batch_idx * vocab_size;
@@ -40,14 +39,14 @@ __global__ void softmax_kernel_slm(float* output, float* input, int batch_size, 
 
 // CUDA kernel for cross-entropy loss calculation
 __global__ void cross_entropy_loss_kernel_slm(float* log_probs, float* softmax_probs, float* targets, 
-                                              int batch_size, int vocab_size) {
-    int batch_idx = blockIdx.x;
-    if (batch_idx >= batch_size) return;
+                                              int total_batches, int vocab_size) {
+    int batch_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (batch_idx >= total_batches) return;
     
     float* softmax_ptr = softmax_probs + batch_idx * vocab_size;
     float* targets_ptr = targets + batch_idx * vocab_size;
     
-    // Find target index
+    // Find target index and calculate log probability
     float log_prob = 0.0f;
     for (int i = 0; i < vocab_size; i++) {
         if (targets_ptr[i] > 0.5f) {
@@ -60,14 +59,6 @@ __global__ void cross_entropy_loss_kernel_slm(float* log_probs, float* softmax_p
     log_probs[batch_idx] = log_prob;
 }
 
-// CUDA kernel for cross-entropy gradient
-__global__ void cross_entropy_gradient_kernel_slm(float* grad, float* predictions, float* targets, int size) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < size) {
-        grad[idx] = predictions[idx] - targets[idx];
-    }
-}
-
 // Initialize the state space language model
 SLM* init_slm(int input_dim, int state_dim, int output_dim, int seq_len, int batch_size) {
     SLM* slm = (SLM*)malloc(sizeof(SLM));
@@ -78,7 +69,6 @@ SLM* init_slm(int input_dim, int state_dim, int output_dim, int seq_len, int bat
     // Allocate additional device memory for language modeling
     CHECK_CUDA(cudaMalloc(&slm->d_softmax, seq_len * batch_size * output_dim * sizeof(float)));
     CHECK_CUDA(cudaMalloc(&slm->d_log_probs, seq_len * batch_size * sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&slm->d_loss_buffer, seq_len * batch_size * sizeof(float)));
     
     return slm;
 }
@@ -89,7 +79,6 @@ void free_slm(SLM* slm) {
         if (slm->ssm) free_ssm(slm->ssm);  
         cudaFree(slm->d_softmax);
         cudaFree(slm->d_log_probs);
-        cudaFree(slm->d_loss_buffer);
         free(slm);
     }
 }
@@ -99,46 +88,48 @@ void forward_pass_slm(SLM* slm, float* d_X) {
     // Use SSM forward pass to get logits
     forward_pass_ssm(slm->ssm, d_X);
     
-    // Apply softmax to each timestep
-    for (int t = 0; t < slm->ssm->seq_len; t++) {
-        float* logits_t = slm->ssm->d_predictions + t * slm->ssm->batch_size * slm->ssm->output_dim;
-        float* softmax_t = slm->d_softmax + t * slm->ssm->batch_size * slm->ssm->output_dim;
-        
-        softmax_kernel_slm<<<slm->ssm->batch_size, 1>>>(softmax_t, logits_t, slm->ssm->batch_size, slm->ssm->output_dim);
-    }
+    // Apply softmax
+    int total_batches = slm->ssm->seq_len * slm->ssm->batch_size;
+    int block_size = 256;
+    int num_blocks = (total_batches + block_size - 1) / block_size;
+    
+    softmax_kernel_slm<<<num_blocks, block_size>>>(
+        slm->d_softmax, 
+        slm->ssm->d_predictions, 
+        total_batches, 
+        slm->ssm->output_dim
+    );
 }
 
 // Calculate cross-entropy loss
 float calculate_loss_slm(SLM* slm, float* d_y) {
-    // Calculate log probabilities for each timestep
-    for (int t = 0; t < slm->ssm->seq_len; t++) {
-        float* softmax_t = slm->d_softmax + t * slm->ssm->batch_size * slm->ssm->output_dim;
-        float* targets_t = d_y + t * slm->ssm->batch_size * slm->ssm->output_dim;
-        float* log_probs_t = slm->d_log_probs + t * slm->ssm->batch_size;
-        
-        cross_entropy_loss_kernel_slm<<<slm->ssm->batch_size, 1>>>(
-            log_probs_t, softmax_t, targets_t, slm->ssm->batch_size, slm->ssm->output_dim
-        );
-    }
-    
-    // Sum all log probabilities using cuBLAS
-    float total_loss;
-    int total_elements = slm->ssm->seq_len * slm->ssm->batch_size;
-    CHECK_CUBLAS(cublasSasum(slm->ssm->cublas_handle, total_elements, slm->d_log_probs, 1, &total_loss));
-    
-    // Calculate gradients for backward pass (softmax - targets)
+    int total_batches = slm->ssm->seq_len * slm->ssm->batch_size;
     int total_output_elements = slm->ssm->seq_len * slm->ssm->batch_size * slm->ssm->output_dim;
     int block_size = 256;
     int num_blocks = (total_output_elements + block_size - 1) / block_size;
-    
-    cross_entropy_gradient_kernel_slm<<<num_blocks, block_size>>>(
+
+    // Calculate error
+    calc_error_kernel_ssm<<<num_blocks, block_size>>>(
         slm->ssm->d_error,
         slm->d_softmax,
         d_y,
         total_output_elements
     );
-    
-    return total_loss / total_elements;
+
+    // Calculate loss
+    int loss_blocks = (total_batches + block_size - 1) / block_size;
+    cross_entropy_loss_kernel_slm<<<loss_blocks, block_size>>>(
+        slm->d_log_probs,
+        slm->d_softmax,
+        d_y,
+        total_batches,
+        slm->ssm->output_dim
+    );
+
+    float loss;
+    CHECK_CUBLAS(cublasSasum(slm->ssm->cublas_handle, total_batches, slm->d_log_probs, 1, &loss));
+
+    return loss / total_batches;
 }
 
 // Zero gradients
@@ -174,7 +165,6 @@ SLM* load_slm(const char* filename, int custom_batch_size) {
     // Allocate additional device memory for language modeling
     CHECK_CUDA(cudaMalloc(&slm->d_softmax, ssm->seq_len * ssm->batch_size * ssm->output_dim * sizeof(float)));
     CHECK_CUDA(cudaMalloc(&slm->d_log_probs, ssm->seq_len * ssm->batch_size * sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&slm->d_loss_buffer, ssm->seq_len * ssm->batch_size * sizeof(float)));
     
     return slm;
 }
