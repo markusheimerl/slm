@@ -112,9 +112,6 @@ void generate_text_sequence_data(float** X, float** y, int num_sequences, int se
         spacing = 1;
     }
     
-    printf("Distributing %d sequences across %zu characters with spacing %zu\n", 
-           num_sequences, corpus_size, spacing);
-    
     // DEBUG: Print first few sequences
     printf("\n=== TRAINING SEQUENCES ===\n");
     for (int seq = 0; seq < num_sequences && seq < 5; seq++) {  // Only show first 5
@@ -175,10 +172,7 @@ void generate_text_sequence_data(float** X, float** y, int num_sequences, int se
             create_one_hot(next_char, &(*y)[y_idx]);
         }
     }
-    
-    printf("Generated %d sequences of length %d\n", num_sequences, seq_len);
-    printf("Input dimensions: %d, Output dimensions: %d\n", input_dim, output_dim);
-    
+
     free(corpus);
 }
 
