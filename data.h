@@ -6,14 +6,14 @@
 #include <string.h>
 #include <math.h>
 
-#define MAX_CHAR_VALUE 128  // ASCII characters 0-127
-#define EMBED_DIM 16       // Embedding dimension (matching input_dim from SSM)
+#define MAX_CHAR_VALUE 256  // Extended ASCII characters 0-255
+#define EMBED_DIM 512       // Embedding dimension
 
 // Fixed random embedding matrix for characters
 float embedding_matrix[MAX_CHAR_VALUE][EMBED_DIM];
 int embedding_initialized = 0;
 
-// Initialize fixed random embeddings for all ASCII characters
+// Initialize fixed random embeddings for all characters
 void init_embeddings() {
     if (embedding_initialized) return;
     
@@ -34,9 +34,6 @@ void get_char_embedding(unsigned char c, float* embedding) {
     }
     
     int char_idx = (int)c;
-    if (char_idx >= MAX_CHAR_VALUE) {
-        char_idx = 0; // fallback to null character
-    }
     
     for (int i = 0; i < EMBED_DIM; i++) {
         embedding[i] = embedding_matrix[char_idx][i];
@@ -52,9 +49,7 @@ void create_one_hot(unsigned char c, float* one_hot) {
     
     // Set the appropriate index to 1
     int char_idx = (int)c;
-    if (char_idx < MAX_CHAR_VALUE) {
-        one_hot[char_idx] = 1.0f;
-    }
+    one_hot[char_idx] = 1.0f;
 }
 
 // Load text corpus from file
@@ -173,30 +168,43 @@ void save_text_sequence_data_to_csv(float* X, float* y, int num_sequences, int s
         fprintf(file, "x%d,", i);
     }
     
-    // Output features (one-hot)
-    for (int i = 0; i < output_dim - 1; i++) {
+    // Output features (one-hot) - only show first 20 for readability
+    int show_outputs = (output_dim > 20) ? 20 : output_dim;
+    for (int i = 0; i < show_outputs - 1; i++) {
         fprintf(file, "y%d,", i);
     }
-    fprintf(file, "y%d\n", output_dim - 1);
+    fprintf(file, "y%d,target_char\n", show_outputs - 1);
     
-    // Write data
-    for (int seq = 0; seq < num_sequences; seq++) {
+    // Write data (only first 10 sequences for readability)
+    int show_sequences = (num_sequences > 10) ? 10 : num_sequences;
+    for (int seq = 0; seq < show_sequences; seq++) {
         for (int t = 0; t < seq_len; t++) {
             int x_idx = seq * seq_len * input_dim + t * input_dim;
             int y_idx = seq * seq_len * output_dim + t * output_dim;
             
             fprintf(file, "%d,%d,", seq, t);
             
-            // Input features (embeddings)
-            for (int j = 0; j < input_dim; j++) {
-                fprintf(file, "%.17f,", X[x_idx + j]);
+            // Input features (embeddings) - only show first 10 for readability
+            int show_inputs = (input_dim > 10) ? 10 : input_dim;
+            for (int j = 0; j < show_inputs; j++) {
+                fprintf(file, "%.6f,", X[x_idx + j]);
             }
             
-            // Output values (one-hot) - find the index with 1.0
-            for (int j = 0; j < output_dim - 1; j++) {
-                fprintf(file, "%.1f,", y[y_idx + j]);
+            // Find target character (index with 1.0 in one-hot)
+            int target_char = 0;
+            for (int j = 0; j < output_dim; j++) {
+                if (y[y_idx + j] == 1.0f) {
+                    target_char = j;
+                    break;
+                }
             }
-            fprintf(file, "%.1f\n", y[y_idx + output_dim - 1]);
+            
+            // Output values (one-hot) - only show first few
+            for (int j = 0; j < show_outputs - 1; j++) {
+                fprintf(file, "%.0f,", y[y_idx + j]);
+            }
+            fprintf(file, "%.0f,%c\n", y[y_idx + show_outputs - 1], 
+                    (target_char >= 32 && target_char < 127) ? target_char : '?');
         }
     }
     
