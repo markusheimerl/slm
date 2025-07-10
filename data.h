@@ -82,7 +82,7 @@ char* load_corpus(const char* filename, size_t* corpus_size) {
     return corpus;
 }
 
-// Generate text sequence data from corpus with evenly distributed starting positions
+// Generate text sequence data from corpus with randomly distributed starting positions
 void generate_text_sequence_data(float** X, float** y, int num_sequences, int seq_len, 
                                 int input_dim, int output_dim, const char* corpus_filename) {
     // Initialize embeddings
@@ -103,22 +103,14 @@ void generate_text_sequence_data(float** X, float** y, int num_sequences, int se
         exit(1);
     }
     
-    // Calculate spacing between sequences to spread them evenly across corpus
-    size_t usable_corpus_size = corpus_size - seq_len; // Reserve space for longest sequence
-    size_t spacing = usable_corpus_size / num_sequences;
-    
-    if (spacing == 0) {
-        printf("Warning: Corpus too small for even distribution, using overlap\n");
-        spacing = 1;
-    }
+    // Calculate usable corpus size (reserve space for longest sequence)
+    size_t usable_corpus_size = corpus_size - seq_len;
     
     // DEBUG: Print first few sequences
     printf("\n=== TRAINING SEQUENCES ===\n");
     for (int seq = 0; seq < num_sequences && seq < 5; seq++) {  // Only show first 5
-        size_t start_pos = seq * spacing;
-        if (start_pos + seq_len >= corpus_size) {
-            start_pos = corpus_size - seq_len - 1;
-        }
+        // Generate random starting position
+        size_t start_pos = rand() % usable_corpus_size;
         
         printf("SEQ %d (pos %zu): \"", seq, start_pos);
         for (int i = 0; i < 100 && i < seq_len; i++) {  // Show first 100 chars
@@ -145,13 +137,8 @@ void generate_text_sequence_data(float** X, float** y, int num_sequences, int se
     
     // Generate sequences
     for (int seq = 0; seq < num_sequences; seq++) {
-        // Evenly distribute starting positions across corpus
-        size_t start_pos = seq * spacing;
-        
-        // Ensure we don't go beyond corpus bounds
-        if (start_pos + seq_len >= corpus_size) {
-            start_pos = corpus_size - seq_len - 1;
-        }
+        // Randomly distribute starting positions across corpus
+        size_t start_pos = rand() % usable_corpus_size;
         
         for (int t = 0; t < seq_len; t++) {
             size_t char_pos = start_pos + t;
