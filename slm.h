@@ -47,10 +47,10 @@ __global__ void cross_entropy_loss_kernel_slm(float* log_probs, float* softmax_p
     float* softmax_ptr = softmax_probs + batch_idx * vocab_size;
     float* targets_ptr = targets + batch_idx * vocab_size;
     
-    // Find target index (where one-hot is 1)
+    // Find target index
     float log_prob = 0.0f;
     for (int i = 0; i < vocab_size; i++) {
-        if (targets_ptr[i] > 0.5f) { // Use > 0.5f instead of == 1.0f for floating point safety
+        if (targets_ptr[i] > 0.5f) {
             float prob = fmaxf(softmax_ptr[i], 1e-15f); // Avoid log(0)
             log_prob = -logf(prob);
             break;
@@ -86,9 +86,7 @@ SLM* init_slm(int input_dim, int state_dim, int output_dim, int seq_len, int bat
 // Free memory
 void free_slm(SLM* slm) {
     if (slm) {
-        if (slm->ssm) {
-            free_ssm(slm->ssm);
-        }
+        if (slm->ssm) free_ssm(slm->ssm);  
         cudaFree(slm->d_softmax);
         cudaFree(slm->d_log_probs);
         cudaFree(slm->d_loss_buffer);
@@ -108,7 +106,6 @@ void forward_pass_slm(SLM* slm, float* d_X) {
         
         softmax_kernel_slm<<<slm->ssm->batch_size, 1>>>(softmax_t, logits_t, slm->ssm->batch_size, slm->ssm->output_dim);
     }
-    CHECK_CUDA(cudaDeviceSynchronize());
 }
 
 // Calculate cross-entropy loss
@@ -123,7 +120,6 @@ float calculate_loss_slm(SLM* slm, float* d_y) {
             log_probs_t, softmax_t, targets_t, slm->ssm->batch_size, slm->ssm->output_dim
         );
     }
-    CHECK_CUDA(cudaDeviceSynchronize());
     
     // Sum all log probabilities using cuBLAS
     float total_loss;
@@ -141,7 +137,6 @@ float calculate_loss_slm(SLM* slm, float* d_y) {
         d_y,
         total_output_elements
     );
-    CHECK_CUDA(cudaDeviceSynchronize());
     
     return total_loss / total_elements;
 }

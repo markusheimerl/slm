@@ -42,12 +42,12 @@ void get_char_embedding(unsigned char c, float* embedding) {
 
 // Create one-hot encoding for a character
 void create_one_hot(unsigned char c, float* one_hot) {
-    // Initialize all to 0
+    // Initialize all to 0.0
     for (int i = 0; i < MAX_CHAR_VALUE; i++) {
         one_hot[i] = 0.0f;
     }
     
-    // Set the appropriate index to 1
+    // Set the appropriate index to 1.0
     int char_idx = (int)c;
     one_hot[char_idx] = 1.0f;
 }
