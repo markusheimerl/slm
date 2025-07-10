@@ -53,3 +53,4 @@ dkms.conf
 
 *.txt
 *.bin
+*.csv
