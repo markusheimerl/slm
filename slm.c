@@ -35,7 +35,7 @@ int main() {
     
     // Parameters
     const int input_dim = 512;      // EMBED_DIM - embedding dimension
-    const int state_dim = 1024;     // Hidden state dimension
+    const int state_dim = 256;      // Hidden state dimension
     const int seq_len = 1024;       // Sequence length
     const int num_sequences = 64;   // Batch size (number of sequences)
     const int output_dim = 256;     // MAX_CHAR_VALUE - vocabulary size for one-hot
@@ -68,7 +68,7 @@ int main() {
     SLM* slm = init_slm(input_dim, state_dim, output_dim, seq_len, num_sequences);
     
     // Training parameters
-    const int num_epochs = 1000;
+    const int num_epochs = 100;
     const float learning_rate = 0.0001f;
     
     printf("\nStarting training...\n");
