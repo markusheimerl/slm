@@ -82,7 +82,7 @@ char* load_corpus(const char* filename, size_t* corpus_size) {
     return corpus;
 }
 
-// Generate text sequence data from corpus
+// Generate text sequence data from corpus with evenly distributed starting positions
 void generate_text_sequence_data(float** X, float** y, int num_sequences, int seq_len, 
                                 int input_dim, int output_dim, const char* corpus_filename) {
     // Initialize embeddings
@@ -96,12 +96,24 @@ void generate_text_sequence_data(float** X, float** y, int num_sequences, int se
     }
     
     // Ensure we have enough data
-    if (corpus_size < (size_t)(num_sequences + seq_len)) {
+    if (corpus_size < (size_t)(seq_len + 1)) {
         printf("Error: Corpus too small. Need at least %d characters, got %zu\n", 
-               num_sequences + seq_len, corpus_size);
+               seq_len + 1, corpus_size);
         free(corpus);
         exit(1);
     }
+    
+    // Calculate spacing between sequences to spread them evenly across corpus
+    size_t usable_corpus_size = corpus_size - seq_len; // Reserve space for longest sequence
+    size_t spacing = usable_corpus_size / num_sequences;
+    
+    if (spacing == 0) {
+        printf("Warning: Corpus too small for even distribution, using overlap\n");
+        spacing = 1;
+    }
+    
+    printf("Distributing %d sequences across %zu characters with spacing %zu\n", 
+           num_sequences, corpus_size, spacing);
     
     // Allocate memory for sequences
     *X = (float*)malloc(num_sequences * seq_len * input_dim * sizeof(float));
@@ -115,19 +127,17 @@ void generate_text_sequence_data(float** X, float** y, int num_sequences, int se
     
     // Generate sequences
     for (int seq = 0; seq < num_sequences; seq++) {
-        // Start position for this sequence (staggered by 1 character)
-        size_t start_pos = seq;
+        // Evenly distribute starting positions across corpus
+        size_t start_pos = seq * spacing;
+        
+        // Ensure we don't go beyond corpus bounds
+        if (start_pos + seq_len >= corpus_size) {
+            start_pos = corpus_size - seq_len - 1;
+        }
         
         for (int t = 0; t < seq_len; t++) {
             size_t char_pos = start_pos + t;
             size_t next_char_pos = char_pos + 1;
-            
-            // Ensure we don't go beyond corpus
-            if (next_char_pos >= corpus_size) {
-                // Wrap around to beginning
-                char_pos = char_pos % corpus_size;
-                next_char_pos = (char_pos + 1) % corpus_size;
-            }
             
             // Get current character and its embedding
             unsigned char current_char = (unsigned char)corpus[char_pos];
@@ -151,7 +161,7 @@ void generate_text_sequence_data(float** X, float** y, int num_sequences, int se
     free(corpus);
 }
 
-// Save sequence data to CSV for inspection
+// Save sequence data to CSV for inspection (no artificial truncation)
 void save_text_sequence_data_to_csv(float* X, float* y, int num_sequences, int seq_len, 
                                    int input_dim, int output_dim, const char* filename) {
     FILE* file = fopen(filename, "w");
@@ -168,25 +178,22 @@ void save_text_sequence_data_to_csv(float* X, float* y, int num_sequences, int s
         fprintf(file, "x%d,", i);
     }
     
-    // Output features (one-hot) - only show first 20 for readability
-    int show_outputs = (output_dim > 20) ? 20 : output_dim;
-    for (int i = 0; i < show_outputs - 1; i++) {
+    // Output features (one-hot)
+    for (int i = 0; i < output_dim - 1; i++) {
         fprintf(file, "y%d,", i);
     }
-    fprintf(file, "y%d,target_char\n", show_outputs - 1);
+    fprintf(file, "y%d,target_char\n", output_dim - 1);
     
-    // Write data (only first 10 sequences for readability)
-    int show_sequences = (num_sequences > 10) ? 10 : num_sequences;
-    for (int seq = 0; seq < show_sequences; seq++) {
+    // Write data
+    for (int seq = 0; seq < num_sequences; seq++) {
         for (int t = 0; t < seq_len; t++) {
             int x_idx = seq * seq_len * input_dim + t * input_dim;
             int y_idx = seq * seq_len * output_dim + t * output_dim;
             
             fprintf(file, "%d,%d,", seq, t);
             
-            // Input features (embeddings) - only show first 10 for readability
-            int show_inputs = (input_dim > 10) ? 10 : input_dim;
-            for (int j = 0; j < show_inputs; j++) {
+            // All input features (embeddings)
+            for (int j = 0; j < input_dim; j++) {
                 fprintf(file, "%.6f,", X[x_idx + j]);
             }
             
@@ -199,17 +206,85 @@ void save_text_sequence_data_to_csv(float* X, float* y, int num_sequences, int s
                 }
             }
             
-            // Output values (one-hot) - only show first few
-            for (int j = 0; j < show_outputs - 1; j++) {
+            // All output values (one-hot)
+            for (int j = 0; j < output_dim - 1; j++) {
                 fprintf(file, "%.0f,", y[y_idx + j]);
             }
-            fprintf(file, "%.0f,%c\n", y[y_idx + show_outputs - 1], 
+            fprintf(file, "%.0f,%c\n", y[y_idx + output_dim - 1], 
                     (target_char >= 32 && target_char < 127) ? target_char : '?');
         }
     }
     
     fclose(file);
     printf("Text sequence data saved to %s\n", filename);
+}
+
+// Load CSV sequence data
+void load_text_sequence_data_from_csv(const char* filename, float** X, float** y, 
+                                     int* num_sequences, int* seq_len, 
+                                     int input_dim, int output_dim) {
+    FILE* file = fopen(filename, "r");
+    if (!file) {
+        printf("Error opening file: %s\n", filename);
+        exit(1);
+    }
+    
+    // Skip header
+    char buffer[65536]; // Larger buffer for more features
+    fgets(buffer, sizeof(buffer), file);
+    
+    // Count lines and determine dimensions
+    int max_seq_id = -1;
+    int max_time_step = -1;
+    
+    while (fgets(buffer, sizeof(buffer), file)) {
+        int seq_id, time_step;
+        sscanf(buffer, "%d,%d,", &seq_id, &time_step);
+        if (seq_id > max_seq_id) max_seq_id = seq_id;
+        if (time_step > max_time_step) max_time_step = time_step;
+    }
+    
+    *num_sequences = max_seq_id + 1;
+    *seq_len = max_time_step + 1;
+    
+    // Allocate memory
+    *X = (float*)malloc((*num_sequences) * (*seq_len) * input_dim * sizeof(float));
+    *y = (float*)malloc((*num_sequences) * (*seq_len) * output_dim * sizeof(float));
+    
+    // Reset file pointer and skip header again
+    fseek(file, 0, SEEK_SET);
+    fgets(buffer, sizeof(buffer), file);
+    
+    // Read data
+    while (fgets(buffer, sizeof(buffer), file)) {
+        int seq_id, time_step;
+        char* ptr = buffer;
+        
+        // Parse seq_id and time_step
+        seq_id = strtol(ptr, &ptr, 10);
+        ptr++; // skip comma
+        time_step = strtol(ptr, &ptr, 10);
+        ptr++; // skip comma
+        
+        int x_idx = seq_id * (*seq_len) * input_dim + time_step * input_dim;
+        int y_idx = seq_id * (*seq_len) * output_dim + time_step * output_dim;
+        
+        // Parse input features
+        for (int i = 0; i < input_dim; i++) {
+            (*X)[x_idx + i] = strtof(ptr, &ptr);
+            ptr++; // skip comma
+        }
+        
+        // Parse output values (skip the character column at the end)
+        for (int i = 0; i < output_dim; i++) {
+            (*y)[y_idx + i] = strtof(ptr, &ptr);
+            if (i < output_dim - 1) ptr++; // skip comma
+        }
+    }
+    
+    fclose(file);
+    printf("Loaded text sequence data from %s\n", filename);
+    printf("Sequences: %d, Sequence length: %d\n", *num_sequences, *seq_len);
 }
 
 #endif

@@ -2,10 +2,9 @@
 #define SLM_H
 
 #include "ssm/gpu/ssm.h"
-#include <cuda_runtime.h>
 
 typedef struct {
-    SSM* ssm;                    // Reuse SSM implementation
+    SSM* ssm;                   // Reuse SSM implementation
     float* d_softmax;           // seq_len x batch_size x output_dim (probabilities)
     float* d_log_probs;         // seq_len x batch_size (log probabilities for targets)
     float* d_loss_buffer;       // Temporary buffer for loss calculation
@@ -51,7 +50,7 @@ __global__ void cross_entropy_loss_kernel_slm(float* log_probs, float* softmax_p
     // Find target index (where one-hot is 1)
     float log_prob = 0.0f;
     for (int i = 0; i < vocab_size; i++) {
-        if (targets_ptr[i] == 1.0f) {
+        if (targets_ptr[i] > 0.5f) { // Use > 0.5f instead of == 1.0f for floating point safety
             float prob = fmaxf(softmax_ptr[i], 1e-15f); // Avoid log(0)
             log_prob = -logf(prob);
             break;
@@ -97,7 +96,7 @@ void free_slm(SLM* slm) {
     }
 }
 
-// Forward pass (reuse SSM + add softmax)
+// Forward pass
 void forward_pass_slm(SLM* slm, float* d_X) {
     // Use SSM forward pass to get logits
     forward_pass_ssm(slm->ssm, d_X);
@@ -112,7 +111,7 @@ void forward_pass_slm(SLM* slm, float* d_X) {
     CHECK_CUDA(cudaDeviceSynchronize());
 }
 
-// Calculate cross-entropy loss on GPU
+// Calculate cross-entropy loss
 float calculate_loss_slm(SLM* slm, float* d_y) {
     // Calculate log probabilities for each timestep
     for (int t = 0; t < slm->ssm->seq_len; t++) {
@@ -147,27 +146,27 @@ float calculate_loss_slm(SLM* slm, float* d_y) {
     return total_loss / total_elements;
 }
 
-// Zero gradients (reuse SSM)
+// Zero gradients
 void zero_gradients_slm(SLM* slm) {
     zero_gradients_ssm(slm->ssm);
 }
 
-// Backward pass (reuse SSM)
+// Backward pass
 void backward_pass_slm(SLM* slm, float* d_X) {
     backward_pass_ssm(slm->ssm, d_X);
 }
 
-// Update weights (reuse SSM)
+// Update weights
 void update_weights_slm(SLM* slm, float learning_rate) {
     update_weights_ssm(slm->ssm, learning_rate);
 }
 
-// Save model (reuse SSM + save embeddings)
+// Save model
 void save_slm(SLM* slm, const char* filename) {
     save_ssm(slm->ssm, filename);
 }
 
-// Load model (reuse SSM + load embeddings)
+// Load model
 SLM* load_slm(const char* filename, int custom_batch_size) {
     // First load the SSM
     SSM* ssm = load_ssm(filename, custom_batch_size);

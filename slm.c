@@ -33,7 +33,7 @@ void reshape_data_for_batch_processing(float* X, float* y,
 int main() {
     srand(time(NULL));
     
-    // Parameters matching the new specifications
+    // Parameters
     const int input_dim = 512;      // EMBED_DIM - embedding dimension
     const int state_dim = 1024;     // Hidden state dimension
     const int seq_len = 1024;       // Sequence length
@@ -52,7 +52,7 @@ int main() {
     generate_text_sequence_data(&X, &y, num_sequences, seq_len, input_dim, output_dim, 
                                "combined_corpus.txt");
     
-    // Reshape data for batch processing (same as SSM)
+    // Reshape data for batch processing
     float *X_reshaped, *y_reshaped;
     reshape_data_for_batch_processing(X, y, &X_reshaped, &y_reshaped,
                                     num_sequences, seq_len, input_dim, output_dim);
