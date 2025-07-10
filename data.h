@@ -115,6 +115,27 @@ void generate_text_sequence_data(float** X, float** y, int num_sequences, int se
     printf("Distributing %d sequences across %zu characters with spacing %zu\n", 
            num_sequences, corpus_size, spacing);
     
+    // DEBUG: Print first few sequences
+    printf("\n=== TRAINING SEQUENCES ===\n");
+    for (int seq = 0; seq < num_sequences && seq < 5; seq++) {  // Only show first 5
+        size_t start_pos = seq * spacing;
+        if (start_pos + seq_len >= corpus_size) {
+            start_pos = corpus_size - seq_len - 1;
+        }
+        
+        printf("SEQ %d (pos %zu): \"", seq, start_pos);
+        for (int i = 0; i < 100 && i < seq_len; i++) {  // Show first 100 chars
+            char c = corpus[start_pos + i];
+            if (c >= 32 && c <= 126) printf("%c", c);
+            else if (c == '\n') printf("\\n");
+            else if (c == '\t') printf("\\t");
+            else printf("\\x%02x", (unsigned char)c);
+        }
+        printf("%s\"\n", seq_len > 100 ? "..." : "");
+    }
+    if (num_sequences > 5) printf("... (%d more sequences)\n", num_sequences - 5);
+    printf("==========================\n\n");
+    
     // Allocate memory for sequences
     *X = (float*)malloc(num_sequences * seq_len * input_dim * sizeof(float));
     *y = (float*)malloc(num_sequences * seq_len * output_dim * sizeof(float));
