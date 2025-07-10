@@ -171,10 +171,9 @@ void forward_pass_slm(SLM* slm, unsigned char* d_X) {
     int batch_size = slm->ssm->batch_size;
     
     // Embed characters
-    int block_size = 256;
-    int grid_x = (batch_size + block_size - 1) / block_size;
-    int grid_y = seq_len;
-    embedding_lookup_kernel<<<dim3(grid_x, grid_y), block_size>>>(
+    dim3 block(256);
+    dim3 grid((batch_size + 255) / 256, seq_len);
+    embedding_lookup_kernel<<<grid, block>>>(
         slm->d_embedded_input, slm->d_embeddings, d_X, batch_size, slm->embed_dim
     );
     
@@ -183,8 +182,8 @@ void forward_pass_slm(SLM* slm, unsigned char* d_X) {
     
     // Apply softmax
     int total_tokens = seq_len * batch_size;
-    int blocks = (total_tokens + block_size - 1) / block_size;
-    softmax_kernel<<<blocks, block_size>>>(
+    int blocks = (total_tokens + 255) / 256;
+    softmax_kernel<<<blocks, 256>>>(
         slm->d_softmax, slm->ssm->d_predictions, total_tokens, slm->vocab_size
     );
 }
@@ -196,14 +195,13 @@ float calculate_loss_slm(SLM* slm, unsigned char* d_y) {
     int total_tokens = seq_len * batch_size;
     
     // Compute cross-entropy gradient (softmax - one_hot) for backprop
-    int block_size = 256;
-    int blocks = (total_tokens + block_size - 1) / block_size;
-    cross_entropy_gradient_kernel<<<blocks, block_size>>>(
+    int blocks = (total_tokens + 255) / 256;
+    cross_entropy_gradient_kernel<<<blocks, 256>>>(
         slm->ssm->d_error, slm->d_softmax, d_y, total_tokens, slm->vocab_size
     );
     
     // Calculate actual cross-entropy loss: -log(softmax[target])
-    cross_entropy_loss_kernel<<<blocks, block_size>>>(
+    cross_entropy_loss_kernel<<<blocks, 256>>>(
         slm->d_losses, slm->d_softmax, d_y, total_tokens, slm->vocab_size
     );
     
@@ -257,10 +255,9 @@ void backward_pass_slm(SLM* slm, unsigned char* d_X) {
     }
     
     // Accumulate embedding gradients
-    int block_size = 256;
-    int grid_x = (slm->ssm->batch_size + block_size - 1) / block_size;
-    int grid_y = slm->ssm->seq_len;
-    embedding_gradient_kernel<<<dim3(grid_x, grid_y), block_size>>>(
+    dim3 block(256);
+    dim3 grid((slm->ssm->batch_size + 255) / 256, slm->ssm->seq_len);
+    embedding_gradient_kernel<<<grid, block>>>(
         slm->d_embeddings_grad, slm->d_input_gradients, d_X, 
         slm->ssm->batch_size, slm->embed_dim
     );
@@ -273,14 +270,13 @@ void update_weights_slm(SLM* slm, float learning_rate) {
     
     // Update embeddings
     int embed_size = slm->vocab_size * slm->embed_dim;
-    int block_size = 256;
-    int blocks = (embed_size + block_size - 1) / block_size;
+    int blocks = (embed_size + 255) / 256;
     
     float beta1_t = powf(slm->ssm->beta1, slm->ssm->t);
     float beta2_t = powf(slm->ssm->beta2, slm->ssm->t);
     float alpha_t = learning_rate * sqrtf(1.0f - beta2_t) / (1.0f - beta1_t);
     
-    adamw_update_kernel_ssm<<<blocks, block_size>>>(
+    adamw_update_kernel_ssm<<<blocks, 256>>>(
         slm->d_embeddings, slm->d_embeddings_grad,
         slm->d_embeddings_m, slm->d_embeddings_v,
         slm->ssm->beta1, slm->ssm->beta2, slm->ssm->epsilon,
