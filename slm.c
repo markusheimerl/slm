@@ -39,14 +39,7 @@ int main() {
     const int seq_len = 1024;       // Sequence length
     const int num_sequences = 64;   // Batch size (number of sequences)
     const int output_dim = 256;     // MAX_CHAR_VALUE - vocabulary size for one-hot
-    
-    printf("Generating text sequence data...\n");
-    printf("Input dim (embedding): %d\n", input_dim);
-    printf("State dim (hidden): %d\n", state_dim);
-    printf("Output dim (vocab): %d\n", output_dim);
-    printf("Sequence length: %d\n", seq_len);
-    printf("Number of sequences: %d\n", num_sequences);
-    
+
     // Generate text sequence data from corpus
     float *X, *y;
     generate_text_sequence_data(&X, &y, num_sequences, seq_len, input_dim, output_dim, 
