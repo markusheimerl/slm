@@ -179,9 +179,14 @@ void save_text_sequence_data_to_csv(float* X, float* y, int num_sequences, int s
     }
     
     // Output features (one-hot)
-    for (int i = 0; i < output_dim - 1; i++) {
-        fprintf(file, "y%d,", i);
+    for (int i = 0; i < output_dim; i++) {
+        fprintf(file, "y%d", i);
+        if(i < output_dim - 1) {
+            fprintf(file, ",");
+        }
     }
+
+    fprintf(file, "\n");
     
     // Write data
     for (int seq = 0; seq < num_sequences; seq++) {
@@ -197,9 +202,14 @@ void save_text_sequence_data_to_csv(float* X, float* y, int num_sequences, int s
             }
             
             // All output values (one-hot)
-            for (int j = 0; j < output_dim - 1; j++) {
-                fprintf(file, "%.0f,", y[y_idx + j]);
+            for (int j = 0; j < output_dim; j++) {
+                fprintf(file, "%.1f", y[y_idx + j]);
+                if (j < output_dim - 1) {
+                    fprintf(file, ",");
+                }
             }
+
+            fprintf(file, "\n");
         }
     }
     
