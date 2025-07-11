@@ -68,6 +68,28 @@ void generate_text_slm(SLM* slm, const char* seed_text, int generation_length, f
                                     &beta_add, d_h_next, slm->ssm->state_dim));
         }
         
+        // O_t = H_t σ(H_t)
+        int block_size = 256;
+        int num_blocks = (slm->ssm->state_dim + block_size - 1) / block_size;
+        swish_forward_kernel_ssm<<<num_blocks, block_size>>>(d_o_current, d_h_next, slm->ssm->state_dim);
+        
+        // Y_t = O_t C^T + X_t D^T
+        // Y_t = O_t C^T
+        CHECK_CUBLAS(cublasSgemm(slm->ssm->cublas_handle,
+                                CUBLAS_OP_T, CUBLAS_OP_N,
+                                slm->ssm->output_dim, 1, slm->ssm->state_dim,
+                                &alpha, slm->ssm->d_C, slm->ssm->state_dim,
+                                d_o_current, slm->ssm->state_dim,
+                                &beta, d_y_current, slm->ssm->output_dim));
+        
+        // Y_t += X_t D^T
+        CHECK_CUBLAS(cublasSgemm(slm->ssm->cublas_handle,
+                                CUBLAS_OP_T, CUBLAS_OP_N,
+                                slm->ssm->output_dim, 1, slm->ssm->input_dim,
+                                &alpha, slm->ssm->d_D, slm->ssm->input_dim,
+                                slm->d_embedded_input, slm->ssm->input_dim,
+                                &beta_add, d_y_current, slm->ssm->output_dim));
+        
         // Swap current and next
         float* temp = d_h_current;
         d_h_current = d_h_next;
@@ -181,7 +203,7 @@ void generate_text_slm(SLM* slm, const char* seed_text, int generation_length, f
         d_h_next = temp;
     }
     
-    printf("\n\n");
+    printf("\n");
     
     // Cleanup
     free(h_input);
