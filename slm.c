@@ -220,10 +220,10 @@ int main() {
     
     // Model parameters
     const int embed_dim = 512;
-    const int state_dim = 256;
+    const int state_dim = 512;
     const int vocab_size = 256;
     const int seq_len = 1024;
-    const int batch_size = 128;
+    const int batch_size = 64;
     
     // Training parameters
     const int num_epochs = 10000;
