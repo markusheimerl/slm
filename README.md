@@ -5,7 +5,7 @@ Consider a character-level language model built on a state space model backbone,
 
 $$
 \begin{align*}
-E_t &= W_E[X_t] \in \mathbb{R}^{256 \times 512} \\
+E_t &= W_E[X_t] \\
 H_t &= E_tB^T + H_{t-1}A^T \\
 O_t &= H_t\sigma(H_t) \\
 Y_t &= O_tC^T + E_tD^T \\
@@ -19,9 +19,9 @@ For language modeling, the cross-entropy loss between predicted and actual next 
 
 $$
 \begin{align*}
-\mathcal{L} &= -\frac{1}{T \cdot B}\sum_{t=1}^{T}\sum_{b=1}^{B} \log P_{t,b,y_{t,b}} \\
-\frac{\partial \mathcal{L}}{\partial Y_t} &= P_t - \mathbf{1}_{y_t} \\
-\frac{\partial \mathcal{L}}{\partial W_E[c]} &= \sum_{t,b: X_{t,b}=c} (B^T\frac{\partial \mathcal{L}}{\partial H_t} + D^T\frac{\partial \mathcal{L}}{\partial Y_t})
+\mathcal{L} &= -\frac{1}{T \cdot B}\sum_{t=1}^{T}\sum_{b=1}^{B} \log P_{t,b,y_{t,b}} \
+\frac{\partial \mathcal{L}}{\partial Y_t} &= P_t - \mathbf{1}{y_t} \
+\frac{\partial \mathcal{L}}{\partial W_E[c]} &= \sum{\substack{t,b \ X_{t,b}=c}} \left(B^T\frac{\partial \mathcal{L}}{\partial H_t} + D^T\frac{\partial \mathcal{L}}{\partial Y_t}\right)
 \end{align*}
 $$
 
