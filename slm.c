@@ -233,7 +233,7 @@ int main(int argc, char* argv[]) {
     const int batch_size = 64;
     
     // Training parameters
-    const int num_epochs = 1000;
+    const int num_batches = 1000;
     const float learning_rate = 0.0005f;
     
     // Load corpus
@@ -271,7 +271,7 @@ int main(int argc, char* argv[]) {
     }
     
     // Training loop
-    for (int epoch = 0; epoch <= num_epochs; epoch++) {
+    for (int batch = 0; batch <= num_batches; batch++) {
         // Generate fresh training data from random corpus locations
         generate_char_sequences_from_corpus(&input_chars, &target_chars, 
                                           batch_size, seq_len, corpus, corpus_size);
@@ -296,20 +296,20 @@ int main(int argc, char* argv[]) {
         // Calculate loss
         float loss = calculate_loss_slm(slm, d_target_chars);
         
-        if (epoch % 10 == 0) {
-            printf("Epoch [%d/%d], Loss: %.6f\n", epoch, num_epochs, loss);
+        if (batch % 10 == 0) {
+            printf("Batch [%d/%d], Loss: %.6f\n", batch, num_batches, loss);
         }
         
-        // Generate sample text every 100 epochs
-        if (epoch % 100 == 0 && epoch > 0) {
-            printf("\n--- Sample Generation at Epoch %d ---\n", epoch);
+        // Generate sample text every 100 batchs
+        if (batch % 100 == 0 && batch > 0) {
+            printf("\n--- Sample Generation at Batch %d ---\n", batch);
             generate_text_slm(slm, "The quick brown fox", 100, 0.8f);
             generate_text_slm(slm, "Once upon a time", 100, 0.8f);
             generate_text_slm(slm, "In the beginning", 100, 0.8f);
             printf("--- End Sample Generation ---\n\n");
         }
         
-        if (epoch == num_epochs) break;
+        if (batch == num_batches) break;
         
         // Backward pass
         zero_gradients_slm(slm);
