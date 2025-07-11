@@ -5,7 +5,7 @@ Consider a character-level language model built on a state space model backbone,
 
 $$
 \begin{align*}
-E_t &= W_E[X_t] \in \mathbb{R}^{\text{batch\_size} \times \text{embed\_dim}} \\
+E_t &= W_E[X_t] \in \mathbb{R}^{256 \times 512} \\
 H_t &= E_tB^T + H_{t-1}A^T \\
 O_t &= H_t\sigma(H_t) \\
 Y_t &= O_tC^T + E_tD^T \\
