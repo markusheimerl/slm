@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <math.h>
 #include <time.h>
+#include <string.h>
 #include "data.h"
 #include "slm.h"
 
@@ -215,8 +216,14 @@ void generate_text_slm(SLM* slm, const char* seed_text, int generation_length, f
     cudaFree(d_y_current);
 }
 
-int main() {
+int main(int argc, char* argv[]) {
     srand(time(NULL));
+    
+    // Parse command line arguments
+    char* model_file = NULL;
+    if (argc > 1) {
+        model_file = argv[1];
+    }
     
     // Model parameters
     const int embed_dim = 512;
@@ -226,7 +233,7 @@ int main() {
     const int batch_size = 64;
     
     // Training parameters
-    const int num_epochs = 10000;
+    const int num_epochs = 1000;
     const float learning_rate = 0.0005f;
     
     // Load corpus
@@ -248,8 +255,20 @@ int main() {
     CHECK_CUDA(cudaMalloc(&d_input_chars, seq_len * batch_size * sizeof(unsigned char)));
     CHECK_CUDA(cudaMalloc(&d_target_chars, seq_len * batch_size * sizeof(unsigned char)));
     
-    // Initialize model
-    SLM* slm = init_slm(embed_dim, state_dim, vocab_size, seq_len, batch_size);
+    // Initialize or load model
+    SLM* slm;
+    if (model_file) {
+        printf("Loading model from %s\n", model_file);
+        slm = load_slm(model_file, batch_size);
+        if (!slm) {
+            printf("Failed to load model from %s\n", model_file);
+            return 1;
+        }
+        printf("Continuing training from loaded model\n");
+    } else {
+        printf("Initializing new model\n");
+        slm = init_slm(embed_dim, state_dim, vocab_size, seq_len, batch_size);
+    }
     
     // Training loop
     for (int epoch = 0; epoch <= num_epochs; epoch++) {
@@ -301,13 +320,13 @@ int main() {
     }
     
     // Save model and final batch of data
-    char model_file[64], data_file[64];
+    char model_filename[64], data_filename[64];
     time_t now = time(NULL);
-    strftime(model_file, sizeof(model_file), "%Y%m%d_%H%M%S_model.bin", localtime(&now));
-    strftime(data_file, sizeof(data_file), "%Y%m%d_%H%M%S_data.csv", localtime(&now));
+    strftime(model_filename, sizeof(model_filename), "%Y%m%d_%H%M%S_model.bin", localtime(&now));
+    strftime(data_filename, sizeof(data_filename), "%Y%m%d_%H%M%S_data.csv", localtime(&now));
     
-    save_slm(slm, model_file);
-    save_sequences_to_csv(input_chars, target_chars, batch_size, seq_len, data_file);
+    save_slm(slm, model_filename);
+    save_sequences_to_csv(input_chars, target_chars, batch_size, seq_len, data_filename);
     
     // Cleanup
     free(corpus);
