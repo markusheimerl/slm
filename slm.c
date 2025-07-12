@@ -18,7 +18,6 @@ int main(int argc, char* argv[]) {
     // Model parameters
     const int embed_dim = 512;
     const int state_dim = 512;
-    const int vocab_size = 256;
     const int seq_len = 1024;
     const int batch_size = 128;
     
@@ -57,7 +56,7 @@ int main(int argc, char* argv[]) {
         printf("Continuing training from loaded model\n");
     } else {
         printf("Initializing new model\n");
-        slm = init_slm(embed_dim, state_dim, vocab_size, seq_len, batch_size);
+        slm = init_slm(embed_dim, state_dim, seq_len, batch_size);
     }
     
     // Training loop

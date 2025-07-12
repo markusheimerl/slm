@@ -111,16 +111,16 @@ __global__ void embedding_gradient_kernel(float* embed_grad, float* input_grad, 
 }
 
 // Initialize SLM
-SLM* init_slm(int input_dim, int state_dim, int output_dim, int seq_len, int batch_size) {
+SLM* init_slm(int embed_dim, int state_dim, int seq_len, int batch_size) {
     SLM* slm = (SLM*)malloc(sizeof(SLM));
-    
-    // Initialize SSM
-    slm->ssm = init_ssm(input_dim, state_dim, output_dim, seq_len, batch_size);
-    
+        
     // Set dimensions
-    slm->vocab_size = output_dim;
-    slm->embed_dim = input_dim;
-    
+    slm->vocab_size = 256;
+    slm->embed_dim = embed_dim;
+
+    // Initialize SSM
+    slm->ssm = init_ssm(embed_dim, state_dim, slm->vocab_size, seq_len, batch_size);
+
     // Allocate embedding matrices
     CHECK_CUDA(cudaMalloc(&slm->d_embeddings, slm->vocab_size * slm->embed_dim * sizeof(float)));
     CHECK_CUDA(cudaMalloc(&slm->d_embeddings_grad, slm->vocab_size * slm->embed_dim * sizeof(float)));
@@ -128,9 +128,9 @@ SLM* init_slm(int input_dim, int state_dim, int output_dim, int seq_len, int bat
     CHECK_CUDA(cudaMalloc(&slm->d_embeddings_v, slm->vocab_size * slm->embed_dim * sizeof(float)));
     
     // Allocate working buffers
-    CHECK_CUDA(cudaMalloc(&slm->d_embedded_input, seq_len * batch_size * input_dim * sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&slm->d_softmax, seq_len * batch_size * output_dim * sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&slm->d_input_gradients, seq_len * batch_size * input_dim * sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&slm->d_embedded_input, seq_len * batch_size * embed_dim * sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&slm->d_softmax, seq_len * batch_size * slm->vocab_size * sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&slm->d_input_gradients, seq_len * batch_size * embed_dim * sizeof(float)));
     CHECK_CUDA(cudaMalloc(&slm->d_losses, seq_len * batch_size * sizeof(float)));
     
     // Initialize embeddings
