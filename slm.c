@@ -28,10 +28,6 @@ int main(int argc, char* argv[]) {
     // Load corpus
     size_t corpus_size;
     char* corpus = load_corpus("gutenberg_corpus.txt", &corpus_size);
-    if (!corpus) {
-        printf("Failed to load corpus\n");
-        return 1;
-    }
     
     // Pre-allocate memory for sequences
     unsigned char *input_chars = (unsigned char*)malloc(batch_size * seq_len * sizeof(unsigned char));
