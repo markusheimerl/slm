@@ -230,11 +230,11 @@ int main(int argc, char* argv[]) {
     const int state_dim = 512;
     const int vocab_size = 256;
     const int seq_len = 1024;
-    const int batch_size = 64;
+    const int batch_size = 128;
     
     // Training parameters
     const int num_batches = 1000;
-    const float learning_rate = 0.0005f;
+    const float learning_rate = 0.0001f;
     
     // Load corpus
     size_t corpus_size;
