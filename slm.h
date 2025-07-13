@@ -25,7 +25,7 @@ typedef struct {
     int embed_dim;
 } SLM;
 
-// CUDA kernel for embedding lookup
+// CUDA kernel for embedding lookup: E_t = W_E[X_t]
 __global__ void embedding_lookup_kernel(float* output, float* embeddings, unsigned char* chars, 
                                        int batch_size, int embed_dim) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -39,7 +39,7 @@ __global__ void embedding_lookup_kernel(float* output, float* embeddings, unsign
     }
 }
 
-// CUDA kernel for softmax
+// CUDA kernel for softmax: P_t = exp(L_t) / Σ_c exp(L_{t,c})
 __global__ void softmax_kernel(float* output, float* input, int batch_size, int vocab_size) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= batch_size) return;
@@ -66,7 +66,7 @@ __global__ void softmax_kernel(float* output, float* input, int batch_size, int 
     }
 }
 
-// CUDA kernel for cross-entropy gradient
+// CUDA kernel for cross-entropy gradient: ∂L/∂L_t = P_t - 1_{y_t}
 __global__ void cross_entropy_gradient_kernel(float* grad, float* softmax, unsigned char* targets, 
                                              int batch_size, int vocab_size) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -83,7 +83,7 @@ __global__ void cross_entropy_gradient_kernel(float* grad, float* softmax, unsig
     grad_ptr[target] -= 1.0f;
 }
 
-// CUDA kernel for cross-entropy loss calculation
+// CUDA kernel for cross-entropy loss: L = -log(P_{y_t})
 __global__ void cross_entropy_loss_kernel(float* losses, float* softmax, unsigned char* targets, 
                                          int batch_size, int vocab_size) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -97,7 +97,7 @@ __global__ void cross_entropy_loss_kernel(float* losses, float* softmax, unsigne
     losses[idx] = -logf(prob);
 }
 
-// CUDA kernel for embedding gradient accumulation
+// CUDA kernel for embedding gradient accumulation: ∂L/∂W_E[c] = Σ_{t,b: X_{t,b}=c} ∂L/∂E_t
 __global__ void embedding_gradient_kernel(float* embed_grad, float* input_grad, unsigned char* chars,
                                          int batch_size, int embed_dim) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -138,7 +138,7 @@ SLM* init_slm(int embed_dim, int state_dim, int seq_len, int batch_size) {
     CHECK_CUDA(cudaMalloc(&slm->d_input_gradients, seq_len * batch_size * embed_dim * sizeof(float)));
     CHECK_CUDA(cudaMalloc(&slm->d_losses, seq_len * batch_size * sizeof(float)));
     
-    // Initialize embeddings
+    // Initialize embeddings with Xavier initialization
     float* h_embeddings = (float*)malloc(slm->vocab_size * slm->embed_dim * sizeof(float));
     float scale = sqrtf(2.0f / slm->embed_dim);
     for (int i = 0; i < slm->vocab_size * slm->embed_dim; i++) {
@@ -176,20 +176,24 @@ void forward_pass_slm(SLM* slm, unsigned char* d_X) {
     int seq_len = slm->ssm->seq_len;
     int batch_size = slm->ssm->batch_size;
     
-    // Embed characters
+    // E_t = W_E[X_t] - Character embedding lookup
     dim3 block(256);
     dim3 grid((batch_size + 255) / 256, seq_len);
     embedding_lookup_kernel<<<grid, block>>>(
         slm->d_embedded_input, slm->d_embeddings, d_X, batch_size, slm->embed_dim
     );
     
-    // Forward through SSM
+    // H_t = E_t B^T + H_{t-1} A^T
+    // O_t = H_t σ(H_t)  
+    // Y_t = O_t C^T + E_t D^T - Forward through SSM
     forward_pass_ssm(slm->ssm, slm->d_embedded_input);
 
-    // Forward through MLP
+    // Z_t = Y_t W_1
+    // A_t = Z_t σ(Z_t)
+    // L_t = A_t W_2 - Forward through MLP
     forward_pass_mlp(slm->mlp, slm->ssm->d_predictions);
     
-    // Apply softmax
+    // P_t = softmax(L_t) - Apply softmax for probability distribution
     int total_tokens = seq_len * batch_size;
     int blocks = (total_tokens + 255) / 256;
     softmax_kernel<<<blocks, 256>>>(
@@ -197,19 +201,19 @@ void forward_pass_slm(SLM* slm, unsigned char* d_X) {
     );
 }
 
-// Calculate loss
+// Calculate loss: L = -1/(T·B) Σ_t Σ_b log P_{t,b,y_{t,b}}
 float calculate_loss_slm(SLM* slm, unsigned char* d_y) {
     int seq_len = slm->ssm->seq_len;
     int batch_size = slm->ssm->batch_size;
     int total_tokens = seq_len * batch_size;
     
-    // Compute cross-entropy gradient (softmax - one_hot) for backprop
+    // ∂L/∂L_t = P_t - 1_{y_t} - Compute cross-entropy gradient (softmax - one_hot) for backprop
     int blocks = (total_tokens + 255) / 256;
     cross_entropy_gradient_kernel<<<blocks, 256>>>(
         slm->mlp->d_error, slm->d_softmax, d_y, total_tokens, slm->vocab_size
     );
     
-    // Calculate actual cross-entropy loss: -log(softmax[target])
+    // L = -log(P_{y_t}) - Calculate actual cross-entropy loss
     cross_entropy_loss_kernel<<<blocks, 256>>>(
         slm->d_losses, slm->d_softmax, d_y, total_tokens, slm->vocab_size
     );
@@ -232,7 +236,10 @@ void zero_gradients_slm(SLM* slm) {
 
 // Backward pass
 void backward_pass_slm(SLM* slm, unsigned char* d_X) {
-    // Backward through MLP
+    // ∂L/∂W_2 = A_t^T (∂L/∂L_t)
+    // ∂L/∂A_t = (∂L/∂L_t)(W_2)^T
+    // ∂L/∂Z_t = ∂L/∂A_t ⊙ [σ(Z_t) + Z_t σ(Z_t)(1-σ(Z_t))]
+    // ∂L/∂W_1 = Y_t^T (∂L/∂Z_t) - Backward through MLP
     backward_pass_mlp(slm->mlp, slm->ssm->d_predictions);
     
     // Copy MLP input gradients to SSM
@@ -240,10 +247,15 @@ void backward_pass_slm(SLM* slm, unsigned char* d_X) {
     CHECK_CUDA(cudaMemcpy(slm->ssm->d_error, slm->mlp->d_error, 
                          total_elements * sizeof(float), cudaMemcpyDeviceToDevice));
     
-    // Backward through SSM
+    // ∂L/∂C = Σ_t (∂L/∂Y_t)^T O_t
+    // ∂L/∂D = Σ_t (∂L/∂Y_t)^T E_t  
+    // ∂L/∂O_t = (∂L/∂Y_t)C
+    // ∂L/∂H_t = ∂L/∂O_t ⊙ [σ(H_t) + H_t σ(H_t)(1-σ(H_t))] + (∂L/∂H_{t+1})A
+    // ∂L/∂A = Σ_t (∂L/∂H_t)^T H_{t-1}
+    // ∂L/∂B = Σ_t (∂L/∂H_t)^T E_t - Backward through SSM
     backward_pass_ssm(slm->ssm, slm->d_embedded_input);
     
-    // Compute input gradients
+    // ∂L/∂E_t = B^T (∂L/∂H_t) + D^T (∂L/∂Y_t) - Compute input gradients from SSM
     const float alpha = 1.0f;
     const float beta = 0.0f;
     
@@ -255,7 +267,7 @@ void backward_pass_slm(SLM* slm, unsigned char* d_X) {
         float* d_state_error_t = slm->ssm->d_state_error + t * slm->ssm->batch_size * slm->ssm->state_dim;
         float* d_output_error_t = slm->ssm->d_error + t * slm->ssm->batch_size * slm->ssm->output_dim;
         
-        // Gradient from state path
+        // ∂L/∂E_t += B^T (∂L/∂H_t) - Gradient from state path
         CHECK_CUBLAS(cublasSgemm(slm->ssm->cublas_handle,
                                 CUBLAS_OP_N, CUBLAS_OP_N,
                                 slm->ssm->input_dim, slm->ssm->batch_size, slm->ssm->state_dim,
@@ -263,7 +275,7 @@ void backward_pass_slm(SLM* slm, unsigned char* d_X) {
                                 d_state_error_t, slm->ssm->state_dim,
                                 &beta, d_input_grad_t, slm->ssm->input_dim));
         
-        // Gradient from output path
+        // ∂L/∂E_t += D^T (∂L/∂Y_t) - Gradient from output path
         CHECK_CUBLAS(cublasSgemm(slm->ssm->cublas_handle,
                                 CUBLAS_OP_N, CUBLAS_OP_N,
                                 slm->ssm->input_dim, slm->ssm->batch_size, slm->ssm->output_dim,
@@ -272,7 +284,7 @@ void backward_pass_slm(SLM* slm, unsigned char* d_X) {
                                 &alpha, d_input_grad_t, slm->ssm->input_dim));
     }
     
-    // Accumulate embedding gradients
+    // ∂L/∂W_E[c] = Σ_{t,b: X_{t,b}=c} ∂L/∂E_t - Accumulate embedding gradients
     dim3 block(256);
     dim3 grid((slm->ssm->batch_size + 255) / 256, slm->ssm->seq_len);
     embedding_gradient_kernel<<<grid, block>>>(
@@ -281,7 +293,7 @@ void backward_pass_slm(SLM* slm, unsigned char* d_X) {
     );
 }
 
-// Update weights
+// Update weights using AdamW: W = (1-λη)W - η·m̂/√v̂
 void update_weights_slm(SLM* slm, float learning_rate) {
     // Update SSM weights
     update_weights_ssm(slm->ssm, learning_rate);
@@ -289,7 +301,7 @@ void update_weights_slm(SLM* slm, float learning_rate) {
     // Update MLP weights
     update_weights_mlp(slm->mlp, learning_rate);
     
-    // Update embeddings
+    // Update embeddings using AdamW
     int embed_size = slm->vocab_size * slm->embed_dim;
     int blocks = (embed_size + 255) / 256;
     
@@ -297,6 +309,7 @@ void update_weights_slm(SLM* slm, float learning_rate) {
     float beta2_t = powf(slm->ssm->beta2, slm->ssm->t);
     float alpha_t = learning_rate * sqrtf(1.0f - beta2_t) / (1.0f - beta1_t);
     
+    // m = β₁m + (1-β₁)g, v = β₂v + (1-β₂)g², W = (1-λη)W - η·m̂/√v̂
     adamw_update_kernel_ssm<<<blocks, 256>>>(
         slm->d_embeddings, slm->d_embeddings_grad,
         slm->d_embeddings_m, slm->d_embeddings_v,
@@ -426,7 +439,7 @@ void generate_text_slm(SLM* slm, const char* seed_text, int generation_length, f
     CHECK_CUDA(cudaMalloc(&d_mlp_hidden, slm->mlp->hidden_dim * sizeof(float)));
     CHECK_CUDA(cudaMalloc(&d_mlp_output, slm->vocab_size * sizeof(float)));
     
-    // Initialize hidden state to zero
+    // H_0 = 0 - Initialize hidden state to zero
     CHECK_CUDA(cudaMemset(d_h_current, 0, slm->ssm->state_dim * sizeof(float)));
     
     printf("Seed: \"%s\"\nGenerated: ", seed_text);
@@ -436,7 +449,7 @@ void generate_text_slm(SLM* slm, const char* seed_text, int generation_length, f
         h_input[0] = (unsigned char)seed_text[i];
         CHECK_CUDA(cudaMemcpy(d_input, h_input, sizeof(unsigned char), cudaMemcpyHostToDevice));
         
-        // Embed the character
+        // E_t = W_E[X_t] - Embed the character
         dim3 block(256);
         dim3 grid(1, 1);
         embedding_lookup_kernel<<<grid, block>>>(
@@ -448,7 +461,7 @@ void generate_text_slm(SLM* slm, const char* seed_text, int generation_length, f
         const float beta = 0.0f;
         const float beta_add = 1.0f;
         
-        // H_t = X_t B^T
+        // H_t = E_t B^T
         CHECK_CUBLAS(cublasSgemm(slm->ssm->cublas_handle,
                                 CUBLAS_OP_T, CUBLAS_OP_N,
                                 slm->ssm->state_dim, 1, slm->ssm->input_dim,
@@ -471,7 +484,7 @@ void generate_text_slm(SLM* slm, const char* seed_text, int generation_length, f
         int num_blocks = (slm->ssm->state_dim + block_size - 1) / block_size;
         swish_forward_kernel_ssm<<<num_blocks, block_size>>>(d_o_current, d_h_next, slm->ssm->state_dim);
         
-        // Y_t = O_t C^T + X_t D^T
+        // Y_t = O_t C^T + E_t D^T
         // Y_t = O_t C^T
         CHECK_CUBLAS(cublasSgemm(slm->ssm->cublas_handle,
                                 CUBLAS_OP_T, CUBLAS_OP_N,
@@ -480,7 +493,7 @@ void generate_text_slm(SLM* slm, const char* seed_text, int generation_length, f
                                 d_o_current, slm->ssm->state_dim,
                                 &beta, d_mlp_input, slm->ssm->output_dim));
         
-        // Y_t += X_t D^T
+        // Y_t += E_t D^T
         CHECK_CUBLAS(cublasSgemm(slm->ssm->cublas_handle,
                                 CUBLAS_OP_T, CUBLAS_OP_N,
                                 slm->ssm->output_dim, 1, slm->ssm->input_dim,
@@ -488,8 +501,7 @@ void generate_text_slm(SLM* slm, const char* seed_text, int generation_length, f
                                 slm->d_embedded_input, slm->ssm->input_dim,
                                 &beta_add, d_mlp_input, slm->ssm->output_dim));
         
-        // MLP forward pass inline
-        // Layer 1: d_mlp_input -> d_mlp_hidden
+        // Z_t = Y_t W_1 - MLP layer 1
         CHECK_CUBLAS(cublasSgemv(slm->mlp->cublas_handle,
                                 CUBLAS_OP_T,
                                 slm->mlp->input_dim,
@@ -503,7 +515,7 @@ void generate_text_slm(SLM* slm, const char* seed_text, int generation_length, f
                                 d_mlp_hidden,
                                 1));
 
-        // Apply swish activation
+        // A_t = Z_t σ(Z_t) - Apply swish activation
         num_blocks = (slm->mlp->hidden_dim + block_size - 1) / block_size;
         swish_forward_kernel_mlp<<<num_blocks, block_size>>>(
             d_mlp_hidden,
@@ -511,7 +523,7 @@ void generate_text_slm(SLM* slm, const char* seed_text, int generation_length, f
             slm->mlp->hidden_dim
         );
 
-        // Layer 2: d_mlp_hidden -> d_mlp_output
+        // L_t = A_t W_2 - MLP layer 2
         CHECK_CUBLAS(cublasSgemv(slm->mlp->cublas_handle,
                                 CUBLAS_OP_T,
                                 slm->mlp->hidden_dim,
@@ -540,7 +552,7 @@ void generate_text_slm(SLM* slm, const char* seed_text, int generation_length, f
         
         CHECK_CUDA(cudaMemcpy(d_input, h_input, sizeof(unsigned char), cudaMemcpyHostToDevice));
         
-        // Embed the character
+        // E_t = W_E[X_t] - Embed the character
         dim3 block(256);
         dim3 grid(1, 1);
         embedding_lookup_kernel<<<grid, block>>>(
@@ -552,7 +564,7 @@ void generate_text_slm(SLM* slm, const char* seed_text, int generation_length, f
         const float beta = 0.0f;
         const float beta_add = 1.0f;
         
-        // H_t = X_t B^T + H_{t-1} A^T
+        // H_t = E_t B^T + H_{t-1} A^T
         CHECK_CUBLAS(cublasSgemm(slm->ssm->cublas_handle,
                                 CUBLAS_OP_T, CUBLAS_OP_N,
                                 slm->ssm->state_dim, 1, slm->ssm->input_dim,
@@ -572,7 +584,7 @@ void generate_text_slm(SLM* slm, const char* seed_text, int generation_length, f
         int num_blocks = (slm->ssm->state_dim + block_size - 1) / block_size;
         swish_forward_kernel_ssm<<<num_blocks, block_size>>>(d_o_current, d_h_next, slm->ssm->state_dim);
         
-        // Y_t = O_t C^T + X_t D^T
+        // Y_t = O_t C^T + E_t D^T
         // Y_t = O_t C^T
         CHECK_CUBLAS(cublasSgemm(slm->ssm->cublas_handle,
                                 CUBLAS_OP_T, CUBLAS_OP_N,
@@ -581,7 +593,7 @@ void generate_text_slm(SLM* slm, const char* seed_text, int generation_length, f
                                 d_o_current, slm->ssm->state_dim,
                                 &beta, d_mlp_input, slm->ssm->output_dim));
         
-        // Y_t += X_t D^T
+        // Y_t += E_t D^T
         CHECK_CUBLAS(cublasSgemm(slm->ssm->cublas_handle,
                                 CUBLAS_OP_T, CUBLAS_OP_N,
                                 slm->ssm->output_dim, 1, slm->ssm->input_dim,
@@ -589,8 +601,7 @@ void generate_text_slm(SLM* slm, const char* seed_text, int generation_length, f
                                 slm->d_embedded_input, slm->ssm->input_dim,
                                 &beta_add, d_mlp_input, slm->ssm->output_dim));
         
-        // MLP forward pass inline
-        // Layer 1: d_mlp_input -> d_mlp_hidden
+        // Z_t = Y_t W_1 - MLP layer 1
         CHECK_CUBLAS(cublasSgemv(slm->mlp->cublas_handle,
                                 CUBLAS_OP_T,
                                 slm->mlp->input_dim,
@@ -604,7 +615,7 @@ void generate_text_slm(SLM* slm, const char* seed_text, int generation_length, f
                                 d_mlp_hidden,
                                 1));
 
-        // Apply swish activation
+        // A_t = Z_t σ(Z_t) - Apply swish activation
         num_blocks = (slm->mlp->hidden_dim + block_size - 1) / block_size;
         swish_forward_kernel_mlp<<<num_blocks, block_size>>>(
             d_mlp_hidden,
@@ -612,7 +623,7 @@ void generate_text_slm(SLM* slm, const char* seed_text, int generation_length, f
             slm->mlp->hidden_dim
         );
 
-        // Layer 2: d_mlp_hidden -> d_mlp_output
+        // L_t = A_t W_2 - MLP layer 2
         CHECK_CUBLAS(cublasSgemv(slm->mlp->cublas_handle,
                                 CUBLAS_OP_T,
                                 slm->mlp->hidden_dim,
@@ -626,13 +637,13 @@ void generate_text_slm(SLM* slm, const char* seed_text, int generation_length, f
                                 d_mlp_output,
                                 1));
         
-        // Apply softmax
+        // P_t = softmax(L_t) - Apply softmax
         softmax_kernel<<<1, 256>>>(slm->d_softmax, d_mlp_output, 1, slm->vocab_size);
         
         // Copy probabilities to host
         CHECK_CUDA(cudaMemcpy(h_probs, slm->d_softmax, slm->vocab_size * sizeof(float), cudaMemcpyDeviceToHost));
         
-        // Apply temperature scaling
+        // P_τ(c) = exp(L_c / τ) / Σ_{c'} exp(L_{c'} / τ) - Apply temperature scaling
         if (temperature != 1.0f) {
             float sum = 0.0f;
             for (int j = 0; j < slm->vocab_size; j++) {
