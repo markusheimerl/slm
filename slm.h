@@ -255,7 +255,7 @@ void backward_pass_slm(SLM* slm, unsigned char* d_X) {
     // ∂L/∂B = Σ_t (∂L/∂H_t)^T E_t - Backward through SSM
     backward_pass_ssm(slm->ssm, slm->d_embedded_input);
     
-    // ∂L/∂E_t = B^T (∂L/∂H_t) + D^T (∂L/∂Y_t) - Compute input gradients from SSM
+    // ∂L/∂E_t = (∂L/∂H_t) B + (∂L/∂Y_t) D - Compute input gradients from SSM
     const float alpha = 1.0f;
     const float beta = 0.0f;
     
