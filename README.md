@@ -19,9 +19,9 @@ For language modeling, the cross-entropy loss between predicted and actual next 
 
 $$
 \begin{align*}
-\mathcal{L} &= -\frac{1}{T \cdot B}\sum_{t=1}^{T}\sum_{b=1}^{B} \log P_{t,b,y_{t,b}} \
-\frac{\partial \mathcal{L}}{\partial Y_t} &= P_t - \mathbf{1}{y_t} \
-\frac{\partial \mathcal{L}}{\partial W_E[c]} &= \sum{\substack{t,b \ X_{t,b}=c}} \left(B^T\frac{\partial \mathcal{L}}{\partial H_t} + D^T\frac{\partial \mathcal{L}}{\partial Y_t}\right)
+\mathcal{L} &= -\frac{1}{T \cdot B}\sum_{t=1}^{T}\sum_{b=1}^{B} \log P_{t,b,y_{t,b}} \\
+\frac{\partial \mathcal{L}}{\partial Y_t} &= P_t - \mathbf{1}{y_t} \\
+\frac{\partial \mathcal{L}}{\partial W_E[c]} &= \sum{\substack{t,b \\ X_{t,b}=c}} \left(B^T\frac{\partial \mathcal{L}}{\partial H_t} + D^T\frac{\partial \mathcal{L}}{\partial Y_t}\right)
 \end{align*}
 $$
 
@@ -35,13 +35,13 @@ $$
 
 where temperature $\tau$ controls sampling entropy - $\tau \rightarrow 0$ approaches argmax sampling while $\tau > 1$ increases randomness.
 
-The AdamW optimizer maintains exponential moving averages for all parameters $\theta = \{A, B, C, D, W_E\}$ with momentum $\beta_1$, second moment $\beta_2$, and weight decay $\lambda$:
+The AdamW optimizer maintains exponential moving averages for all parameters $\theta = \{A, B, C, D, W_E\}$ with momentum $\beta_1$, second moment $\beta_2$, and weight decay $\lambda$. The learning rate is denoted by $\eta$, $t$ is the current training iteration, and $\epsilon$ is a small constant for numerical stability. For each weight matrix $W$, the update rule is:
 
 $$
 \begin{align*}
-m_t &= \beta_1 m_{t-1} + (1-\beta_1)\nabla_\theta \mathcal{L} \\
-v_t &= \beta_2 v_{t-1} + (1-\beta_2)(\nabla_\theta \mathcal{L})^2 \\
-\theta_t &= (1-\lambda\eta)\theta_{t-1} - \eta\cdot\frac{m_t}{1-\beta_1^t}/\sqrt{\frac{v_t}{1-\beta_2^t} + \epsilon}
+m &= \beta_1m + (1-\beta_1)(\frac{\partial L}{\partial W}) \\
+v &= \beta_2v + (1-\beta_2)(\frac{\partial L}{\partial W})^2 \\
+W &= (1-\lambda\eta)W - \eta\cdot\frac{m}{1-\beta_1^t}/\sqrt{\frac{v}{1-\beta_2^t} + \epsilon}
 \end{align*}
 $$
 
