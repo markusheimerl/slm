@@ -13,8 +13,5 @@ run: slm.out
 cont: slm.out
 	@time ./slm.out $(shell ls -t *_model.bin 2>/dev/null | head -1)
 
-data:
-	@time ./data.sh
-
 clean:
 	rm -f *.out *.csv *.bin
