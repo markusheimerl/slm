@@ -399,8 +399,6 @@ SLM* load_slm(const char* filename, int custom_batch_size) {
     return slm;
 }
 
-void forward_pass_mlp_single(MLP* mlp, float* d_input, float* d_output);
-
 // Text generation function
 void generate_text_slm(SLM* slm, const char* seed_text, int generation_length, float temperature) {
     int seed_len = strlen(seed_text);
@@ -416,16 +414,16 @@ void generate_text_slm(SLM* slm, const char* seed_text, int generation_length, f
     float* d_h_current = NULL;
     float* d_h_next = NULL;
     float* d_o_current = NULL;
-    float* d_y_current = NULL;
     float* d_mlp_input = NULL;
+    float* d_mlp_hidden = NULL;
     float* d_mlp_output = NULL;
     
     CHECK_CUDA(cudaMalloc(&d_input, sizeof(unsigned char)));
     CHECK_CUDA(cudaMalloc(&d_h_current, slm->ssm->state_dim * sizeof(float)));
     CHECK_CUDA(cudaMalloc(&d_h_next, slm->ssm->state_dim * sizeof(float)));
     CHECK_CUDA(cudaMalloc(&d_o_current, slm->ssm->state_dim * sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&d_y_current, slm->vocab_size * sizeof(float)));
     CHECK_CUDA(cudaMalloc(&d_mlp_input, slm->vocab_size * sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&d_mlp_hidden, slm->mlp->hidden_dim * sizeof(float)));
     CHECK_CUDA(cudaMalloc(&d_mlp_output, slm->vocab_size * sizeof(float)));
     
     // Initialize hidden state to zero
@@ -490,8 +488,42 @@ void generate_text_slm(SLM* slm, const char* seed_text, int generation_length, f
                                 slm->d_embedded_input, slm->ssm->input_dim,
                                 &beta_add, d_mlp_input, slm->ssm->output_dim));
         
-        // Forward through MLP (single sample)
-        forward_pass_mlp_single(slm->mlp, d_mlp_input, d_mlp_output);
+        // MLP forward pass inline
+        // Layer 1: d_mlp_input -> d_mlp_hidden
+        CHECK_CUBLAS(cublasSgemv(slm->mlp->cublas_handle,
+                                CUBLAS_OP_T,
+                                slm->mlp->input_dim,
+                                slm->mlp->hidden_dim,
+                                &alpha,
+                                slm->mlp->d_fc1_weight,
+                                slm->mlp->input_dim,
+                                d_mlp_input,
+                                1,
+                                &beta,
+                                d_mlp_hidden,
+                                1));
+
+        // Apply swish activation
+        num_blocks = (slm->mlp->hidden_dim + block_size - 1) / block_size;
+        swish_forward_kernel_mlp<<<num_blocks, block_size>>>(
+            d_mlp_hidden,
+            d_mlp_hidden,
+            slm->mlp->hidden_dim
+        );
+
+        // Layer 2: d_mlp_hidden -> d_mlp_output
+        CHECK_CUBLAS(cublasSgemv(slm->mlp->cublas_handle,
+                                CUBLAS_OP_T,
+                                slm->mlp->hidden_dim,
+                                slm->mlp->output_dim,
+                                &alpha,
+                                slm->mlp->d_fc2_weight,
+                                slm->mlp->hidden_dim,
+                                d_mlp_hidden,
+                                1,
+                                &beta,
+                                d_mlp_output,
+                                1));
         
         // Swap current and next
         float* temp = d_h_current;
@@ -557,8 +589,42 @@ void generate_text_slm(SLM* slm, const char* seed_text, int generation_length, f
                                 slm->d_embedded_input, slm->ssm->input_dim,
                                 &beta_add, d_mlp_input, slm->ssm->output_dim));
         
-        // Forward through MLP (single sample)
-        forward_pass_mlp_single(slm->mlp, d_mlp_input, d_mlp_output);
+        // MLP forward pass inline
+        // Layer 1: d_mlp_input -> d_mlp_hidden
+        CHECK_CUBLAS(cublasSgemv(slm->mlp->cublas_handle,
+                                CUBLAS_OP_T,
+                                slm->mlp->input_dim,
+                                slm->mlp->hidden_dim,
+                                &alpha,
+                                slm->mlp->d_fc1_weight,
+                                slm->mlp->input_dim,
+                                d_mlp_input,
+                                1,
+                                &beta,
+                                d_mlp_hidden,
+                                1));
+
+        // Apply swish activation
+        num_blocks = (slm->mlp->hidden_dim + block_size - 1) / block_size;
+        swish_forward_kernel_mlp<<<num_blocks, block_size>>>(
+            d_mlp_hidden,
+            d_mlp_hidden,
+            slm->mlp->hidden_dim
+        );
+
+        // Layer 2: d_mlp_hidden -> d_mlp_output
+        CHECK_CUBLAS(cublasSgemv(slm->mlp->cublas_handle,
+                                CUBLAS_OP_T,
+                                slm->mlp->hidden_dim,
+                                slm->mlp->output_dim,
+                                &alpha,
+                                slm->mlp->d_fc2_weight,
+                                slm->mlp->hidden_dim,
+                                d_mlp_hidden,
+                                1,
+                                &beta,
+                                d_mlp_output,
+                                1));
         
         // Apply softmax
         softmax_kernel<<<1, 256>>>(slm->d_softmax, d_mlp_output, 1, slm->vocab_size);
@@ -618,52 +684,9 @@ void generate_text_slm(SLM* slm, const char* seed_text, int generation_length, f
     cudaFree(d_h_current);
     cudaFree(d_h_next);
     cudaFree(d_o_current);
-    cudaFree(d_y_current);
     cudaFree(d_mlp_input);
+    cudaFree(d_mlp_hidden);
     cudaFree(d_mlp_output);
-}
-
-// Helper function for single sample MLP forward pass
-void forward_pass_mlp_single(MLP* mlp, float* d_input, float* d_output) {
-    const float alpha = 1.0f;
-    const float beta = 0.0f;
-
-    // Layer 1: d_input -> d_layer1_output
-    CHECK_CUBLAS(cublasSgemv(mlp->cublas_handle,
-                            CUBLAS_OP_T,
-                            mlp->input_dim,
-                            mlp->hidden_dim,
-                            &alpha,
-                            mlp->d_fc1_weight,
-                            mlp->input_dim,
-                            d_input,
-                            1,
-                            &beta,
-                            mlp->d_layer1_output,
-                            1));
-
-    // Apply swish activation
-    int block_size = 256;
-    int num_blocks = (mlp->hidden_dim + block_size - 1) / block_size;
-    swish_forward_kernel_mlp<<<num_blocks, block_size>>>(
-        mlp->d_layer1_output,
-        mlp->d_layer1_output,
-        mlp->hidden_dim
-    );
-
-    // Layer 2: d_layer1_output -> d_output
-    CHECK_CUBLAS(cublasSgemv(mlp->cublas_handle,
-                            CUBLAS_OP_T,
-                            mlp->hidden_dim,
-                            mlp->output_dim,
-                            &alpha,
-                            mlp->d_fc2_weight,
-                            mlp->hidden_dim,
-                            mlp->d_layer1_output,
-                            1,
-                            &beta,
-                            d_output,
-                            1));
 }
 
 #endif
