@@ -54,3 +54,20 @@ sudo apt install clang time
 # Ensure CUDA toolkit is installed
 make run
 ```
+
+## Performance
+
+At ~1 million parameters, 300 million tokens of corpus data and ~35k TFLOPs of invested compute the model achieves ~1.5 cross entropy loss at the character level. The model can spell many words correctly and has some basic understanding of grammar, but exhibits very little semantic understanding.
+
+```
+Batch [50000/100000], Loss: 1.510576
+
+--- Sample Generation at Batch 50000 ---
+Seed: "The quick brown fox"
+Generated: itude with its a compania without all change appearing that the suggest about your good in at his fa
+Seed: "Once upon a time"
+Generated: d, and with me. You may be believe of his in a called by that he would his broken of the left as I h
+Seed: "In the beginning"
+Generated: ilution, in a grace of God would be righty of leave for a m such dissophy fast. Hath of the little s
+--- End Sample Generation ---
+```
