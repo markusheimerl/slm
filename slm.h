@@ -2,9 +2,11 @@
 #define SLM_H
 
 #include "ssm/gpu/ssm.h"
+#include "mlp/gpu/mlp.h"
 
 typedef struct {
     SSM* ssm;                   // Underlying state space model
+    MLP* mlp;                   // Multi-layer perceptron for output mapping
     
     // Language modeling specific buffers
     float* d_embeddings;        // vocab_size x embed_dim
@@ -120,6 +122,9 @@ SLM* init_slm(int embed_dim, int state_dim, int seq_len, int batch_size) {
 
     // Initialize SSM
     slm->ssm = init_ssm(embed_dim, state_dim, slm->vocab_size, seq_len, batch_size);
+    
+    // Initialize MLP
+    slm->mlp = init_mlp(slm->vocab_size, 4 * slm->vocab_size, slm->vocab_size, seq_len * batch_size);
 
     // Allocate embedding matrices
     CHECK_CUDA(cudaMalloc(&slm->d_embeddings, slm->vocab_size * slm->embed_dim * sizeof(float)));
@@ -153,6 +158,7 @@ SLM* init_slm(int embed_dim, int state_dim, int seq_len, int batch_size) {
 void free_slm(SLM* slm) {
     if (slm) {
         if (slm->ssm) free_ssm(slm->ssm);
+        if (slm->mlp) free_mlp(slm->mlp);
         cudaFree(slm->d_embeddings);
         cudaFree(slm->d_embeddings_grad);
         cudaFree(slm->d_embeddings_m);
@@ -179,12 +185,15 @@ void forward_pass_slm(SLM* slm, unsigned char* d_X) {
     
     // Forward through SSM
     forward_pass_ssm(slm->ssm, slm->d_embedded_input);
+
+    // Forward through MLP
+    forward_pass_mlp(slm->mlp, slm->ssm->d_predictions);
     
     // Apply softmax
     int total_tokens = seq_len * batch_size;
     int blocks = (total_tokens + 255) / 256;
     softmax_kernel<<<blocks, 256>>>(
-        slm->d_softmax, slm->ssm->d_predictions, total_tokens, slm->vocab_size
+        slm->d_softmax, slm->mlp->d_predictions, total_tokens, slm->vocab_size
     );
 }
 
@@ -197,7 +206,7 @@ float calculate_loss_slm(SLM* slm, unsigned char* d_y) {
     // Compute cross-entropy gradient (softmax - one_hot) for backprop
     int blocks = (total_tokens + 255) / 256;
     cross_entropy_gradient_kernel<<<blocks, 256>>>(
-        slm->ssm->d_error, slm->d_softmax, d_y, total_tokens, slm->vocab_size
+        slm->mlp->d_error, slm->d_softmax, d_y, total_tokens, slm->vocab_size
     );
     
     // Calculate actual cross-entropy loss: -log(softmax[target])
@@ -216,12 +225,21 @@ float calculate_loss_slm(SLM* slm, unsigned char* d_y) {
 // Zero gradients
 void zero_gradients_slm(SLM* slm) {
     zero_gradients_ssm(slm->ssm);
+    zero_gradients_mlp(slm->mlp);
     CHECK_CUDA(cudaMemset(slm->d_embeddings_grad, 0, 
                          slm->vocab_size * slm->embed_dim * sizeof(float)));
 }
 
 // Backward pass
 void backward_pass_slm(SLM* slm, unsigned char* d_X) {
+    // Backward through MLP
+    backward_pass_mlp(slm->mlp, slm->ssm->d_predictions);
+    
+    // Copy MLP input gradients to SSM
+    int total_elements = slm->ssm->seq_len * slm->ssm->batch_size * slm->ssm->output_dim;
+    CHECK_CUDA(cudaMemcpy(slm->ssm->d_error, slm->mlp->d_error, 
+                         total_elements * sizeof(float), cudaMemcpyDeviceToDevice));
+    
     // Backward through SSM
     backward_pass_ssm(slm->ssm, slm->d_embedded_input);
     
@@ -268,6 +286,9 @@ void update_weights_slm(SLM* slm, float learning_rate) {
     // Update SSM weights
     update_weights_ssm(slm->ssm, learning_rate);
     
+    // Update MLP weights
+    update_weights_mlp(slm->mlp, learning_rate);
+    
     // Update embeddings
     int embed_size = slm->vocab_size * slm->embed_dim;
     int blocks = (embed_size + 255) / 256;
@@ -289,9 +310,18 @@ void update_weights_slm(SLM* slm, float learning_rate) {
 void save_slm(SLM* slm, const char* filename) {
     save_ssm(slm->ssm, filename);
     
+    // Save MLP
+    char mlp_file[256];
+    strcpy(mlp_file, filename);
+    char* dot = strrchr(mlp_file, '.');
+    if (dot) *dot = '\0';
+    strcat(mlp_file, "_mlp.bin");
+    save_mlp(slm->mlp, mlp_file);
+    
+    // Save embeddings
     char embed_file[256];
     strcpy(embed_file, filename);
-    char* dot = strrchr(embed_file, '.');
+    dot = strrchr(embed_file, '.');
     if (dot) *dot = '\0';
     strcat(embed_file, "_embeddings.bin");
     
@@ -321,6 +351,14 @@ SLM* load_slm(const char* filename, int custom_batch_size) {
     slm->vocab_size = ssm->output_dim;
     slm->embed_dim = ssm->input_dim;
     
+    // Load MLP
+    char mlp_file[256];
+    strcpy(mlp_file, filename);
+    char* dot = strrchr(mlp_file, '.');
+    if (dot) *dot = '\0';
+    strcat(mlp_file, "_mlp.bin");
+    slm->mlp = load_mlp(mlp_file, ssm->seq_len * ssm->batch_size);
+    
     // Allocate device memory
     CHECK_CUDA(cudaMalloc(&slm->d_embeddings, slm->vocab_size * slm->embed_dim * sizeof(float)));
     CHECK_CUDA(cudaMalloc(&slm->d_embeddings_grad, slm->vocab_size * slm->embed_dim * sizeof(float)));
@@ -331,14 +369,13 @@ SLM* load_slm(const char* filename, int custom_batch_size) {
     CHECK_CUDA(cudaMalloc(&slm->d_input_gradients, ssm->seq_len * ssm->batch_size * ssm->input_dim * sizeof(float)));
     CHECK_CUDA(cudaMalloc(&slm->d_losses, ssm->seq_len * ssm->batch_size * sizeof(float)));
     
-    // Create embeddings filename
+    // Load embeddings
     char embed_file[256];
     strcpy(embed_file, filename);
-    char* dot = strrchr(embed_file, '.');
+    dot = strrchr(embed_file, '.');
     if (dot) *dot = '\0';
     strcat(embed_file, "_embeddings.bin");
     
-    // Load embeddings
     FILE* f = fopen(embed_file, "rb");
     if (f) {
         int vocab_size, embed_dim;
@@ -362,6 +399,8 @@ SLM* load_slm(const char* filename, int custom_batch_size) {
     return slm;
 }
 
+void forward_pass_mlp_single(MLP* mlp, float* d_input, float* d_output);
+
 // Text generation function
 void generate_text_slm(SLM* slm, const char* seed_text, int generation_length, float temperature) {
     int seed_len = strlen(seed_text);
@@ -378,12 +417,16 @@ void generate_text_slm(SLM* slm, const char* seed_text, int generation_length, f
     float* d_h_next = NULL;
     float* d_o_current = NULL;
     float* d_y_current = NULL;
+    float* d_mlp_input = NULL;
+    float* d_mlp_output = NULL;
     
     CHECK_CUDA(cudaMalloc(&d_input, sizeof(unsigned char)));
     CHECK_CUDA(cudaMalloc(&d_h_current, slm->ssm->state_dim * sizeof(float)));
     CHECK_CUDA(cudaMalloc(&d_h_next, slm->ssm->state_dim * sizeof(float)));
     CHECK_CUDA(cudaMalloc(&d_o_current, slm->ssm->state_dim * sizeof(float)));
     CHECK_CUDA(cudaMalloc(&d_y_current, slm->vocab_size * sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&d_mlp_input, slm->vocab_size * sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&d_mlp_output, slm->vocab_size * sizeof(float)));
     
     // Initialize hidden state to zero
     CHECK_CUDA(cudaMemset(d_h_current, 0, slm->ssm->state_dim * sizeof(float)));
@@ -437,7 +480,7 @@ void generate_text_slm(SLM* slm, const char* seed_text, int generation_length, f
                                 slm->ssm->output_dim, 1, slm->ssm->state_dim,
                                 &alpha, slm->ssm->d_C, slm->ssm->state_dim,
                                 d_o_current, slm->ssm->state_dim,
-                                &beta, d_y_current, slm->ssm->output_dim));
+                                &beta, d_mlp_input, slm->ssm->output_dim));
         
         // Y_t += X_t D^T
         CHECK_CUBLAS(cublasSgemm(slm->ssm->cublas_handle,
@@ -445,7 +488,10 @@ void generate_text_slm(SLM* slm, const char* seed_text, int generation_length, f
                                 slm->ssm->output_dim, 1, slm->ssm->input_dim,
                                 &alpha, slm->ssm->d_D, slm->ssm->input_dim,
                                 slm->d_embedded_input, slm->ssm->input_dim,
-                                &beta_add, d_y_current, slm->ssm->output_dim));
+                                &beta_add, d_mlp_input, slm->ssm->output_dim));
+        
+        // Forward through MLP (single sample)
+        forward_pass_mlp_single(slm->mlp, d_mlp_input, d_mlp_output);
         
         // Swap current and next
         float* temp = d_h_current;
@@ -501,7 +547,7 @@ void generate_text_slm(SLM* slm, const char* seed_text, int generation_length, f
                                 slm->ssm->output_dim, 1, slm->ssm->state_dim,
                                 &alpha, slm->ssm->d_C, slm->ssm->state_dim,
                                 d_o_current, slm->ssm->state_dim,
-                                &beta, d_y_current, slm->ssm->output_dim));
+                                &beta, d_mlp_input, slm->ssm->output_dim));
         
         // Y_t += X_t D^T
         CHECK_CUBLAS(cublasSgemm(slm->ssm->cublas_handle,
@@ -509,10 +555,13 @@ void generate_text_slm(SLM* slm, const char* seed_text, int generation_length, f
                                 slm->ssm->output_dim, 1, slm->ssm->input_dim,
                                 &alpha, slm->ssm->d_D, slm->ssm->input_dim,
                                 slm->d_embedded_input, slm->ssm->input_dim,
-                                &beta_add, d_y_current, slm->ssm->output_dim));
+                                &beta_add, d_mlp_input, slm->ssm->output_dim));
+        
+        // Forward through MLP (single sample)
+        forward_pass_mlp_single(slm->mlp, d_mlp_input, d_mlp_output);
         
         // Apply softmax
-        softmax_kernel<<<1, 256>>>(slm->d_softmax, d_y_current, 1, slm->vocab_size);
+        softmax_kernel<<<1, 256>>>(slm->d_softmax, d_mlp_output, 1, slm->vocab_size);
         
         // Copy probabilities to host
         CHECK_CUDA(cudaMemcpy(h_probs, slm->d_softmax, slm->vocab_size * sizeof(float), cudaMemcpyDeviceToHost));
@@ -570,6 +619,51 @@ void generate_text_slm(SLM* slm, const char* seed_text, int generation_length, f
     cudaFree(d_h_next);
     cudaFree(d_o_current);
     cudaFree(d_y_current);
+    cudaFree(d_mlp_input);
+    cudaFree(d_mlp_output);
+}
+
+// Helper function for single sample MLP forward pass
+void forward_pass_mlp_single(MLP* mlp, float* d_input, float* d_output) {
+    const float alpha = 1.0f;
+    const float beta = 0.0f;
+
+    // Layer 1: d_input -> d_layer1_output
+    CHECK_CUBLAS(cublasSgemv(mlp->cublas_handle,
+                            CUBLAS_OP_T,
+                            mlp->input_dim,
+                            mlp->hidden_dim,
+                            &alpha,
+                            mlp->d_fc1_weight,
+                            mlp->input_dim,
+                            d_input,
+                            1,
+                            &beta,
+                            mlp->d_layer1_output,
+                            1));
+
+    // Apply swish activation
+    int block_size = 256;
+    int num_blocks = (mlp->hidden_dim + block_size - 1) / block_size;
+    swish_forward_kernel_mlp<<<num_blocks, block_size>>>(
+        mlp->d_layer1_output,
+        mlp->d_layer1_output,
+        mlp->hidden_dim
+    );
+
+    // Layer 2: d_layer1_output -> d_output
+    CHECK_CUBLAS(cublasSgemv(mlp->cublas_handle,
+                            CUBLAS_OP_T,
+                            mlp->hidden_dim,
+                            mlp->output_dim,
+                            &alpha,
+                            mlp->d_fc2_weight,
+                            mlp->hidden_dim,
+                            mlp->d_layer1_output,
+                            1,
+                            &beta,
+                            d_output,
+                            1));
 }
 
 #endif
