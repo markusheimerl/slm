@@ -482,27 +482,4 @@ void generate_char_sequences_from_corpus(unsigned char** input_chars, unsigned c
     }
 }
 
-// Save sequences to CSV
-void save_sequences_to_csv(unsigned char* input_chars, unsigned char* target_chars, 
-                          int num_sequences, int seq_len, const char* filename) {
-    FILE* file = fopen(filename, "w");
-    if (!file) {
-        printf("Error opening file for writing: %s\n", filename);
-        return;
-    }
-    
-    fprintf(file, "seq_id,timestep,input_char,target_char\n");
-    
-    for (int seq = 0; seq < num_sequences; seq++) {
-        for (int t = 0; t < seq_len; t++) {
-            int idx = seq * seq_len + t;
-            fprintf(file, "%d,%d,%d,%d\n", seq, t, 
-                   (int)input_chars[idx], (int)target_chars[idx]);
-        }
-    }
-    
-    fclose(file);
-    printf("Sequences saved to %s\n", filename);
-}
-
 #endif

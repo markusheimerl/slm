@@ -103,15 +103,12 @@ int main(int argc, char* argv[]) {
         // Update weights
         update_weights_slm(slm, learning_rate);
     }
-    
-    // Save model and final batch of data
-    char model_filename[64], data_filename[64];
+
+    // Save model
+    char model_filename[64];
     time_t now = time(NULL);
     strftime(model_filename, sizeof(model_filename), "%Y%m%d_%H%M%S_model.bin", localtime(&now));
-    strftime(data_filename, sizeof(data_filename), "%Y%m%d_%H%M%S_data.csv", localtime(&now));
-    
     save_slm(slm, model_filename);
-    save_sequences_to_csv(input_chars, target_chars, batch_size, seq_len, data_filename);
     
     // Cleanup
     free(corpus);
