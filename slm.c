@@ -19,6 +19,7 @@ int main(int argc, char* argv[]) {
     const int embed_dim = 512;
     const int state_dim = 512;
     const int seq_len = 1024;
+    const int num_layers = 6;
     const int batch_size = 128;
     
     // Training parameters
@@ -52,7 +53,7 @@ int main(int argc, char* argv[]) {
         printf("Continuing training from loaded model\n");
     } else {
         printf("Initializing new model\n");
-        slm = init_slm(embed_dim, state_dim, seq_len, batch_size);
+        slm = init_slm(embed_dim, state_dim, seq_len, batch_size, num_layers);
     }
     
     // Training loop

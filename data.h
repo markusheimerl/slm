@@ -417,7 +417,7 @@ char* load_corpus(const char* filename, size_t* corpus_size) {
         
         // Only attempt download for the default gutenberg corpus
         if (strcmp(filename, "gutenberg_corpus.txt") == 0) {
-            if (download_corpus(filename, 300)) {
+            if (download_corpus(filename, 2000)) {
                 // Try to open the file again after download
                 file = fopen(filename, "r");
             }
