@@ -80,11 +80,7 @@ int main(int argc, char* argv[]) {
     // Training parameters
     const int num_batches = 20000;
     const float learning_rate = 0.0001f;
-    
-    // Load corpus
-    size_t corpus_size;
-    char* corpus = load_corpus("gutenberg_corpus.txt", &corpus_size);
-    
+
     // Pre-allocate memory for sequences
     unsigned char *input_chars = (unsigned char*)malloc(batch_size * seq_len * sizeof(unsigned char));
     unsigned char *target_chars = (unsigned char*)malloc(batch_size * seq_len * sizeof(unsigned char));
@@ -116,6 +112,10 @@ int main(int argc, char* argv[]) {
     print_model_size(total_params);
     printf("Model architecture: %d layers, %d embed_dim, %d state_dim\n", 
             num_layers, embed_dim, state_dim);
+    
+    // Load corpus
+    size_t corpus_size;
+    char* corpus = load_corpus("gutenberg_corpus.txt", &corpus_size, total_params * 100);
     
     // Training loop
     for (int batch = 0; batch <= num_batches; batch++) {
