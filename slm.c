@@ -20,11 +20,11 @@ int main(int argc, char* argv[]) {
     const int state_dim = 512;
     const int seq_len = 1024;
     const int num_layers = 6;
-    const int batch_size = 128;
+    const int batch_size = 16;
     
     // Training parameters
     const int num_batches = 20000;
-    const float learning_rate = 0.0001f;
+    const float learning_rate = 0.0005f;
     
     // Load corpus
     size_t corpus_size;
