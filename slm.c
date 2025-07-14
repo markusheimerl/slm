@@ -24,7 +24,7 @@ int main(int argc, char* argv[]) {
     
     // Training parameters
     const int num_batches = 20000;
-    const float learning_rate = 0.0005f;
+    const float learning_rate = 0.0001f;
     
     // Load corpus
     size_t corpus_size;
