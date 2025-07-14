@@ -6,6 +6,61 @@
 #include "data.h"
 #include "slm.h"
 
+// Function to calculate total model parameters
+size_t calculate_model_parameters(SLM* slm) {
+    size_t total_params = 0;
+    
+    // Embedding parameters: vocab_size x embed_dim
+    total_params += slm->vocab_size * slm->embed_dim;
+    
+    // SSM parameters for each layer
+    for (int layer = 0; layer < slm->num_layers; layer++) {
+        SSM* ssm = slm->ssm_layers[layer];
+        
+        // A matrix: state_dim x state_dim
+        total_params += ssm->state_dim * ssm->state_dim;
+        
+        // B matrix: state_dim x input_dim (embed_dim)
+        total_params += ssm->state_dim * ssm->input_dim;
+        
+        // C matrix: output_dim x state_dim (embed_dim x state_dim)
+        total_params += ssm->output_dim * ssm->state_dim;
+        
+        // D matrix: output_dim x input_dim (embed_dim x embed_dim)
+        total_params += ssm->output_dim * ssm->input_dim;
+    }
+    
+    // MLP parameters for each layer
+    for (int layer = 0; layer < slm->num_layers; layer++) {
+        MLP* mlp = slm->mlp_layers[layer];
+        
+        // FC1 weights: hidden_dim x input_dim
+        total_params += mlp->hidden_dim * mlp->input_dim;
+        
+        // FC2 weights: output_dim x hidden_dim
+        total_params += mlp->output_dim * mlp->hidden_dim;
+    }
+    
+    return total_params;
+}
+
+// Function to format parameter count with appropriate units
+void print_model_size(size_t total_params) {
+    if (total_params >= 1000000000) {
+        printf("Total model parameters: %.2fB (%zu parameters)\n", 
+               total_params / 1000000000.0, total_params);
+    } else if (total_params >= 1000000) {
+        printf("Total model parameters: %.2fM (%zu parameters)\n", 
+               total_params / 1000000.0, total_params);
+    } else if (total_params >= 1000) {
+        printf("Total model parameters: %.2fK (%zu parameters)\n", 
+               total_params / 1000.0, total_params);
+    } else {
+        printf("Total model parameters: %zu\n", total_params);
+    }
+    printf("Recommended training tokens: %.2fM\n", total_params * 100 / 1000000.0);
+}
+
 int main(int argc, char* argv[]) {
     srand(time(NULL));
     
@@ -55,6 +110,12 @@ int main(int argc, char* argv[]) {
         printf("Initializing new model\n");
         slm = init_slm(embed_dim, state_dim, seq_len, batch_size, num_layers);
     }
+
+    // Calculate and display model size
+    size_t total_params = calculate_model_parameters(slm);
+    print_model_size(total_params);
+    printf("Model architecture: %d layers, %d embed_dim, %d state_dim\n", 
+            num_layers, embed_dim, state_dim);
     
     // Training loop
     for (int batch = 0; batch <= num_batches; batch++) {
