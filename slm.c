@@ -74,9 +74,9 @@ int main(int argc, char* argv[]) {
     const int embed_dim = 512;
     const int state_dim = 512;
     const int seq_len = 1024;
-    const int num_layers = 6;
-    const int batch_size = 16;
-    
+    const int num_layers = 8;
+    const int batch_size = 64;
+
     // Training parameters
     const int num_batches = 20000;
     const float learning_rate = 0.0001f;
@@ -147,12 +147,12 @@ int main(int argc, char* argv[]) {
             printf("Batch [%d/%d], Loss: %.6f\n", batch, num_batches, loss);
         }
         
-        // Generate sample text every 100 batchs
-        if (batch % 100 == 0 && batch > 0) {
+        // Generate sample text every 1000 batches
+        if (batch % 1000 == 0 && batch > 0) {
             printf("\n--- Sample Generation at Batch %d ---\n", batch);
-            generate_text_slm(slm, "The quick brown fox", 100, 0.8f);
-            generate_text_slm(slm, "Once upon a time", 100, 0.8f);
-            generate_text_slm(slm, "In the beginning", 100, 0.8f);
+            generate_text_slm(slm, "The quick brown fox", 512, 0.8f);
+            generate_text_slm(slm, "Once upon a time", 512, 0.8f);
+            generate_text_slm(slm, "In the beginning", 512, 0.8f);
             printf("--- End Sample Generation ---\n\n");
         }
         
