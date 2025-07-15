@@ -40,10 +40,6 @@ int main(int argc, char* argv[]) {
     const int num_batches = 20000;
     const float learning_rate = 0.0001f;
     
-    // Load corpus
-    size_t corpus_size;
-    char* corpus = load_corpus("gutenberg_corpus.txt", &corpus_size);
-    
     // Pre-allocate memory for sequences
     unsigned char *input_chars = (unsigned char*)malloc(batch_size * seq_len * sizeof(unsigned char));
     unsigned char *target_chars = (unsigned char*)malloc(batch_size * seq_len * sizeof(unsigned char));
@@ -70,8 +66,13 @@ int main(int argc, char* argv[]) {
         slm = init_slm(embed_dim, state_dim, seq_len, batch_size);
     }
 
-    printf("Model initialized with %zu parameters\n", calculate_model_parameters(slm));
+    int model_size = calculate_model_parameters(slm);
+    printf("Model initialized with %d parameters\n", model_size);
     
+    // Load corpus
+    size_t corpus_size;
+    char* corpus = load_corpus("gutenberg_corpus.txt", &corpus_size, model_size * 100);
+
     // Training loop
     for (int batch = 0; batch <= num_batches; batch++) {
         // Generate fresh training data from random corpus locations

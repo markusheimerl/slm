@@ -408,7 +408,7 @@ int download_corpus(const char* filename, int target_size_mb) {
 }
 
 // Load text corpus from file, download if not available
-char* load_corpus(const char* filename, size_t* corpus_size) {
+char* load_corpus(const char* filename, size_t* corpus_size, int target_size_bytes) {
     FILE* file = fopen(filename, "r");
     
     // If file doesn't exist, try to download it
@@ -417,7 +417,7 @@ char* load_corpus(const char* filename, size_t* corpus_size) {
         
         // Only attempt download for the default gutenberg corpus
         if (strcmp(filename, "gutenberg_corpus.txt") == 0) {
-            if (download_corpus(filename, 300)) {
+            if (download_corpus(filename, target_size_bytes / (1024 * 1024)) == 0) {
                 // Try to open the file again after download
                 file = fopen(filename, "r");
             }
