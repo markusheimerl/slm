@@ -54,3 +54,4 @@ dkms.conf
 *.txt
 *.bin
 *.csv
+screenlog*

@@ -6,6 +6,21 @@
 #include "data.h"
 #include "slm.h"
 
+// Function to calculate total model parameters
+size_t calculate_model_parameters(SLM* slm) {
+    size_t total_params = 0;
+    total_params += slm->vocab_size * slm->embed_dim;
+    SSM* ssm = slm->ssm;
+    total_params += ssm->state_dim * ssm->state_dim;
+    total_params += ssm->state_dim * ssm->input_dim;
+    total_params += ssm->output_dim * ssm->state_dim;
+    total_params += ssm->output_dim * ssm->input_dim;
+    MLP* mlp = slm->mlp;
+    total_params += mlp->hidden_dim * mlp->input_dim;
+    total_params += mlp->output_dim * mlp->hidden_dim;
+    return total_params;
+}
+
 int main(int argc, char* argv[]) {
     srand(time(NULL));
     
@@ -16,10 +31,10 @@ int main(int argc, char* argv[]) {
     }
     
     // Model parameters
-    const int embed_dim = 512;
-    const int state_dim = 512;
+    const int embed_dim = 16;
+    const int state_dim = 32;
     const int seq_len = 1024;
-    const int batch_size = 128;
+    const int batch_size = 32;
     
     // Training parameters
     const int num_batches = 20000;
@@ -54,6 +69,8 @@ int main(int argc, char* argv[]) {
         printf("Initializing new model\n");
         slm = init_slm(embed_dim, state_dim, seq_len, batch_size);
     }
+
+    printf("Model initialized with %zu parameters\n", calculate_model_parameters(slm));
     
     // Training loop
     for (int batch = 0; batch <= num_batches; batch++) {
@@ -81,16 +98,16 @@ int main(int argc, char* argv[]) {
         // Calculate loss
         float loss = calculate_loss_slm(slm, d_target_chars);
         
-        if (batch % 10 == 0) {
+        if (batch % 5 == 0) {
             printf("Batch [%d/%d], Loss: %.6f\n", batch, num_batches, loss);
         }
-        
-        // Generate sample text every 100 batchs
+
+        // Generate sample text every 100 batches
         if (batch % 100 == 0 && batch > 0) {
             printf("\n--- Sample Generation at Batch %d ---\n", batch);
-            generate_text_slm(slm, "The quick brown fox", 100, 0.8f);
-            generate_text_slm(slm, "Once upon a time", 100, 0.8f);
-            generate_text_slm(slm, "In the beginning", 100, 0.8f);
+            generate_text_slm(slm, "The quick brown fox", 128, 0.8f);
+            generate_text_slm(slm, "Once upon a time", 128, 0.8f);
+            generate_text_slm(slm, "In the beginning", 128, 0.8f);
             printf("--- End Sample Generation ---\n\n");
         }
         
