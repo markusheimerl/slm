@@ -31,13 +31,13 @@ int main(int argc, char* argv[]) {
     }
     
     // Model parameters
-    const int embed_dim = 128;
-    const int state_dim = 64;
+    const int embed_dim = 256;
+    const int state_dim = 128;
     const int seq_len = 1024;
-    const int batch_size = 32;
+    const int batch_size = 128;
     
     // Training parameters
-    const int num_batches = 20000;
+    const int num_batches = 100000;
     const float learning_rate = 0.0001f;
     
     // Pre-allocate memory for sequences
@@ -98,6 +98,19 @@ int main(int argc, char* argv[]) {
         
         // Calculate loss
         float loss = calculate_loss_slm(slm, d_target_chars);
+
+        if(loss >= 5.6) {
+            printf("Loss too high: %.6f, stopping training\n", loss);
+            free(corpus);
+            free(input_chars);
+            free(target_chars);
+            free(input_reshaped);
+            free(target_reshaped);
+            free_slm(slm);
+            cudaFree(d_input_chars);
+            cudaFree(d_target_chars);
+            return -1;
+        }
         
         if (batch % 5 == 0) {
             printf("Batch [%d/%d], Loss: %.6f\n", batch, num_batches, loss);
