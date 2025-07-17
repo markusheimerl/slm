@@ -6,6 +6,16 @@
 #include "data.h"
 #include "slm.h"
 
+// Cosine annealing learning rate schedule
+float cosine_schedule(float lr_init, float lr_min, int current_batch, int total_batches) {
+    if (current_batch >= total_batches) return lr_min;
+    
+    float progress = (float)current_batch / (float)total_batches;
+    float cosine_factor = 0.5f * (1.0f + cosf(M_PI * progress));
+    
+    return lr_min + (lr_init - lr_min) * cosine_factor;
+}
+
 // Function to calculate total model parameters
 size_t calculate_model_parameters(SLM* slm) {
     size_t total_params = 0;
@@ -38,7 +48,8 @@ int main(int argc, char* argv[]) {
     
     // Training parameters
     const int num_batches = 100000;
-    const float learning_rate = 0.0001f;
+    const float lr_init = 0.0001f;
+    const float lr_min = 0.00001f;
     
     // Pre-allocate memory for sequences
     unsigned char *input_chars = (unsigned char*)malloc(batch_size * seq_len * sizeof(unsigned char));
@@ -75,6 +86,9 @@ int main(int argc, char* argv[]) {
 
     // Training loop
     for (int batch = 0; batch <= num_batches; batch++) {
+        // Calculate current learning rate using cosine schedule
+        float current_lr = cosine_schedule(lr_init, lr_min, batch, num_batches);
+        
         // Generate fresh training data from random corpus locations
         generate_char_sequences_from_corpus(&input_chars, &target_chars, 
                                           batch_size, seq_len, corpus, corpus_size);
@@ -113,7 +127,7 @@ int main(int argc, char* argv[]) {
         }
         
         if (batch % 5 == 0) {
-            printf("Batch [%d/%d], Loss: %.6f\n", batch, num_batches, loss);
+            printf("Batch [%d/%d], Loss: %.6f, LR: %.6f\n", batch, num_batches, loss, current_lr);
         }
 
         // Generate sample text every 100 batches
@@ -131,8 +145,8 @@ int main(int argc, char* argv[]) {
         zero_gradients_slm(slm);
         backward_pass_slm(slm, d_input_chars);
         
-        // Update weights
-        update_weights_slm(slm, learning_rate);
+        // Update weights with scheduled learning rate
+        update_weights_slm(slm, current_lr);
     }
 
     // Save model
