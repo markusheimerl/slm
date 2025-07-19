@@ -263,10 +263,6 @@ void backward_pass_slm(SLM* slm, unsigned char* d_X) {
     CHECK_CUDA(cudaMemcpy(slm->ssm->d_error, slm->mlp->d_error, 
                          total_elements * sizeof(float), cudaMemcpyDeviceToDevice));
     
-    // For the residual connection: ∂L/∂R_t = ∂L/∂(Y_t + E_t) flows to both Y_t and E_t
-    // Since R_t = Y_t + E_t, we have ∂L/∂Y_t = ∂L/∂R_t and ∂L/∂E_t += ∂L/∂R_t
-    // The gradients in slm->ssm->d_error are already ∂L/∂R_t, so they serve as ∂L/∂Y_t for SSM
-    
     // ∂L/∂C = Σ_t (∂L/∂Y_t)^T O_t
     // ∂L/∂D = Σ_t (∂L/∂Y_t)^T E_t  
     // ∂L/∂O_t = (∂L/∂Y_t)C
