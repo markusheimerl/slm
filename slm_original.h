@@ -1,9 +1,29 @@
-#include <stdio.h>
-#include <stdlib.h>
-#include <math.h>
-#include <time.h>
-#include <string.h>
-#include "slm.h"
+#ifndef SLM_H
+#define SLM_H
+
+#include "ssm/gpu/ssm.h"
+#include "mlp/gpu/mlp.h"
+
+typedef struct {
+    SSM* ssm;                   // Underlying state space model
+    MLP* mlp;                   // Multi-layer perceptron for output mapping
+    
+    // Language modeling specific buffers
+    float* d_embeddings;        // vocab_size x embed_dim
+    float* d_embeddings_grad;   // vocab_size x embed_dim
+    float* d_embeddings_m;      // vocab_size x embed_dim
+    float* d_embeddings_v;      // vocab_size x embed_dim
+    
+    // Working buffers
+    float* d_embedded_input;    // seq_len x batch_size x embed_dim
+    float* d_softmax;           // seq_len x batch_size x vocab_size
+    float* d_input_gradients;   // seq_len x batch_size x embed_dim
+    float* d_losses;            // seq_len x batch_size
+    
+    // Dimensions
+    int vocab_size;
+    int embed_dim;
+} SLM;
 
 // CUDA kernel for embedding lookup: E_t = W_E[X_t]
 __global__ void embedding_lookup_kernel(float* output, float* embeddings, unsigned char* chars, 
@@ -90,7 +110,9 @@ __global__ void embedding_gradient_kernel(float* embed_grad, float* input_grad, 
                      input_grad[(total + idx) * embed_dim + i]);
         }
     }
-}// Initialize SLM
+}
+
+// Initialize SLM
 SLM* init_slm(int embed_dim, int state_dim, int seq_len, int batch_size) {
     SLM* slm = (SLM*)malloc(sizeof(SLM));
         
@@ -678,3 +700,4 @@ void generate_text_slm(SLM* slm, const char* seed_text, int generation_length, f
     cudaFree(d_mlp_output);
 }
 
+#endif
