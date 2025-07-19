@@ -171,6 +171,14 @@ void free_slm(SLM* slm) {
     }
 }
 
+// CUDA kernel for residual connection: output = input1 + input2
+__global__ void residual_add_kernel(float* output, float* input1, float* input2, int size) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < size) {
+        output[idx] = input1[idx] + input2[idx];
+    }
+}
+
 // Forward pass
 void forward_pass_slm(SLM* slm, unsigned char* d_X) {
     int seq_len = slm->ssm->seq_len;
@@ -188,9 +196,17 @@ void forward_pass_slm(SLM* slm, unsigned char* d_X) {
     // Y_t = O_t C^T + E_t D^T - Forward through SSM
     forward_pass_ssm(slm->ssm, slm->d_embedded_input);
 
-    // Z_t = Y_t W_1
+    // Residual connection: Add input embeddings to SSM output
+    // R_t = Y_t + E_t - SSM output + input embeddings (residual connection)
+    int total_elements = seq_len * batch_size * slm->embed_dim;
+    int blocks_residual = (total_elements + 255) / 256;
+    residual_add_kernel<<<blocks_residual, 256>>>(
+        slm->ssm->d_predictions, slm->ssm->d_predictions, slm->d_embedded_input, total_elements
+    );
+
+    // Z_t = R_t W_1
     // A_t = Z_t σ(Z_t)
-    // L_t = A_t W_2 - Forward through MLP
+    // L_t = A_t W_2 - Forward through MLP (now using residual SSM output)
     forward_pass_mlp(slm->mlp, slm->ssm->d_predictions);
     
     // P_t = softmax(L_t) - Apply softmax for probability distribution
@@ -239,13 +255,17 @@ void backward_pass_slm(SLM* slm, unsigned char* d_X) {
     // ∂L/∂W_2 = A_t^T (∂L/∂L_t)
     // ∂L/∂A_t = (∂L/∂L_t)(W_2)^T
     // ∂L/∂Z_t = ∂L/∂A_t ⊙ [σ(Z_t) + Z_t σ(Z_t)(1-σ(Z_t))]
-    // ∂L/∂W_1 = Y_t^T (∂L/∂Z_t) - Backward through MLP
+    // ∂L/∂W_1 = R_t^T (∂L/∂Z_t) - Backward through MLP
     backward_pass_mlp(slm->mlp, slm->ssm->d_predictions);
     
-    // Copy MLP input gradients to SSM
+    // Copy MLP input gradients to SSM - gradients with respect to residual output R_t
     int total_elements = slm->ssm->seq_len * slm->ssm->batch_size * slm->ssm->output_dim;
     CHECK_CUDA(cudaMemcpy(slm->ssm->d_error, slm->mlp->d_error, 
                          total_elements * sizeof(float), cudaMemcpyDeviceToDevice));
+    
+    // For the residual connection: ∂L/∂R_t = ∂L/∂(Y_t + E_t) flows to both Y_t and E_t
+    // Since R_t = Y_t + E_t, we have ∂L/∂Y_t = ∂L/∂R_t and ∂L/∂E_t += ∂L/∂R_t
+    // The gradients in slm->ssm->d_error are already ∂L/∂R_t, so they serve as ∂L/∂Y_t for SSM
     
     // ∂L/∂C = Σ_t (∂L/∂Y_t)^T O_t
     // ∂L/∂D = Σ_t (∂L/∂Y_t)^T E_t  
@@ -255,7 +275,7 @@ void backward_pass_slm(SLM* slm, unsigned char* d_X) {
     // ∂L/∂B = Σ_t (∂L/∂H_t)^T E_t - Backward through SSM
     backward_pass_ssm(slm->ssm, slm->d_embedded_input);
     
-    // ∂L/∂E_t = (∂L/∂H_t) B + (∂L/∂Y_t) D - Compute input gradients from SSM
+    // ∂L/∂E_t = (∂L/∂H_t) B + (∂L/∂Y_t) D + ∂L/∂R_t - Compute input gradients from SSM + residual
     const float alpha = 1.0f;
     const float beta = 0.0f;
     
@@ -282,6 +302,14 @@ void backward_pass_slm(SLM* slm, unsigned char* d_X) {
                                 &alpha, slm->ssm->d_D, slm->ssm->input_dim,
                                 d_output_error_t, slm->ssm->output_dim,
                                 &alpha, d_input_grad_t, slm->ssm->input_dim));
+        
+        // ∂L/∂E_t += ∂L/∂R_t - Gradient from residual connection (direct path)
+        // Since ∂L/∂R_t = d_output_error_t and R_t = Y_t + E_t, we add the residual gradient
+        CHECK_CUBLAS(cublasSaxpy(slm->ssm->cublas_handle,
+                                slm->ssm->batch_size * slm->ssm->input_dim,
+                                &alpha,
+                                d_output_error_t, 1,
+                                d_input_grad_t, 1));
     }
     
     // ∂L/∂W_E[c] = Σ_{t,b: X_{t,b}=c} ∂L/∂E_t - Accumulate embedding gradients
@@ -501,7 +529,14 @@ void generate_text_slm(SLM* slm, const char* seed_text, int generation_length, f
                                 slm->d_embedded_input, slm->ssm->input_dim,
                                 &beta_add, d_mlp_input, slm->ssm->output_dim));
         
-        // Z_t = Y_t W_1 - MLP layer 1
+        // R_t = Y_t + E_t - Add residual connection (SSM output + input embeddings)
+        CHECK_CUBLAS(cublasSaxpy(slm->ssm->cublas_handle,
+                                slm->embed_dim,
+                                &alpha,
+                                slm->d_embedded_input, 1,
+                                d_mlp_input, 1));
+        
+        // Z_t = R_t W_1 - MLP layer 1 (now using residual input)
         CHECK_CUBLAS(cublasSgemv(slm->mlp->cublas_handle,
                                 CUBLAS_OP_T,
                                 slm->mlp->input_dim,
@@ -601,7 +636,14 @@ void generate_text_slm(SLM* slm, const char* seed_text, int generation_length, f
                                 slm->d_embedded_input, slm->ssm->input_dim,
                                 &beta_add, d_mlp_input, slm->ssm->output_dim));
         
-        // Z_t = Y_t W_1 - MLP layer 1
+        // R_t = Y_t + E_t - Add residual connection (SSM output + input embeddings)
+        CHECK_CUBLAS(cublasSaxpy(slm->ssm->cublas_handle,
+                                slm->embed_dim,
+                                &alpha,
+                                slm->d_embedded_input, 1,
+                                d_mlp_input, 1));
+        
+        // Z_t = R_t W_1 - MLP layer 1 (now using residual input)
         CHECK_CUBLAS(cublasSgemv(slm->mlp->cublas_handle,
                                 CUBLAS_OP_T,
                                 slm->mlp->input_dim,
