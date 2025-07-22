@@ -7,7 +7,10 @@
 typedef struct {
     SSM* ssm;                   // First state space model
     SSM* ssm2;                  // Second state space model
-    MLP* mlp;                   // Multi-layer perceptron for output mapping
+    MLP* mlp;                   // First multi-layer perceptron
+    SSM* ssm3;                  // Third state space model
+    SSM* ssm4;                  // Fourth state space model
+    MLP* mlp2;                  // Second multi-layer perceptron for output mapping
     
     // Language modeling specific buffers
     float* d_embeddings;        // vocab_size x embed_dim
