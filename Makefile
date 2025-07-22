@@ -1,7 +1,9 @@
 CC = clang
 CFLAGS = -O3 -march=native -ffast-math -Wall -Wextra
 LDFLAGS = -lm -lcurl -flto
-CUDAFLAGS = --cuda-gpu-arch=sm_87 -x cuda -Wno-unknown-cuda-version
+
+ARCH ?= sm_87
+CUDAFLAGS = --cuda-gpu-arch=$(ARCH) -x cuda -Wno-unknown-cuda-version
 CUDALIBS = -L/usr/local/cuda/lib64 -lcudart -lcublas
 
 train.out: slm.o data.o train.o ssm/gpu/ssm.o mlp/gpu/mlp.o
@@ -17,16 +19,16 @@ train.o: train.c slm.h data.h
 	$(CC) $(CFLAGS) $(CUDAFLAGS) -c train.c -o $@
 
 ssm/gpu/ssm.o:
-	$(MAKE) -C ssm/gpu ssm.o
+	$(MAKE) -C ssm/gpu ssm.o ARCH=$(ARCH)
 
 mlp/gpu/mlp.o:
-	$(MAKE) -C mlp/gpu mlp.o
+	$(MAKE) -C mlp/gpu mlp.o ARCH=$(ARCH)
 
 ssm/gpu/data.o:
-	$(MAKE) -C ssm/gpu data.o
+	$(MAKE) -C ssm/gpu data.o ARCH=$(ARCH)
 
 mlp/gpu/data.o:
-	$(MAKE) -C mlp/gpu data.o
+	$(MAKE) -C mlp/gpu data.o ARCH=$(ARCH)
 
 run: train.out
 	@time ./train.out
