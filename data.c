@@ -158,6 +158,14 @@ int download_book(int book_id, int process_id, const char* output_file,
         }
     }
     
+    // Skip books that start with "Book_" (including fallback titles)
+    if (title && strncmp(title, "Book_", 5) == 0) {
+        free(buffer.data);
+        if (title) free(title);
+        if (author) free(author);
+        return 0;
+    }
+    
     // Create temporary file
     char temp_filename[512];
     snprintf(temp_filename, sizeof(temp_filename), "%s/book_%d_%d.txt", temp_dir, process_id, book_id);
@@ -342,13 +350,26 @@ int download_corpus(const char* filename, int target_size_mb) {
     printf("Downloading Project Gutenberg books to reach %dMB using %d processes...\n", 
            target_size_mb, num_processes);
     
+    // Define different ranges for each process to explore
+    int start_positions[] = {
+        rand() % 50000 + 1,         // Process 0: Random anywhere
+        rand() % 50000 + 1,         // Process 1: Random anywhere  
+        rand() % 50000 + 1,         // Process 2: Random anywhere
+        rand() % 50000 + 1          // Process 3: Random anywhere
+    };
+
+    printf("Process starting positions:\n");
+    for (int i = 0; i < num_processes; i++) {
+        printf("  P%d: Starting at book ID %d\n", i + 1, start_positions[i]);
+    }
+    
     // Fork worker processes
     pid_t pids[num_processes];
     for (int i = 0; i < num_processes; i++) {
         pids[i] = fork();
         if (pids[i] == 0) {
             // Child process
-            worker_process(i + 1, i + 1, num_processes, filename, temp_dir, 
+            worker_process(i + 1, start_positions[i], num_processes, filename, temp_dir, 
                           lock_file, size_file, book_count_file, target_size_bytes);
             exit(0);
         } else if (pids[i] < 0) {
@@ -397,7 +418,7 @@ char* load_corpus(const char* filename, size_t* corpus_size, int target_size_byt
         
         // Only attempt download for the default gutenberg corpus
         if (strcmp(filename, "gutenberg_corpus.txt") == 0) {
-            if (download_corpus(filename, target_size_bytes / (1024 * 1024)) == 0) {
+            if (download_corpus(filename, target_size_bytes / (1024 * 1024)) == 1) {
                 // Try to open the file again after download
                 file = fopen(filename, "r");
             }
