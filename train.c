@@ -19,15 +19,29 @@ float cosine_schedule(float lr_init, float lr_min, int current_batch, int total_
 // Function to calculate total model parameters
 size_t calculate_model_parameters(SLM* slm) {
     size_t total_params = 0;
+    
+    // Embedding parameters
     total_params += slm->vocab_size * slm->embed_dim;
-    SSM* ssm = slm->ssm;
-    total_params += ssm->state_dim * ssm->state_dim;
-    total_params += ssm->state_dim * ssm->input_dim;
-    total_params += ssm->output_dim * ssm->state_dim;
-    total_params += ssm->output_dim * ssm->input_dim;
+    
+    // First SSM parameters
+    SSM* ssm1 = slm->ssm;
+    total_params += ssm1->state_dim * ssm1->state_dim;    // A1 matrix
+    total_params += ssm1->state_dim * ssm1->input_dim;    // B1 matrix
+    total_params += ssm1->output_dim * ssm1->state_dim;   // C1 matrix
+    total_params += ssm1->output_dim * ssm1->input_dim;   // D1 matrix
+    
+    // Second SSM parameters
+    SSM* ssm2 = slm->ssm2;
+    total_params += ssm2->state_dim * ssm2->state_dim;    // A2 matrix
+    total_params += ssm2->state_dim * ssm2->input_dim;    // B2 matrix
+    total_params += ssm2->output_dim * ssm2->state_dim;   // C2 matrix
+    total_params += ssm2->output_dim * ssm2->input_dim;   // D2 matrix
+    
+    // MLP parameters
     MLP* mlp = slm->mlp;
-    total_params += mlp->hidden_dim * mlp->input_dim;
-    total_params += mlp->output_dim * mlp->hidden_dim;
+    total_params += mlp->hidden_dim * mlp->input_dim;     // W1 matrix
+    total_params += mlp->output_dim * mlp->hidden_dim;    // W2 matrix
+    
     return total_params;
 }
 

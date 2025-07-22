@@ -5,7 +5,8 @@
 #include "mlp/gpu/mlp.h"
 
 typedef struct {
-    SSM* ssm;                   // Underlying state space model
+    SSM* ssm;                   // First state space model
+    SSM* ssm2;                  // Second state space model
     MLP* mlp;                   // Multi-layer perceptron for output mapping
     
     // Language modeling specific buffers
