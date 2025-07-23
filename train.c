@@ -80,9 +80,13 @@ int main(int argc, char* argv[]) {
     int model_size = calculate_model_parameters(slm);
     printf("Model initialized with %d parameters\n", model_size);
     
-    // Load corpus
+    // Load training corpus
     size_t corpus_size;
     char* corpus = load_corpus("gutenberg_corpus.txt", &corpus_size, model_size * 500);
+    
+    // Load validation corpus
+    size_t val_corpus_size;
+    char* val_corpus = load_corpus("gutenberg_corpus_val.txt", &val_corpus_size, model_size * 100);
 
     // Training loop
     for (int batch = 0; batch <= num_batches; batch++) {
@@ -116,6 +120,7 @@ int main(int argc, char* argv[]) {
         if(loss >= 5.6) {
             printf("Loss too high: %.6f, stopping training\n", loss);
             free(corpus);
+            free(val_corpus);
             free(input_chars);
             free(target_chars);
             free(input_reshaped);
@@ -139,6 +144,35 @@ int main(int argc, char* argv[]) {
             printf("--- End Sample Generation ---\n\n");
         }
         
+        // Calculate validation loss every 50 batches
+        if (batch % 50 == 0 && batch > 0) {
+            // Generate validation data from validation corpus
+            generate_char_sequences_from_corpus(&input_chars, &target_chars, 
+                                              batch_size, seq_len, val_corpus, val_corpus_size);
+            
+            // Reshape validation data from [batch][time] to [time][batch]
+            for (int t = 0; t < seq_len; t++) {
+                for (int b = 0; b < batch_size; b++) {
+                    input_reshaped[t * batch_size + b] = input_chars[b * seq_len + t];
+                    target_reshaped[t * batch_size + b] = target_chars[b * seq_len + t];
+                }
+            }
+            
+            // Copy validation data to GPU
+            CHECK_CUDA(cudaMemcpy(d_input_chars, input_reshaped, 
+                                 seq_len * batch_size * sizeof(unsigned char), cudaMemcpyHostToDevice));
+            CHECK_CUDA(cudaMemcpy(d_target_chars, target_reshaped, 
+                                 seq_len * batch_size * sizeof(unsigned char), cudaMemcpyHostToDevice));
+            
+            // Forward pass on validation data (no gradients needed)
+            forward_pass_slm(slm, d_input_chars);
+            
+            // Calculate validation loss
+            float val_loss = calculate_loss_slm(slm, d_target_chars);
+            
+            printf("Batch [%d/%d], Validation Loss: %.6f\n", batch, num_batches, val_loss);
+        }
+        
         if (batch == num_batches) break;
         
         // Backward pass
@@ -157,6 +191,7 @@ int main(int argc, char* argv[]) {
     
     // Cleanup
     free(corpus);
+    free(val_corpus);
     free(input_chars);
     free(target_chars);
     free(input_reshaped);
