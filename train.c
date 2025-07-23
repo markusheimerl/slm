@@ -86,7 +86,7 @@ int main(int argc, char* argv[]) {
     
     // Load validation corpus
     size_t val_corpus_size;
-    char* val_corpus = load_corpus("gutenberg_corpus_val.txt", &val_corpus_size, model_size * 100);
+    char* val_corpus = load_corpus("gutenberg_corpus_val.txt", &val_corpus_size, model_size * 5);
 
     // Training loop
     for (int batch = 0; batch <= num_batches; batch++) {
