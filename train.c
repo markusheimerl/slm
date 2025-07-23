@@ -131,21 +131,15 @@ int main(int argc, char* argv[]) {
             return -1;
         }
         
-        if (batch % 5 == 0) {
-            printf("Batch [%d/%d], Loss: %.6f, LR: %.6f\n", batch, num_batches, loss, current_lr);
-        }
-
-        // Generate sample text every 100 batches
-        if (batch % 100 == 0 && batch > 0) {
-            printf("\n--- Sample Generation at Batch %d ---\n", batch);
-            generate_text_slm(slm, "The quick brown fox", 128, 0.8f);
-            generate_text_slm(slm, "Once upon a time", 128, 0.8f);
-            generate_text_slm(slm, "In the beginning", 128, 0.8f);
-            printf("--- End Sample Generation ---\n\n");
-        }
-        
         // Calculate validation loss every 50 batches
+        float val_loss = -1.0f; // Initialize to invalid value
         if (batch % 50 == 0 && batch > 0) {
+            // Store current training data
+            unsigned char* backup_input = (unsigned char*)malloc(seq_len * batch_size * sizeof(unsigned char));
+            unsigned char* backup_target = (unsigned char*)malloc(seq_len * batch_size * sizeof(unsigned char));
+            memcpy(backup_input, input_reshaped, seq_len * batch_size * sizeof(unsigned char));
+            memcpy(backup_target, target_reshaped, seq_len * batch_size * sizeof(unsigned char));
+            
             // Generate validation data from validation corpus
             generate_char_sequences_from_corpus(&input_chars, &target_chars, 
                                               batch_size, seq_len, val_corpus, val_corpus_size);
@@ -168,9 +162,40 @@ int main(int argc, char* argv[]) {
             forward_pass_slm(slm, d_input_chars);
             
             // Calculate validation loss
-            float val_loss = calculate_loss_slm(slm, d_target_chars);
+            val_loss = calculate_loss_slm(slm, d_target_chars);
             
-            printf("Batch [%d/%d], Validation Loss: %.6f\n", batch, num_batches, val_loss);
+            // Restore training data
+            memcpy(input_reshaped, backup_input, seq_len * batch_size * sizeof(unsigned char));
+            memcpy(target_reshaped, backup_target, seq_len * batch_size * sizeof(unsigned char));
+            
+            // Copy training data back to GPU
+            CHECK_CUDA(cudaMemcpy(d_input_chars, input_reshaped, 
+                                 seq_len * batch_size * sizeof(unsigned char), cudaMemcpyHostToDevice));
+            CHECK_CUDA(cudaMemcpy(d_target_chars, target_reshaped, 
+                                 seq_len * batch_size * sizeof(unsigned char), cudaMemcpyHostToDevice));
+            
+            // Restore the model state by re-running forward pass on training data
+            forward_pass_slm(slm, d_input_chars);
+            
+            free(backup_input);
+            free(backup_target);
+        }
+        
+        if (batch % 5 == 0) {
+            if (val_loss >= 0.0f) {
+                printf("Batch [%d/%d], Loss: %.6f, LR: %.6f, Val Loss: %.6f\n", batch, num_batches, loss, current_lr, val_loss);
+            } else {
+                printf("Batch [%d/%d], Loss: %.6f, LR: %.6f\n", batch, num_batches, loss, current_lr);
+            }
+        }
+
+        // Generate sample text every 100 batches
+        if (batch % 100 == 0 && batch > 0) {
+            printf("\n--- Sample Generation at Batch %d ---\n", batch);
+            generate_text_slm(slm, "The quick brown fox", 128, 0.8f);
+            generate_text_slm(slm, "Once upon a time", 128, 0.8f);
+            generate_text_slm(slm, "In the beginning", 128, 0.8f);
+            printf("--- End Sample Generation ---\n\n");
         }
         
         if (batch == num_batches) break;
