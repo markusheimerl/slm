@@ -416,8 +416,8 @@ char* load_corpus(const char* filename, size_t* corpus_size, int target_size_byt
     if (!file) {
         printf("Corpus file not found: %s\n", filename);
         
-        // Only attempt download for the default gutenberg corpus
-        if (strcmp(filename, "gutenberg_corpus.txt") == 0) {
+        // Attempt download for gutenberg corpus files (training and validation)
+        if (strcmp(filename, "gutenberg_corpus.txt") == 0 || strcmp(filename, "gutenberg_corpus_val.txt") == 0) {
             if (download_corpus(filename, target_size_bytes / (1024 * 1024)) == 1) {
                 // Try to open the file again after download
                 file = fopen(filename, "r");
