@@ -43,8 +43,8 @@ int main(int argc, char* argv[]) {
     // Model parameters
     const int embed_dim = 256;
     const int state_dim = 128;
-    const int seq_len = 1024;
-    const int batch_size = 128;
+    const int seq_len = 4096;
+    const int batch_size = 64;
     
     // Training parameters
     const int num_batches = 100000;
@@ -82,7 +82,7 @@ int main(int argc, char* argv[]) {
     
     // Load corpus
     size_t corpus_size;
-    char* corpus = load_corpus("gutenberg_corpus.txt", &corpus_size, model_size * 100);
+    char* corpus = load_corpus("gutenberg_corpus.txt", &corpus_size, model_size * 500);
 
     // Training loop
     for (int batch = 0; batch <= num_batches; batch++) {
