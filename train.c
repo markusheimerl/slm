@@ -181,7 +181,7 @@ int main(int argc, char* argv[]) {
             free(backup_target);
         }
         
-        if (batch % 5 == 0) {
+        if (batch % 2 == 0) {
             if (val_loss >= 0.0f) {
                 printf("Batch [%d/%d], Loss: %.6f, LR: %.6f, Val Loss: %.6f\n", batch, num_batches, loss, current_lr, val_loss);
             } else {
