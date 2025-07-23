@@ -395,27 +395,23 @@ void generate_text_slm(SLM* slm, const char* seed_text, int generation_length, f
         return;
     }
     
+    // Store original dimensions to restore later
+    int original_seq_len = slm->ssm->seq_len;
+    int original_ssm_batch_size = slm->ssm->batch_size;
+    int original_mlp_batch_size = slm->mlp->batch_size;
+    
+    // Temporarily set dimensions for single-token processing
+    slm->ssm->seq_len = 1;
+    slm->ssm->batch_size = 1;
+    slm->mlp->batch_size = 1;
+    
     // Allocate temporary buffers for generation
     unsigned char* h_input = (unsigned char*)malloc(sizeof(unsigned char));
     unsigned char* d_input;
     float* h_probs = (float*)malloc(slm->vocab_size * sizeof(float));
-    float* d_h_current = NULL;
-    float* d_h_next = NULL;
-    float* d_o_current = NULL;
-    float* d_mlp_input = NULL;
-    float* d_mlp_hidden = NULL;
-    float* d_mlp_output = NULL;
     
     CHECK_CUDA(cudaMalloc(&d_input, sizeof(unsigned char)));
-    CHECK_CUDA(cudaMalloc(&d_h_current, slm->ssm->state_dim * sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&d_h_next, slm->ssm->state_dim * sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&d_o_current, slm->ssm->state_dim * sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&d_mlp_input, slm->vocab_size * sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&d_mlp_hidden, slm->mlp->hidden_dim * sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&d_mlp_output, slm->vocab_size * sizeof(float)));
-    
-    // H_0 = 0 - Initialize hidden state to zero
-    CHECK_CUDA(cudaMemset(d_h_current, 0, slm->ssm->state_dim * sizeof(float)));
+    CHECK_CUDA(cudaMemset(slm->ssm->d_states, 0, slm->ssm->state_dim * sizeof(float)));
     
     printf("Seed: \"%s\"\nGenerated: ", seed_text);
     
@@ -431,91 +427,10 @@ void generate_text_slm(SLM* slm, const char* seed_text, int generation_length, f
             slm->d_embedded_input, slm->d_embeddings, d_input, 1, slm->embed_dim
         );
         
-        // Forward pass for one timestep
-        const float alpha = 1.0f;
-        const float beta = 0.0f;
-        const float beta_add = 1.0f;
+        // Forward through SSM
+        forward_pass_ssm(slm->ssm, slm->d_embedded_input);
         
-        // H_t = E_t B^T
-        CHECK_CUBLAS(cublasSgemm(slm->ssm->cublas_handle,
-                                CUBLAS_OP_T, CUBLAS_OP_N,
-                                slm->ssm->state_dim, 1, slm->ssm->input_dim,
-                                &alpha, slm->ssm->d_B, slm->ssm->input_dim,
-                                slm->d_embedded_input, slm->ssm->input_dim,
-                                &beta, d_h_next, slm->ssm->state_dim));
-        
-        // H_t += H_{t-1} A^T (except for first character)
-        if (i > 0) {
-            CHECK_CUBLAS(cublasSgemm(slm->ssm->cublas_handle,
-                                    CUBLAS_OP_T, CUBLAS_OP_N,
-                                    slm->ssm->state_dim, 1, slm->ssm->state_dim,
-                                    &alpha, slm->ssm->d_A, slm->ssm->state_dim,
-                                    d_h_current, slm->ssm->state_dim,
-                                    &beta_add, d_h_next, slm->ssm->state_dim));
-        }
-        
-        // O_t = H_t σ(H_t)
-        int block_size = 256;
-        int num_blocks = (slm->ssm->state_dim + block_size - 1) / block_size;
-        swish_forward_kernel_ssm<<<num_blocks, block_size>>>(d_o_current, d_h_next, slm->ssm->state_dim);
-        
-        // Y_t = O_t C^T + E_t D^T
-        // Y_t = O_t C^T
-        CHECK_CUBLAS(cublasSgemm(slm->ssm->cublas_handle,
-                                CUBLAS_OP_T, CUBLAS_OP_N,
-                                slm->ssm->output_dim, 1, slm->ssm->state_dim,
-                                &alpha, slm->ssm->d_C, slm->ssm->state_dim,
-                                d_o_current, slm->ssm->state_dim,
-                                &beta, d_mlp_input, slm->ssm->output_dim));
-        
-        // Y_t += E_t D^T
-        CHECK_CUBLAS(cublasSgemm(slm->ssm->cublas_handle,
-                                CUBLAS_OP_T, CUBLAS_OP_N,
-                                slm->ssm->output_dim, 1, slm->ssm->input_dim,
-                                &alpha, slm->ssm->d_D, slm->ssm->input_dim,
-                                slm->d_embedded_input, slm->ssm->input_dim,
-                                &beta_add, d_mlp_input, slm->ssm->output_dim));
-        
-        // Z_t = Y_t W_1 - MLP layer 1
-        CHECK_CUBLAS(cublasSgemv(slm->mlp->cublas_handle,
-                                CUBLAS_OP_T,
-                                slm->mlp->input_dim,
-                                slm->mlp->hidden_dim,
-                                &alpha,
-                                slm->mlp->d_fc1_weight,
-                                slm->mlp->input_dim,
-                                d_mlp_input,
-                                1,
-                                &beta,
-                                d_mlp_hidden,
-                                1));
-
-        // A_t = Z_t σ(Z_t) - Apply swish activation
-        num_blocks = (slm->mlp->hidden_dim + block_size - 1) / block_size;
-        swish_forward_kernel_mlp<<<num_blocks, block_size>>>(
-            d_mlp_hidden,
-            d_mlp_hidden,
-            slm->mlp->hidden_dim
-        );
-
-        // L_t = A_t W_2 - MLP layer 2
-        CHECK_CUBLAS(cublasSgemv(slm->mlp->cublas_handle,
-                                CUBLAS_OP_T,
-                                slm->mlp->hidden_dim,
-                                slm->mlp->output_dim,
-                                &alpha,
-                                slm->mlp->d_fc2_weight,
-                                slm->mlp->hidden_dim,
-                                d_mlp_hidden,
-                                1,
-                                &beta,
-                                d_mlp_output,
-                                1));
-        
-        // Swap current and next
-        float* temp = d_h_current;
-        d_h_current = d_h_next;
-        d_h_next = temp;
+        // No need for MLP during seed processing - only building SSM state
     }
     
     // Now generate new characters
@@ -534,86 +449,16 @@ void generate_text_slm(SLM* slm, const char* seed_text, int generation_length, f
             slm->d_embedded_input, slm->d_embeddings, d_input, 1, slm->embed_dim
         );
         
-        // Forward pass for one timestep
-        const float alpha = 1.0f;
-        const float beta = 0.0f;
-        const float beta_add = 1.0f;
+        // Forward through SSM
+        forward_pass_ssm(slm->ssm, slm->d_embedded_input);
         
-        // H_t = E_t B^T + H_{t-1} A^T
-        CHECK_CUBLAS(cublasSgemm(slm->ssm->cublas_handle,
-                                CUBLAS_OP_T, CUBLAS_OP_N,
-                                slm->ssm->state_dim, 1, slm->ssm->input_dim,
-                                &alpha, slm->ssm->d_B, slm->ssm->input_dim,
-                                slm->d_embedded_input, slm->ssm->input_dim,
-                                &beta, d_h_next, slm->ssm->state_dim));
+        // Forward through MLP
+        forward_pass_mlp(slm->mlp, slm->ssm->d_predictions);
         
-        CHECK_CUBLAS(cublasSgemm(slm->ssm->cublas_handle,
-                                CUBLAS_OP_T, CUBLAS_OP_N,
-                                slm->ssm->state_dim, 1, slm->ssm->state_dim,
-                                &alpha, slm->ssm->d_A, slm->ssm->state_dim,
-                                d_h_current, slm->ssm->state_dim,
-                                &beta_add, d_h_next, slm->ssm->state_dim));
-        
-        // O_t = H_t σ(H_t)
-        int block_size = 256;
-        int num_blocks = (slm->ssm->state_dim + block_size - 1) / block_size;
-        swish_forward_kernel_ssm<<<num_blocks, block_size>>>(d_o_current, d_h_next, slm->ssm->state_dim);
-        
-        // Y_t = O_t C^T + E_t D^T
-        // Y_t = O_t C^T
-        CHECK_CUBLAS(cublasSgemm(slm->ssm->cublas_handle,
-                                CUBLAS_OP_T, CUBLAS_OP_N,
-                                slm->ssm->output_dim, 1, slm->ssm->state_dim,
-                                &alpha, slm->ssm->d_C, slm->ssm->state_dim,
-                                d_o_current, slm->ssm->state_dim,
-                                &beta, d_mlp_input, slm->ssm->output_dim));
-        
-        // Y_t += E_t D^T
-        CHECK_CUBLAS(cublasSgemm(slm->ssm->cublas_handle,
-                                CUBLAS_OP_T, CUBLAS_OP_N,
-                                slm->ssm->output_dim, 1, slm->ssm->input_dim,
-                                &alpha, slm->ssm->d_D, slm->ssm->input_dim,
-                                slm->d_embedded_input, slm->ssm->input_dim,
-                                &beta_add, d_mlp_input, slm->ssm->output_dim));
-        
-        // Z_t = Y_t W_1 - MLP layer 1
-        CHECK_CUBLAS(cublasSgemv(slm->mlp->cublas_handle,
-                                CUBLAS_OP_T,
-                                slm->mlp->input_dim,
-                                slm->mlp->hidden_dim,
-                                &alpha,
-                                slm->mlp->d_fc1_weight,
-                                slm->mlp->input_dim,
-                                d_mlp_input,
-                                1,
-                                &beta,
-                                d_mlp_hidden,
-                                1));
-
-        // A_t = Z_t σ(Z_t) - Apply swish activation
-        num_blocks = (slm->mlp->hidden_dim + block_size - 1) / block_size;
-        swish_forward_kernel_mlp<<<num_blocks, block_size>>>(
-            d_mlp_hidden,
-            d_mlp_hidden,
-            slm->mlp->hidden_dim
+        // Apply softmax to get probabilities
+        softmax_kernel<<<1, 256>>>(
+            slm->d_softmax, slm->mlp->d_predictions, 1, slm->vocab_size
         );
-
-        // L_t = A_t W_2 - MLP layer 2
-        CHECK_CUBLAS(cublasSgemv(slm->mlp->cublas_handle,
-                                CUBLAS_OP_T,
-                                slm->mlp->hidden_dim,
-                                slm->mlp->output_dim,
-                                &alpha,
-                                slm->mlp->d_fc2_weight,
-                                slm->mlp->hidden_dim,
-                                d_mlp_hidden,
-                                1,
-                                &beta,
-                                d_mlp_output,
-                                1));
-        
-        // P_t = softmax(L_t) - Apply softmax
-        softmax_kernel<<<1, 256>>>(slm->d_softmax, d_mlp_output, 1, slm->vocab_size);
         
         // Copy probabilities to host
         CHECK_CUDA(cudaMemcpy(h_probs, slm->d_softmax, slm->vocab_size * sizeof(float), cudaMemcpyDeviceToHost));
@@ -654,23 +499,17 @@ void generate_text_slm(SLM* slm, const char* seed_text, int generation_length, f
         
         // Set up for next iteration
         h_input[0] = (unsigned char)sampled_char;
-        
-        // Swap current and next
-        float* temp = d_h_current;
-        d_h_current = d_h_next;
-        d_h_next = temp;
     }
     
     printf("\n");
+    
+    // Restore original dimensions
+    slm->ssm->seq_len = original_seq_len;
+    slm->ssm->batch_size = original_ssm_batch_size;
+    slm->mlp->batch_size = original_mlp_batch_size;
     
     // Cleanup
     free(h_input);
     free(h_probs);
     cudaFree(d_input);
-    cudaFree(d_h_current);
-    cudaFree(d_h_next);
-    cudaFree(d_o_current);
-    cudaFree(d_mlp_input);
-    cudaFree(d_mlp_hidden);
-    cudaFree(d_mlp_output);
 }
