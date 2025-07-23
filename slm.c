@@ -87,7 +87,7 @@ __global__ void embedding_gradient_kernel(float* embed_grad, float* input_grad, 
     }
 }
 
-// Initialize SLM with four SSMs and two MLPs
+// Initialize SLM with three SSMs and one MLP
 SLM* init_slm(int embed_dim, int state_dim, int seq_len, int batch_size) {
     SLM* slm = (SLM*)malloc(sizeof(SLM));
         
@@ -101,17 +101,11 @@ SLM* init_slm(int embed_dim, int state_dim, int seq_len, int batch_size) {
     // Initialize second SSM (input: embed_dim, output: embed_dim)
     slm->ssm2 = init_ssm(embed_dim, state_dim, embed_dim, seq_len, batch_size);
     
-    // Initialize first MLP (input: embed_dim, output: embed_dim)
-    slm->mlp = init_mlp(embed_dim, 4 * embed_dim, embed_dim, seq_len * batch_size);
-
     // Initialize third SSM (input: embed_dim, output: embed_dim)
     slm->ssm3 = init_ssm(embed_dim, state_dim, embed_dim, seq_len, batch_size);
     
-    // Initialize fourth SSM (input: embed_dim, output: embed_dim)
-    slm->ssm4 = init_ssm(embed_dim, state_dim, embed_dim, seq_len, batch_size);
-    
-    // Initialize second MLP (input: embed_dim, output: vocab_size)
-    slm->mlp2 = init_mlp(embed_dim, 4 * embed_dim, slm->vocab_size, seq_len * batch_size);
+    // Initialize MLP (input: embed_dim, output: vocab_size)
+    slm->mlp = init_mlp(embed_dim, 4 * embed_dim, slm->vocab_size, seq_len * batch_size);
 
     // Allocate embedding matrices
     CHECK_CUDA(cudaMalloc(&slm->d_embeddings, slm->vocab_size * slm->embed_dim * sizeof(float)));
@@ -141,15 +135,13 @@ SLM* init_slm(int embed_dim, int state_dim, int seq_len, int batch_size) {
     return slm;
 }
 
-// Free SLM with four SSMs and two MLPs
+// Free SLM with three SSMs and one MLP
 void free_slm(SLM* slm) {
     if (slm) {
         if (slm->ssm) free_ssm(slm->ssm);
         if (slm->ssm2) free_ssm(slm->ssm2);
-        if (slm->mlp) free_mlp(slm->mlp);
         if (slm->ssm3) free_ssm(slm->ssm3);
-        if (slm->ssm4) free_ssm(slm->ssm4);
-        if (slm->mlp2) free_mlp(slm->mlp2);
+        if (slm->mlp) free_mlp(slm->mlp);
         cudaFree(slm->d_embeddings);
         cudaFree(slm->d_embeddings_grad);
         cudaFree(slm->d_embeddings_m);
@@ -162,7 +154,7 @@ void free_slm(SLM* slm) {
     }
 }
 
-// Forward pass with four SSMs and two MLPs
+// Forward pass with three SSMs and one MLP
 void forward_pass_slm(SLM* slm, unsigned char* d_X) {
     int seq_len = slm->ssm->seq_len;
     int batch_size = slm->ssm->batch_size;
@@ -180,23 +172,17 @@ void forward_pass_slm(SLM* slm, unsigned char* d_X) {
     // Second SSM: H2_t = Y1_t B2^T + H2_{t-1} A2^T, O2_t = H2_t σ(H2_t), Y2_t = O2_t C2^T + Y1_t D2^T  
     forward_pass_ssm(slm->ssm2, slm->ssm->d_predictions);
 
-    // First MLP: Z1_t = Y2_t W1_1, A1_t = Z1_t σ(Z1_t), L1_t = A1_t W1_2 - Forward through first MLP
-    forward_pass_mlp(slm->mlp, slm->ssm2->d_predictions);
+    // Third SSM: H3_t = Y2_t B3^T + H3_{t-1} A3^T, O3_t = H3_t σ(H3_t), Y3_t = O3_t C3^T + Y2_t D3^T
+    forward_pass_ssm(slm->ssm3, slm->ssm2->d_predictions);
 
-    // Third SSM: H3_t = L1_t B3^T + H3_{t-1} A3^T, O3_t = H3_t σ(H3_t), Y3_t = O3_t C3^T + L1_t D3^T
-    forward_pass_ssm(slm->ssm3, slm->mlp->d_predictions);
-
-    // Fourth SSM: H4_t = Y3_t B4^T + H4_{t-1} A4^T, O4_t = H4_t σ(H4_t), Y4_t = O4_t C4^T + Y3_t D4^T
-    forward_pass_ssm(slm->ssm4, slm->ssm3->d_predictions);
-
-    // Second MLP: Z2_t = Y4_t W2_1, A2_t = Z2_t σ(Z2_t), L2_t = A2_t W2_2 - Forward through second MLP
-    forward_pass_mlp(slm->mlp2, slm->ssm4->d_predictions);
+    // MLP: Z_t = Y3_t W_1, A_t = Z_t σ(Z_t), L_t = A_t W_2 - Forward through MLP
+    forward_pass_mlp(slm->mlp, slm->ssm3->d_predictions);
     
-    // P_t = softmax(L2_t) - Apply softmax for probability distribution
+    // P_t = softmax(L_t) - Apply softmax for probability distribution
     int total_tokens = seq_len * batch_size;
     int blocks = (total_tokens + 255) / 256;
     softmax_kernel<<<blocks, 256>>>(
-        slm->d_softmax, slm->mlp2->d_predictions, total_tokens, slm->vocab_size
+        slm->d_softmax, slm->mlp->d_predictions, total_tokens, slm->vocab_size
     );
 }
 
@@ -206,10 +192,10 @@ float calculate_loss_slm(SLM* slm, unsigned char* d_y) {
     int batch_size = slm->ssm->batch_size;
     int total_tokens = seq_len * batch_size;
     
-    // ∂L/∂L2_t = P_t - 1_{y_t} - Compute cross-entropy gradient (softmax - one_hot) for backprop
+    // ∂L/∂L_t = P_t - 1_{y_t} - Compute cross-entropy gradient (softmax - one_hot) for backprop
     int blocks = (total_tokens + 255) / 256;
     cross_entropy_gradient_kernel<<<blocks, 256>>>(
-        slm->mlp2->d_error, slm->d_softmax, d_y, total_tokens, slm->vocab_size
+        slm->mlp->d_error, slm->d_softmax, d_y, total_tokens, slm->vocab_size
     );
     
     // L = -log(P_{y_t}) - Calculate actual cross-entropy loss
@@ -225,104 +211,61 @@ float calculate_loss_slm(SLM* slm, unsigned char* d_y) {
     return total_loss / total_tokens;
 }
 
-// Zero gradients for all SSMs and MLPs
+// Zero gradients for all three SSMs and one MLP
 void zero_gradients_slm(SLM* slm) {
     zero_gradients_ssm(slm->ssm);
     zero_gradients_ssm(slm->ssm2);
-    zero_gradients_mlp(slm->mlp);
     zero_gradients_ssm(slm->ssm3);
-    zero_gradients_ssm(slm->ssm4);
-    zero_gradients_mlp(slm->mlp2);
+    zero_gradients_mlp(slm->mlp);
     CHECK_CUDA(cudaMemset(slm->d_embeddings_grad, 0, 
                          slm->vocab_size * slm->embed_dim * sizeof(float)));
 }
 
-// Backward pass through all layers
+// Backward pass through three SSMs and one MLP
 void backward_pass_slm(SLM* slm, unsigned char* d_X) {
     const float alpha = 1.0f;
     const float beta = 0.0f;
     
-    // ∂L/∂W2_2 = A2_t^T (∂L/∂L2_t), ∂L/∂A2_t = (∂L/∂L2_t)(W2_2)^T
-    // ∂L/∂Z2_t = ∂L/∂A2_t ⊙ [σ(Z2_t) + Z2_t σ(Z2_t)(1-σ(Z2_t))]
-    // ∂L/∂W2_1 = Y4_t^T (∂L/∂Z2_t) - Backward through second MLP
-    backward_pass_mlp(slm->mlp2, slm->ssm4->d_predictions);
+    // ∂L/∂W_2 = A_t^T (∂L/∂L_t), ∂L/∂A_t = (∂L/∂L_t)(W_2)^T
+    // ∂L/∂Z_t = ∂L/∂A_t ⊙ [σ(Z_t) + Z_t σ(Z_t)(1-σ(Z_t))]
+    // ∂L/∂W_1 = Y3_t^T (∂L/∂Z_t) - Backward through MLP
+    backward_pass_mlp(slm->mlp, slm->ssm3->d_predictions);
     
-    // Copy MLP2 input gradients to fourth SSM error
-    int total_elements = slm->ssm4->seq_len * slm->ssm4->batch_size * slm->ssm4->output_dim;
-    CHECK_CUDA(cudaMemcpy(slm->ssm4->d_error, slm->mlp2->d_error, 
+    // Copy MLP input gradients to third SSM error
+    int total_elements = slm->ssm3->seq_len * slm->ssm3->batch_size * slm->ssm3->output_dim;
+    CHECK_CUDA(cudaMemcpy(slm->ssm3->d_error, slm->mlp->d_error, 
                          total_elements * sizeof(float), cudaMemcpyDeviceToDevice));
     
-    // ∂L/∂C4 = Σ_t (∂L/∂Y4_t)^T O4_t, ∂L/∂D4 = Σ_t (∂L/∂Y4_t)^T Y3_t  
-    // ∂L/∂O4_t = (∂L/∂Y4_t)C4, ∂L/∂H4_t = ∂L/∂O4_t ⊙ [σ(H4_t) + H4_t σ(H4_t)(1-σ(H4_t))] + (∂L/∂H4_{t+1})A4
-    // ∂L/∂A4 = Σ_t (∂L/∂H4_t)^T H4_{t-1}, ∂L/∂B4 = Σ_t (∂L/∂H4_t)^T Y3_t - Backward through fourth SSM
-    backward_pass_ssm(slm->ssm4, slm->ssm3->d_predictions);
-    
-    // Compute gradients w.r.t. third SSM outputs: ∂L/∂Y3_t = (∂L/∂H4_t) B4 + (∂L/∂Y4_t) D4
-    CHECK_CUDA(cudaMemset(slm->ssm3->d_error, 0, 
-                         slm->ssm3->seq_len * slm->ssm3->batch_size * slm->ssm3->output_dim * sizeof(float)));
-    
-    for (int t = 0; t < slm->ssm3->seq_len; t++) {
-        float* d_ssm3_error_t = slm->ssm3->d_error + t * slm->ssm3->batch_size * slm->ssm3->output_dim;
-        float* d_ssm4_state_error_t = slm->ssm4->d_state_error + t * slm->ssm4->batch_size * slm->ssm4->state_dim;
-        float* d_ssm4_output_error_t = slm->ssm4->d_error + t * slm->ssm4->batch_size * slm->ssm4->output_dim;
-        
-        // ∂L/∂Y3_t += B4^T (∂L/∂H4_t) - Gradient from state path of fourth SSM
-        CHECK_CUBLAS(cublasSgemm(slm->ssm4->cublas_handle,
-                                CUBLAS_OP_N, CUBLAS_OP_N,
-                                slm->ssm3->output_dim, slm->ssm3->batch_size, slm->ssm4->state_dim,
-                                &alpha, slm->ssm4->d_B, slm->ssm3->output_dim,
-                                d_ssm4_state_error_t, slm->ssm4->state_dim,
-                                &beta, d_ssm3_error_t, slm->ssm3->output_dim));
-        
-        // ∂L/∂Y3_t += D4^T (∂L/∂Y4_t) - Gradient from output path of fourth SSM
-        CHECK_CUBLAS(cublasSgemm(slm->ssm4->cublas_handle,
-                                CUBLAS_OP_N, CUBLAS_OP_N,
-                                slm->ssm3->output_dim, slm->ssm3->batch_size, slm->ssm4->output_dim,
-                                &alpha, slm->ssm4->d_D, slm->ssm3->output_dim,
-                                d_ssm4_output_error_t, slm->ssm4->output_dim,
-                                &alpha, d_ssm3_error_t, slm->ssm3->output_dim));
-    }
-    
-    // ∂L/∂C3 = Σ_t (∂L/∂Y3_t)^T O3_t, ∂L/∂D3 = Σ_t (∂L/∂Y3_t)^T L1_t  
+    // ∂L/∂C3 = Σ_t (∂L/∂Y3_t)^T O3_t, ∂L/∂D3 = Σ_t (∂L/∂Y3_t)^T Y2_t  
     // ∂L/∂O3_t = (∂L/∂Y3_t)C3, ∂L/∂H3_t = ∂L/∂O3_t ⊙ [σ(H3_t) + H3_t σ(H3_t)(1-σ(H3_t))] + (∂L/∂H3_{t+1})A3
-    // ∂L/∂A3 = Σ_t (∂L/∂H3_t)^T H3_{t-1}, ∂L/∂B3 = Σ_t (∂L/∂H3_t)^T L1_t - Backward through third SSM
-    backward_pass_ssm(slm->ssm3, slm->mlp->d_predictions);
+    // ∂L/∂A3 = Σ_t (∂L/∂H3_t)^T H3_{t-1}, ∂L/∂B3 = Σ_t (∂L/∂H3_t)^T Y2_t - Backward through third SSM
+    backward_pass_ssm(slm->ssm3, slm->ssm2->d_predictions);
     
-    // Compute gradients w.r.t. first MLP outputs: ∂L/∂L1_t = (∂L/∂H3_t) B3 + (∂L/∂Y3_t) D3
-    CHECK_CUDA(cudaMemset(slm->mlp->d_error, 0, 
-                         slm->mlp->batch_size * slm->mlp->output_dim * sizeof(float)));
+    // Compute gradients w.r.t. second SSM outputs: ∂L/∂Y2_t = (∂L/∂H3_t) B3 + (∂L/∂Y3_t) D3
+    CHECK_CUDA(cudaMemset(slm->ssm2->d_error, 0, 
+                         slm->ssm2->seq_len * slm->ssm2->batch_size * slm->ssm2->output_dim * sizeof(float)));
     
-    for (int t = 0; t < slm->ssm3->seq_len; t++) {
-        float* d_mlp_error_t = slm->mlp->d_error + t * slm->ssm3->batch_size * slm->mlp->output_dim;
+    for (int t = 0; t < slm->ssm2->seq_len; t++) {
+        float* d_ssm2_error_t = slm->ssm2->d_error + t * slm->ssm2->batch_size * slm->ssm2->output_dim;
         float* d_ssm3_state_error_t = slm->ssm3->d_state_error + t * slm->ssm3->batch_size * slm->ssm3->state_dim;
         float* d_ssm3_output_error_t = slm->ssm3->d_error + t * slm->ssm3->batch_size * slm->ssm3->output_dim;
         
-        // ∂L/∂L1_t += B3^T (∂L/∂H3_t) - Gradient from state path of third SSM
+        // ∂L/∂Y2_t += B3^T (∂L/∂H3_t) - Gradient from state path of third SSM
         CHECK_CUBLAS(cublasSgemm(slm->ssm3->cublas_handle,
                                 CUBLAS_OP_N, CUBLAS_OP_N,
-                                slm->mlp->output_dim, slm->ssm3->batch_size, slm->ssm3->state_dim,
-                                &alpha, slm->ssm3->d_B, slm->mlp->output_dim,
+                                slm->ssm2->output_dim, slm->ssm2->batch_size, slm->ssm3->state_dim,
+                                &alpha, slm->ssm3->d_B, slm->ssm2->output_dim,
                                 d_ssm3_state_error_t, slm->ssm3->state_dim,
-                                &beta, d_mlp_error_t, slm->mlp->output_dim));
+                                &beta, d_ssm2_error_t, slm->ssm2->output_dim));
         
-        // ∂L/∂L1_t += D3^T (∂L/∂Y3_t) - Gradient from output path of third SSM
+        // ∂L/∂Y2_t += D3^T (∂L/∂Y3_t) - Gradient from output path of third SSM
         CHECK_CUBLAS(cublasSgemm(slm->ssm3->cublas_handle,
                                 CUBLAS_OP_N, CUBLAS_OP_N,
-                                slm->mlp->output_dim, slm->ssm3->batch_size, slm->ssm3->output_dim,
-                                &alpha, slm->ssm3->d_D, slm->mlp->output_dim,
+                                slm->ssm2->output_dim, slm->ssm2->batch_size, slm->ssm3->output_dim,
+                                &alpha, slm->ssm3->d_D, slm->ssm2->output_dim,
                                 d_ssm3_output_error_t, slm->ssm3->output_dim,
-                                &alpha, d_mlp_error_t, slm->mlp->output_dim));
+                                &alpha, d_ssm2_error_t, slm->ssm2->output_dim));
     }
-    
-    // ∂L/∂W1_2 = A1_t^T (∂L/∂L1_t), ∂L/∂A1_t = (∂L/∂L1_t)(W1_2)^T
-    // ∂L/∂Z1_t = ∂L/∂A1_t ⊙ [σ(Z1_t) + Z1_t σ(Z1_t)(1-σ(Z1_t))]
-    // ∂L/∂W1_1 = Y2_t^T (∂L/∂Z1_t) - Backward through first MLP
-    backward_pass_mlp(slm->mlp, slm->ssm2->d_predictions);
-    
-    // Copy MLP input gradients to second SSM error
-    total_elements = slm->ssm2->seq_len * slm->ssm2->batch_size * slm->ssm2->output_dim;
-    CHECK_CUDA(cudaMemcpy(slm->ssm2->d_error, slm->mlp->d_error, 
-                         total_elements * sizeof(float), cudaMemcpyDeviceToDevice));
     
     // ∂L/∂C2 = Σ_t (∂L/∂Y2_t)^T O2_t, ∂L/∂D2 = Σ_t (∂L/∂Y2_t)^T Y1_t  
     // ∂L/∂O2_t = (∂L/∂Y2_t)C2, ∂L/∂H2_t = ∂L/∂O2_t ⊙ [σ(H2_t) + H2_t σ(H2_t)(1-σ(H2_t))] + (∂L/∂H2_{t+1})A2
@@ -397,15 +340,13 @@ void backward_pass_slm(SLM* slm, unsigned char* d_X) {
 
 // Update weights using AdamW: W = (1-λη)W - η·m̂/√v̂
 void update_weights_slm(SLM* slm, float learning_rate) {
-    // Update all SSM weights
+    // Update all three SSM weights
     update_weights_ssm(slm->ssm, learning_rate);
     update_weights_ssm(slm->ssm2, learning_rate);
     update_weights_ssm(slm->ssm3, learning_rate);
-    update_weights_ssm(slm->ssm4, learning_rate);
     
-    // Update all MLP weights
+    // Update MLP weights
     update_weights_mlp(slm->mlp, learning_rate);
-    update_weights_mlp(slm->mlp2, learning_rate);
     
     // Update embeddings using AdamW
     int embed_size = slm->vocab_size * slm->embed_dim;
@@ -425,7 +366,7 @@ void update_weights_slm(SLM* slm, float learning_rate) {
     );
 }
 
-// Save model with four SSMs and two MLPs
+// Save model with three SSMs and one MLP
 void save_slm(SLM* slm, const char* filename) {
     save_ssm(slm->ssm, filename);
     
@@ -437,14 +378,6 @@ void save_slm(SLM* slm, const char* filename) {
     strcat(ssm2_file, "_ssm2.bin");
     save_ssm(slm->ssm2, ssm2_file);
     
-    // Save first MLP
-    char mlp_file[256];
-    strcpy(mlp_file, filename);
-    dot = strrchr(mlp_file, '.');
-    if (dot) *dot = '\0';
-    strcat(mlp_file, "_mlp.bin");
-    save_mlp(slm->mlp, mlp_file);
-    
     // Save third SSM
     char ssm3_file[256];
     strcpy(ssm3_file, filename);
@@ -453,21 +386,13 @@ void save_slm(SLM* slm, const char* filename) {
     strcat(ssm3_file, "_ssm3.bin");
     save_ssm(slm->ssm3, ssm3_file);
     
-    // Save fourth SSM
-    char ssm4_file[256];
-    strcpy(ssm4_file, filename);
-    dot = strrchr(ssm4_file, '.');
+    // Save MLP
+    char mlp_file[256];
+    strcpy(mlp_file, filename);
+    dot = strrchr(mlp_file, '.');
     if (dot) *dot = '\0';
-    strcat(ssm4_file, "_ssm4.bin");
-    save_ssm(slm->ssm4, ssm4_file);
-    
-    // Save second MLP
-    char mlp2_file[256];
-    strcpy(mlp2_file, filename);
-    dot = strrchr(mlp2_file, '.');
-    if (dot) *dot = '\0';
-    strcat(mlp2_file, "_mlp2.bin");
-    save_mlp(slm->mlp2, mlp2_file);
+    strcat(mlp_file, "_mlp.bin");
+    save_mlp(slm->mlp, mlp_file);
     
     // Save embeddings
     char embed_file[256];
@@ -492,7 +417,7 @@ void save_slm(SLM* slm, const char* filename) {
     free(h_embeddings);
 }
 
-// Load model with four SSMs and two MLPs
+// Load model with three SSMs and one MLP
 SLM* load_slm(const char* filename, int custom_batch_size) {
     SSM* ssm = load_ssm(filename, custom_batch_size);
     if (!ssm) return NULL;
@@ -510,14 +435,6 @@ SLM* load_slm(const char* filename, int custom_batch_size) {
     strcat(ssm2_file, "_ssm2.bin");
     slm->ssm2 = load_ssm(ssm2_file, custom_batch_size);
     
-    // Load first MLP
-    char mlp_file[256];
-    strcpy(mlp_file, filename);
-    dot = strrchr(mlp_file, '.');
-    if (dot) *dot = '\0';
-    strcat(mlp_file, "_mlp.bin");
-    slm->mlp = load_mlp(mlp_file, ssm->seq_len * ssm->batch_size);
-    
     // Load third SSM
     char ssm3_file[256];
     strcpy(ssm3_file, filename);
@@ -526,21 +443,13 @@ SLM* load_slm(const char* filename, int custom_batch_size) {
     strcat(ssm3_file, "_ssm3.bin");
     slm->ssm3 = load_ssm(ssm3_file, custom_batch_size);
     
-    // Load fourth SSM
-    char ssm4_file[256];
-    strcpy(ssm4_file, filename);
-    dot = strrchr(ssm4_file, '.');
+    // Load MLP
+    char mlp_file[256];
+    strcpy(mlp_file, filename);
+    dot = strrchr(mlp_file, '.');
     if (dot) *dot = '\0';
-    strcat(ssm4_file, "_ssm4.bin");
-    slm->ssm4 = load_ssm(ssm4_file, custom_batch_size);
-    
-    // Load second MLP
-    char mlp2_file[256];
-    strcpy(mlp2_file, filename);
-    dot = strrchr(mlp2_file, '.');
-    if (dot) *dot = '\0';
-    strcat(mlp2_file, "_mlp2.bin");
-    slm->mlp2 = load_mlp(mlp2_file, ssm->seq_len * ssm->batch_size);
+    strcat(mlp_file, "_mlp.bin");
+    slm->mlp = load_mlp(mlp_file, ssm->seq_len * ssm->batch_size);
     
     // Allocate device memory
     CHECK_CUDA(cudaMalloc(&slm->d_embeddings, slm->vocab_size * slm->embed_dim * sizeof(float)));
@@ -582,7 +491,7 @@ SLM* load_slm(const char* filename, int custom_batch_size) {
     return slm;
 }
 
-// Text generation function with four SSMs and two MLPs
+// Text generation function with three SSMs and one MLP
 void generate_text_slm(SLM* slm, const char* seed_text, int generation_length, float temperature) {
     int seed_len = strlen(seed_text);
     if (seed_len == 0) {
@@ -603,17 +512,11 @@ void generate_text_slm(SLM* slm, const char* seed_text, int generation_length, f
     float* d_h3_current = NULL;
     float* d_h3_next = NULL;
     float* d_o3_current = NULL;
-    float* d_h4_current = NULL;
-    float* d_h4_next = NULL;
-    float* d_o4_current = NULL;
     float* d_ssm1_output = NULL;
     float* d_ssm2_output = NULL;
-    float* d_mlp1_hidden = NULL;
-    float* d_mlp1_output = NULL;
     float* d_ssm3_output = NULL;
-    float* d_ssm4_output = NULL;
-    float* d_mlp2_hidden = NULL;
-    float* d_mlp2_output = NULL;
+    float* d_mlp_hidden = NULL;
+    float* d_mlp_output = NULL;
     
     CHECK_CUDA(cudaMalloc(&d_input, sizeof(unsigned char)));
     CHECK_CUDA(cudaMalloc(&d_h1_current, slm->ssm->state_dim * sizeof(float)));
@@ -625,23 +528,16 @@ void generate_text_slm(SLM* slm, const char* seed_text, int generation_length, f
     CHECK_CUDA(cudaMalloc(&d_h3_current, slm->ssm3->state_dim * sizeof(float)));
     CHECK_CUDA(cudaMalloc(&d_h3_next, slm->ssm3->state_dim * sizeof(float)));
     CHECK_CUDA(cudaMalloc(&d_o3_current, slm->ssm3->state_dim * sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&d_h4_current, slm->ssm4->state_dim * sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&d_h4_next, slm->ssm4->state_dim * sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&d_o4_current, slm->ssm4->state_dim * sizeof(float)));
     CHECK_CUDA(cudaMalloc(&d_ssm1_output, slm->embed_dim * sizeof(float)));
     CHECK_CUDA(cudaMalloc(&d_ssm2_output, slm->embed_dim * sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&d_mlp1_hidden, slm->mlp->hidden_dim * sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&d_mlp1_output, slm->embed_dim * sizeof(float)));
     CHECK_CUDA(cudaMalloc(&d_ssm3_output, slm->embed_dim * sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&d_ssm4_output, slm->embed_dim * sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&d_mlp2_hidden, slm->mlp2->hidden_dim * sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&d_mlp2_output, slm->vocab_size * sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&d_mlp_hidden, slm->mlp->hidden_dim * sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&d_mlp_output, slm->vocab_size * sizeof(float)));
     
-    // H1_0 = H2_0 = H3_0 = H4_0 = 0 - Initialize hidden states to zero
+    // H1_0 = H2_0 = H3_0 = 0 - Initialize hidden states to zero
     CHECK_CUDA(cudaMemset(d_h1_current, 0, slm->ssm->state_dim * sizeof(float)));
     CHECK_CUDA(cudaMemset(d_h2_current, 0, slm->ssm2->state_dim * sizeof(float)));
     CHECK_CUDA(cudaMemset(d_h3_current, 0, slm->ssm3->state_dim * sizeof(float)));
-    CHECK_CUDA(cudaMemset(d_h4_current, 0, slm->ssm4->state_dim * sizeof(float)));
     
     printf("Seed: \"%s\"\nGenerated: ", seed_text);
     
@@ -735,48 +631,12 @@ void generate_text_slm(SLM* slm, const char* seed_text, int generation_length, f
                                 d_ssm1_output, slm->ssm2->input_dim,
                                 &beta_add, d_ssm2_output, slm->ssm2->output_dim));
         
-        // First MLP: Z1_t = Y2_t W1_1 - MLP1 layer 1
-        CHECK_CUBLAS(cublasSgemv(slm->mlp->cublas_handle,
-                                CUBLAS_OP_T,
-                                slm->mlp->input_dim,
-                                slm->mlp->hidden_dim,
-                                &alpha,
-                                slm->mlp->d_fc1_weight,
-                                slm->mlp->input_dim,
-                                d_ssm2_output,
-                                1,
-                                &beta,
-                                d_mlp1_hidden,
-                                1));
-
-        // A1_t = Z1_t σ(Z1_t) - Apply swish activation
-        num_blocks = (slm->mlp->hidden_dim + block_size - 1) / block_size;
-        swish_forward_kernel_mlp<<<num_blocks, block_size>>>(
-            d_mlp1_hidden,
-            d_mlp1_hidden,
-            slm->mlp->hidden_dim
-        );
-
-        // L1_t = A1_t W1_2 - MLP1 layer 2
-        CHECK_CUBLAS(cublasSgemv(slm->mlp->cublas_handle,
-                                CUBLAS_OP_T,
-                                slm->mlp->hidden_dim,
-                                slm->mlp->output_dim,
-                                &alpha,
-                                slm->mlp->d_fc2_weight,
-                                slm->mlp->hidden_dim,
-                                d_mlp1_hidden,
-                                1,
-                                &beta,
-                                d_mlp1_output,
-                                1));
-        
-        // Third SSM: H3_t = L1_t B3^T + H3_{t-1} A3^T
+        // Third SSM: H3_t = Y2_t B3^T + H3_{t-1} A3^T
         CHECK_CUBLAS(cublasSgemm(slm->ssm3->cublas_handle,
                                 CUBLAS_OP_T, CUBLAS_OP_N,
                                 slm->ssm3->state_dim, 1, slm->ssm3->input_dim,
                                 &alpha, slm->ssm3->d_B, slm->ssm3->input_dim,
-                                d_mlp1_output, slm->ssm3->input_dim,
+                                d_ssm2_output, slm->ssm3->input_dim,
                                 &beta, d_h3_next, slm->ssm3->state_dim));
         
         if (i > 0) {
@@ -792,7 +652,7 @@ void generate_text_slm(SLM* slm, const char* seed_text, int generation_length, f
         num_blocks = (slm->ssm3->state_dim + block_size - 1) / block_size;
         swish_forward_kernel_ssm<<<num_blocks, block_size>>>(d_o3_current, d_h3_next, slm->ssm3->state_dim);
         
-        // Y3_t = O3_t C3^T + L1_t D3^T
+        // Y3_t = O3_t C3^T + Y2_t D3^T
         CHECK_CUBLAS(cublasSgemm(slm->ssm3->cublas_handle,
                                 CUBLAS_OP_T, CUBLAS_OP_N,
                                 slm->ssm3->output_dim, 1, slm->ssm3->state_dim,
@@ -804,46 +664,10 @@ void generate_text_slm(SLM* slm, const char* seed_text, int generation_length, f
                                 CUBLAS_OP_T, CUBLAS_OP_N,
                                 slm->ssm3->output_dim, 1, slm->ssm3->input_dim,
                                 &alpha, slm->ssm3->d_D, slm->ssm3->input_dim,
-                                d_mlp1_output, slm->ssm3->input_dim,
+                                d_ssm2_output, slm->ssm3->input_dim,
                                 &beta_add, d_ssm3_output, slm->ssm3->output_dim));
         
-        // Fourth SSM: H4_t = Y3_t B4^T + H4_{t-1} A4^T
-        CHECK_CUBLAS(cublasSgemm(slm->ssm4->cublas_handle,
-                                CUBLAS_OP_T, CUBLAS_OP_N,
-                                slm->ssm4->state_dim, 1, slm->ssm4->input_dim,
-                                &alpha, slm->ssm4->d_B, slm->ssm4->input_dim,
-                                d_ssm3_output, slm->ssm4->input_dim,
-                                &beta, d_h4_next, slm->ssm4->state_dim));
-        
-        if (i > 0) {
-            CHECK_CUBLAS(cublasSgemm(slm->ssm4->cublas_handle,
-                                    CUBLAS_OP_T, CUBLAS_OP_N,
-                                    slm->ssm4->state_dim, 1, slm->ssm4->state_dim,
-                                    &alpha, slm->ssm4->d_A, slm->ssm4->state_dim,
-                                    d_h4_current, slm->ssm4->state_dim,
-                                    &beta_add, d_h4_next, slm->ssm4->state_dim));
-        }
-        
-        // O4_t = H4_t σ(H4_t)
-        num_blocks = (slm->ssm4->state_dim + block_size - 1) / block_size;
-        swish_forward_kernel_ssm<<<num_blocks, block_size>>>(d_o4_current, d_h4_next, slm->ssm4->state_dim);
-        
-        // Y4_t = O4_t C4^T + Y3_t D4^T
-        CHECK_CUBLAS(cublasSgemm(slm->ssm4->cublas_handle,
-                                CUBLAS_OP_T, CUBLAS_OP_N,
-                                slm->ssm4->output_dim, 1, slm->ssm4->state_dim,
-                                &alpha, slm->ssm4->d_C, slm->ssm4->state_dim,
-                                d_o4_current, slm->ssm4->state_dim,
-                                &beta, d_ssm4_output, slm->ssm4->output_dim));
-        
-        CHECK_CUBLAS(cublasSgemm(slm->ssm4->cublas_handle,
-                                CUBLAS_OP_T, CUBLAS_OP_N,
-                                slm->ssm4->output_dim, 1, slm->ssm4->input_dim,
-                                &alpha, slm->ssm4->d_D, slm->ssm4->input_dim,
-                                d_ssm3_output, slm->ssm4->input_dim,
-                                &beta_add, d_ssm4_output, slm->ssm4->output_dim));
-        
-        // Swap current and next for all four SSMs
+        // Swap current and next for all three SSMs
         float* temp = d_h1_current;
         d_h1_current = d_h1_next;
         d_h1_next = temp;
@@ -855,10 +679,6 @@ void generate_text_slm(SLM* slm, const char* seed_text, int generation_length, f
         temp = d_h3_current;
         d_h3_current = d_h3_next;
         d_h3_next = temp;
-        
-        temp = d_h4_current;
-        d_h4_current = d_h4_next;
-        d_h4_next = temp;
     }
     
     // Now generate new characters
@@ -951,64 +771,26 @@ void generate_text_slm(SLM* slm, const char* seed_text, int generation_length, f
                                 d_ssm1_output, slm->ssm2->input_dim,
                                 &beta_add, d_ssm2_output, slm->ssm2->output_dim));
         
-        // First MLP: Z1_t = Y2_t W1_1 - MLP1 layer 1
-        CHECK_CUBLAS(cublasSgemv(slm->mlp->cublas_handle,
-                                CUBLAS_OP_T,
-                                slm->mlp->input_dim,
-                                slm->mlp->hidden_dim,
-                                &alpha,
-                                slm->mlp->d_fc1_weight,
-                                slm->mlp->input_dim,
-                                d_ssm2_output,
-                                1,
-                                &beta,
-                                d_mlp1_hidden,
-                                1));
-
-        // A1_t = Z1_t σ(Z1_t) - Apply swish activation
-        num_blocks = (slm->mlp->hidden_dim + block_size - 1) / block_size;
-        swish_forward_kernel_mlp<<<num_blocks, block_size>>>(
-            d_mlp1_hidden,
-            d_mlp1_hidden,
-            slm->mlp->hidden_dim
-        );
-
-        // L1_t = A1_t W1_2 - MLP1 layer 2
-        CHECK_CUBLAS(cublasSgemv(slm->mlp->cublas_handle,
-                                CUBLAS_OP_T,
-                                slm->mlp->hidden_dim,
-                                slm->mlp->output_dim,
-                                &alpha,
-                                slm->mlp->d_fc2_weight,
-                                slm->mlp->hidden_dim,
-                                d_mlp1_hidden,
-                                1,
-                                &beta,
-                                d_mlp1_output,
-                                1));
-        
-        // Third SSM: H3_t = L1_t B3^T + H3_{t-1} A3^T
+        // Third SSM: H3_t = Y2_t B3^T + H3_{t-1} A3^T
         CHECK_CUBLAS(cublasSgemm(slm->ssm3->cublas_handle,
                                 CUBLAS_OP_T, CUBLAS_OP_N,
                                 slm->ssm3->state_dim, 1, slm->ssm3->input_dim,
                                 &alpha, slm->ssm3->d_B, slm->ssm3->input_dim,
-                                d_mlp1_output, slm->ssm3->input_dim,
+                                d_ssm2_output, slm->ssm3->input_dim,
                                 &beta, d_h3_next, slm->ssm3->state_dim));
         
-        if (i > 0) {
-            CHECK_CUBLAS(cublasSgemm(slm->ssm3->cublas_handle,
-                                    CUBLAS_OP_T, CUBLAS_OP_N,
-                                    slm->ssm3->state_dim, 1, slm->ssm3->state_dim,
-                                    &alpha, slm->ssm3->d_A, slm->ssm3->state_dim,
-                                    d_h3_current, slm->ssm3->state_dim,
-                                    &beta_add, d_h3_next, slm->ssm3->state_dim));
-        }
+        CHECK_CUBLAS(cublasSgemm(slm->ssm3->cublas_handle,
+                                CUBLAS_OP_T, CUBLAS_OP_N,
+                                slm->ssm3->state_dim, 1, slm->ssm3->state_dim,
+                                &alpha, slm->ssm3->d_A, slm->ssm3->state_dim,
+                                d_h3_current, slm->ssm3->state_dim,
+                                &beta_add, d_h3_next, slm->ssm3->state_dim));
         
         // O3_t = H3_t σ(H3_t)
         num_blocks = (slm->ssm3->state_dim + block_size - 1) / block_size;
         swish_forward_kernel_ssm<<<num_blocks, block_size>>>(d_o3_current, d_h3_next, slm->ssm3->state_dim);
         
-        // Y3_t = O3_t C3^T + L1_t D3^T
+        // Y3_t = O3_t C3^T + Y2_t D3^T
         CHECK_CUBLAS(cublasSgemm(slm->ssm3->cublas_handle,
                                 CUBLAS_OP_T, CUBLAS_OP_N,
                                 slm->ssm3->output_dim, 1, slm->ssm3->state_dim,
@@ -1020,83 +802,47 @@ void generate_text_slm(SLM* slm, const char* seed_text, int generation_length, f
                                 CUBLAS_OP_T, CUBLAS_OP_N,
                                 slm->ssm3->output_dim, 1, slm->ssm3->input_dim,
                                 &alpha, slm->ssm3->d_D, slm->ssm3->input_dim,
-                                d_mlp1_output, slm->ssm3->input_dim,
+                                d_ssm2_output, slm->ssm3->input_dim,
                                 &beta_add, d_ssm3_output, slm->ssm3->output_dim));
         
-        // Fourth SSM: H4_t = Y3_t B4^T + H4_{t-1} A4^T
-        CHECK_CUBLAS(cublasSgemm(slm->ssm4->cublas_handle,
-                                CUBLAS_OP_T, CUBLAS_OP_N,
-                                slm->ssm4->state_dim, 1, slm->ssm4->input_dim,
-                                &alpha, slm->ssm4->d_B, slm->ssm4->input_dim,
-                                d_ssm3_output, slm->ssm4->input_dim,
-                                &beta, d_h4_next, slm->ssm4->state_dim));
-        
-        if (i > 0) {
-            CHECK_CUBLAS(cublasSgemm(slm->ssm4->cublas_handle,
-                                    CUBLAS_OP_T, CUBLAS_OP_N,
-                                    slm->ssm4->state_dim, 1, slm->ssm4->state_dim,
-                                    &alpha, slm->ssm4->d_A, slm->ssm4->state_dim,
-                                    d_h4_current, slm->ssm4->state_dim,
-                                    &beta_add, d_h4_next, slm->ssm4->state_dim));
-        }
-        
-        // O4_t = H4_t σ(H4_t)
-        num_blocks = (slm->ssm4->state_dim + block_size - 1) / block_size;
-        swish_forward_kernel_ssm<<<num_blocks, block_size>>>(d_o4_current, d_h4_next, slm->ssm4->state_dim);
-        
-        // Y4_t = O4_t C4^T + Y3_t D4^T
-        CHECK_CUBLAS(cublasSgemm(slm->ssm4->cublas_handle,
-                                CUBLAS_OP_T, CUBLAS_OP_N,
-                                slm->ssm4->output_dim, 1, slm->ssm4->state_dim,
-                                &alpha, slm->ssm4->d_C, slm->ssm4->state_dim,
-                                d_o4_current, slm->ssm4->state_dim,
-                                &beta, d_ssm4_output, slm->ssm4->output_dim));
-        
-        CHECK_CUBLAS(cublasSgemm(slm->ssm4->cublas_handle,
-                                CUBLAS_OP_T, CUBLAS_OP_N,
-                                slm->ssm4->output_dim, 1, slm->ssm4->input_dim,
-                                &alpha, slm->ssm4->d_D, slm->ssm4->input_dim,
-                                d_ssm3_output, slm->ssm4->input_dim,
-                                &beta_add, d_ssm4_output, slm->ssm4->output_dim));
-        
-        // Second MLP: Z2_t = Y4_t W2_1 - MLP2 layer 1
-        CHECK_CUBLAS(cublasSgemv(slm->mlp2->cublas_handle,
+        // MLP: Z_t = Y3_t W_1 - MLP layer 1
+        CHECK_CUBLAS(cublasSgemv(slm->mlp->cublas_handle,
                                 CUBLAS_OP_T,
-                                slm->mlp2->input_dim,
-                                slm->mlp2->hidden_dim,
+                                slm->mlp->input_dim,
+                                slm->mlp->hidden_dim,
                                 &alpha,
-                                slm->mlp2->d_fc1_weight,
-                                slm->mlp2->input_dim,
-                                d_ssm4_output,
+                                slm->mlp->d_fc1_weight,
+                                slm->mlp->input_dim,
+                                d_ssm3_output,
                                 1,
                                 &beta,
-                                d_mlp2_hidden,
+                                d_mlp_hidden,
                                 1));
 
-        // A2_t = Z2_t σ(Z2_t) - Apply swish activation
-        num_blocks = (slm->mlp2->hidden_dim + block_size - 1) / block_size;
+        // A_t = Z_t σ(Z_t) - Apply swish activation
+        num_blocks = (slm->mlp->hidden_dim + block_size - 1) / block_size;
         swish_forward_kernel_mlp<<<num_blocks, block_size>>>(
-            d_mlp2_hidden,
-            d_mlp2_hidden,
-            slm->mlp2->hidden_dim
+            d_mlp_hidden,
+            d_mlp_hidden,
+            slm->mlp->hidden_dim
         );
 
-        // L2_t = A2_t W2_2 - MLP2 layer 2
-        CHECK_CUBLAS(cublasSgemv(slm->mlp2->cublas_handle,
+        // L_t = A_t W_2 - MLP layer 2
+        CHECK_CUBLAS(cublasSgemv(slm->mlp->cublas_handle,
                                 CUBLAS_OP_T,
-                                slm->mlp2->hidden_dim,
-                                slm->mlp2->output_dim,
+                                slm->mlp->hidden_dim,
+                                slm->mlp->output_dim,
                                 &alpha,
-                                slm->mlp2->d_fc2_weight,
-                                slm->mlp2->hidden_dim,
-                                d_mlp2_hidden,
+                                slm->mlp->d_fc2_weight,
+                                slm->mlp->hidden_dim,
+                                d_mlp_hidden,
                                 1,
                                 &beta,
-                                d_mlp2_output,
+                                d_mlp_output,
                                 1));
         
-        // P_t = softmax(L2_t) - Apply softmax
-        softmax_kernel<<<1, 256>>>(slm->d_softmax, d_mlp2_output, 1, slm->vocab_size);
+        // P_t = softmax(L_t) - Apply softmax
+        softmax_kernel<<<1, 256>>>(slm->d_softmax, d_mlp_output, 1, slm->vocab_size);
         
         // Copy probabilities to host
         CHECK_CUDA(cudaMemcpy(h_probs, slm->d_softmax, slm->vocab_size * sizeof(float), cudaMemcpyDeviceToHost));
@@ -1138,7 +884,7 @@ void generate_text_slm(SLM* slm, const char* seed_text, int generation_length, f
         // Set up for next iteration
         h_input[0] = (unsigned char)sampled_char;
         
-        // Swap current and next for all four SSMs
+        // Swap current and next for all three SSMs
         float* temp = d_h1_current;
         d_h1_current = d_h1_next;
         d_h1_next = temp;
@@ -1150,10 +896,6 @@ void generate_text_slm(SLM* slm, const char* seed_text, int generation_length, f
         temp = d_h3_current;
         d_h3_current = d_h3_next;
         d_h3_next = temp;
-        
-        temp = d_h4_current;
-        d_h4_current = d_h4_next;
-        d_h4_next = temp;
     }
     
     printf("\n");
@@ -1171,15 +913,9 @@ void generate_text_slm(SLM* slm, const char* seed_text, int generation_length, f
     cudaFree(d_h3_current);
     cudaFree(d_h3_next);
     cudaFree(d_o3_current);
-    cudaFree(d_h4_current);
-    cudaFree(d_h4_next);
-    cudaFree(d_o4_current);
     cudaFree(d_ssm1_output);
     cudaFree(d_ssm2_output);
-    cudaFree(d_mlp1_hidden);
-    cudaFree(d_mlp1_output);
     cudaFree(d_ssm3_output);
-    cudaFree(d_ssm4_output);
-    cudaFree(d_mlp2_hidden);
-    cudaFree(d_mlp2_output);
+    cudaFree(d_mlp_hidden);
+    cudaFree(d_mlp_output);
 }

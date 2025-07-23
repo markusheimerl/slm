@@ -37,29 +37,17 @@ size_t calculate_model_parameters(SLM* slm) {
     total_params += ssm2->output_dim * ssm2->state_dim;   // C2 matrix
     total_params += ssm2->output_dim * ssm2->input_dim;   // D2 matrix
     
+    // Third SSM parameters
+    SSM* ssm3 = slm->ssm3;
+    total_params += ssm3->state_dim * ssm3->state_dim;    // A3 matrix
+    total_params += ssm3->state_dim * ssm3->input_dim;    // B3 matrix
+    total_params += ssm3->output_dim * ssm3->state_dim;   // C3 matrix
+    total_params += ssm3->output_dim * ssm3->input_dim;   // D3 matrix
+
     // MLP parameters
     MLP* mlp = slm->mlp;
     total_params += mlp->hidden_dim * mlp->input_dim;     // W1 matrix
     total_params += mlp->output_dim * mlp->hidden_dim;    // W2 matrix
-    
-    // Third SSM parameters
-    SSM* ssm3 = slm->ssm3;
-    total_params += ssm3->state_dim * ssm3->state_dim;
-    total_params += ssm3->state_dim * ssm3->input_dim;    // B3 matrix
-    total_params += ssm3->output_dim * ssm3->state_dim;
-    total_params += ssm3->output_dim * ssm3->input_dim;
-
-    // Fourth SSM parameters
-    SSM* ssm4 = slm->ssm4;
-    total_params += ssm4->state_dim * ssm4->state_dim;
-    total_params += ssm4->state_dim * ssm4->input_dim;
-    total_params += ssm4->output_dim * ssm4->state_dim;
-    total_params += ssm4->output_dim * ssm4->input_dim;
-
-    // Second MLP parameters
-    MLP* mlp2 = slm->mlp2;
-    total_params += mlp2->hidden_dim * mlp2->input_dim;
-    total_params += mlp2->output_dim * mlp2->hidden_dim;
 
     return total_params;
 }
