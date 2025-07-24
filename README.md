@@ -1,22 +1,25 @@
 # slm
 A small language model implementation
 
-Consider a character-level language model built on a state space model backbone with MLP projection, operating on character sequences of shape (seq_len × batch_size). The architecture combines learned character embeddings with temporal state dynamics through SSM, followed by MLP transformation and softmax normalization for next-character prediction. The forward propagation follows:
+Consider a character-level language model built on a dual state space model backbone with MLP projection, operating on character sequences of shape (seq_len × batch_size). The architecture combines learned character embeddings with temporal state dynamics through two sequential SSM layers, followed by MLP transformation and softmax normalization for next-character prediction. The forward propagation follows:
 
 $$
 \begin{align*}
 E_t &= W_E[X_t] \\
-H_t &= E_tB^T + H_{t-1}A^T \\
-O_t &= H_t\sigma(H_t) \\
-Y_t &= O_tC^T + E_tD^T \\
-Z_t &= Y_tW_1 \\
+H^1_t &= E_tB_1^T + H^1_{t-1}A_1^T \\
+O^1_t &= H^1_t\sigma(H^1_t) \\
+Y^1_t &= O^1_tC_1^T + E_tD_1^T \\
+H^2_t &= Y^1_tB_2^T + H^2_{t-1}A_2^T \\
+O^2_t &= H^2_t\sigma(H^2_t) \\
+Y^2_t &= O^2_tC_2^T + Y^1_tD_2^T \\
+Z_t &= Y^2_tW_1 \\
 A_t &= Z_t\sigma(Z_t) \\
 L_t &= A_tW_2 \\
 P_t &= \frac{\exp(L_t)}{\sum_c \exp(L_{t,c})}
 \end{align*}
 $$
 
-The embedding matrix $W_E$ maps discrete character indices to dense vector representations via indexing $W_E[X_t]$. The SSM processes embedded inputs through state transition matrix $A$, input matrix $B$, output matrix $C$, and feedthrough matrix $D$. The MLP then transforms SSM outputs through weight matrices $W_1$ and $W_2$ with Swish activation $z\sigma(z)$. Finally, softmax normalization produces probability distributions over the character vocabulary.
+The embedding matrix $W_E$ maps discrete character indices to dense vector representations via indexing $W_E[X_t]$. The first SSM processes embedded inputs through state transition matrix $A_1$, input matrix $B_1$, output matrix $C_1$, and feedthrough matrix $D_1$. The second SSM further processes the first SSM's output through its own parameters $A_2$, $B_2$, $C_2$, and $D_2$. The MLP then transforms the final SSM outputs through weight matrices $W_1$ and $W_2$ with Swish activation $z\sigma(z)$. Finally, softmax normalization produces probability distributions over the character vocabulary.
 
 For language modeling, the cross-entropy loss between predicted and actual next characters is minimized, where $\odot$ denotes elementwise multiplication:
 
@@ -32,7 +35,7 @@ $$
 \end{align*}
 $$
 
-The gradient then flows backward through the SSM following standard BPTT with Swish derivatives:
+The gradient then flows backward through both SSM layers following standard BPTT with Swish derivatives. The gradient flows from the MLP back through the second SSM, then through the first SSM to the embeddings:
 
 $$
 \begin{align*}
@@ -67,6 +70,17 @@ W &= (1-\lambda\eta)W - \eta\cdot\frac{m}{1-\beta_1^t}/\sqrt{\frac{v}{1-\beta_2^
 $$
 
 The implementation leverages CUDA for parallel computation across batch and sequence dimensions, with efficient kernel implementations for embedding lookup, Swish activation, softmax normalization, and gradient accumulation. Character sequences are extracted from text corpora through random position sampling, providing diverse training contexts.
+
+## Architecture
+
+This implementation uses a **dual-SSM architecture** with two sequential state space model layers:
+- **Embedding Layer**: Maps characters to dense vectors
+- **First SSM Layer**: Processes embedded inputs with temporal state dynamics
+- **Second SSM Layer**: Further processes first SSM outputs for enhanced representation
+- **MLP Layer**: Transforms final SSM outputs through two-layer MLP with Swish activation
+- **Softmax Layer**: Produces probability distributions over character vocabulary
+
+This dual-SSM design provides increased model capacity and representational power compared to single-SSM architectures.
 
 ## How to run
 ```
