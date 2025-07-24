@@ -75,6 +75,8 @@ The implementation leverages CUDA for parallel computation across batch and sequ
 ```
 sudo apt update
 sudo apt install clang time libcurl-dev
+git submodule init
+git submodule update
 # Ensure CUDA toolkit is installed
 make run
 ```
