@@ -96,6 +96,41 @@ char* extract_author(const char* content) {
     return author;
 }
 
+// Extract language from Project Gutenberg text
+char* extract_language(const char* content) {
+    const char* language_start = strstr(content, "Language:");
+    if (!language_start) {
+        language_start = strstr(content, "LANGUAGE:");
+    }
+    if (!language_start) return NULL;
+    
+    language_start += 9; // Skip "Language:" or "LANGUAGE:"
+    while (*language_start == ' ' || *language_start == '\t') language_start++; // Skip whitespace
+    
+    const char* language_end = strchr(language_start, '\n');
+    if (!language_end) language_end = language_start + strlen(language_start);
+    
+    size_t language_len = language_end - language_start;
+    if (language_len > 20) language_len = 20; // Limit language length
+    if (language_len == 0) return NULL;
+    
+    char* language = (char*)malloc(language_len + 1);
+    if (!language) return NULL;
+    
+    strncpy(language, language_start, language_len);
+    language[language_len] = '\0';
+    
+    // Remove carriage returns and clean up
+    for (size_t i = 0; i < language_len; i++) {
+        if (language[i] == '\r' || language[i] == '\n') {
+            language[i] = '\0';
+            break;
+        }
+    }
+    
+    return language;
+}
+
 // Download a single book from Project Gutenberg
 int download_book(int book_id, int process_id, const char* output_file, 
                   const char* temp_dir, const char* lock_file, 
@@ -149,6 +184,16 @@ int download_book(int book_id, int process_id, const char* output_file,
     // Extract title and author
     char* title = extract_title(buffer.data);
     char* author = extract_author(buffer.data);
+    char* language = extract_language(buffer.data);
+    
+    // Check if the book is in English
+    if (!language || (strcasecmp(language, "English") != 0 && strcasecmp(language, "en") != 0)) {
+        free(buffer.data);
+        if (title) free(title);
+        if (author) free(author);
+        if (language) free(language);
+        return 0; // Skip non-English books
+    }
     
     // Create fallback title if needed
     if (!title) {
@@ -163,6 +208,7 @@ int download_book(int book_id, int process_id, const char* output_file,
         free(buffer.data);
         if (title) free(title);
         if (author) free(author);
+        if (language) free(language);
         return 0;
     }
     
@@ -175,6 +221,7 @@ int download_book(int book_id, int process_id, const char* output_file,
         free(buffer.data);
         if (title) free(title);
         if (author) free(author);
+        if (language) free(language);
         return 0;
     }
     
@@ -193,6 +240,7 @@ int download_book(int book_id, int process_id, const char* output_file,
         free(buffer.data);
         if (title) free(title);
         if (author) free(author);
+        if (language) free(language);
         return 0;
     }
     
@@ -269,6 +317,7 @@ int download_book(int book_id, int process_id, const char* output_file,
     free(buffer.data);
     if (title) free(title);
     if (author) free(author);
+    if (language) free(language);
     
     return success;
 }
