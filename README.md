@@ -71,17 +71,6 @@ $$
 
 The implementation leverages CUDA for parallel computation across batch and sequence dimensions, with efficient kernel implementations for embedding lookup, Swish activation, softmax normalization, and gradient accumulation. Character sequences are extracted from text corpora through random position sampling, providing diverse training contexts.
 
-## Architecture
-
-This implementation uses a **dual-SSM architecture** with two sequential state space model layers:
-- **Embedding Layer**: Maps characters to dense vectors
-- **First SSM Layer**: Processes embedded inputs with temporal state dynamics
-- **Second SSM Layer**: Further processes first SSM outputs for enhanced representation
-- **MLP Layer**: Transforms final SSM outputs through two-layer MLP with Swish activation
-- **Softmax Layer**: Produces probability distributions over character vocabulary
-
-This dual-SSM design provides increased model capacity and representational power compared to single-SSM architectures.
-
 ## How to run
 ```
 sudo apt update

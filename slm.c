@@ -430,7 +430,7 @@ SLM* load_slm(const char* filename, int custom_batch_size) {
     SLM* slm = (SLM*)malloc(sizeof(SLM));
     slm->ssm1 = ssm1;
     slm->ssm2 = ssm2;
-    slm->vocab_size = ssm1->output_dim; // Assuming this is still 256
+    slm->vocab_size = ssm1->output_dim;
     slm->embed_dim = ssm1->input_dim;
     
     // Load MLP
@@ -545,7 +545,8 @@ void generate_text_slm(SLM* slm, const char* seed_text, int generation_length, f
     CHECK_CUDA(cudaMalloc(&d_input, sizeof(unsigned char)));
     
     // Reset SSM state for generation
-    reset_state_ssm(gen_slm->ssm);
+    reset_state_ssm(gen_slm->ssm1);
+    reset_state_ssm(gen_slm->ssm2);
     
     printf("Seed: \"%s\"\nGenerated: ", seed_text);
     
@@ -561,8 +562,17 @@ void generate_text_slm(SLM* slm, const char* seed_text, int generation_length, f
             gen_slm->d_embedded_input, gen_slm->d_embeddings, d_input, 1, gen_slm->embed_dim
         );
         
-        // Forward through SSM
-        forward_pass_ssm(gen_slm->ssm, gen_slm->d_embedded_input, i);
+        // Forward through first SSM
+        forward_pass_ssm(gen_slm->ssm1, gen_slm->d_embedded_input, i);
+        
+        // Get the first SSM output for this timestep and copy to intermediate buffer
+        float* d_y1_t = gen_slm->ssm1->d_predictions + i * 1 * gen_slm->ssm1->output_dim;
+        float* d_ssm1_out_t = gen_slm->d_ssm1_output + i * 1 * gen_slm->embed_dim;
+        CHECK_CUDA(cudaMemcpy(d_ssm1_out_t, d_y1_t, 
+                             gen_slm->embed_dim * sizeof(float), cudaMemcpyDeviceToDevice));
+        
+        // Forward through second SSM
+        forward_pass_ssm(gen_slm->ssm2, d_ssm1_out_t, i);
     }
     
     // Now generate new characters
