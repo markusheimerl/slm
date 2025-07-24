@@ -161,7 +161,11 @@ void forward_pass_slm(SLM* slm, unsigned char* d_X) {
     // H_t = E_t B^T + H_{t-1} A^T
     // O_t = H_t σ(H_t)  
     // Y_t = O_t C^T + E_t D^T - Forward through SSM
-    forward_pass_ssm(slm->ssm, slm->d_embedded_input);
+    reset_state_ssm(slm->ssm);
+    for (int t = 0; t < seq_len; t++) {
+        float* d_embedded_t = slm->d_embedded_input + t * batch_size * slm->embed_dim;
+        forward_pass_ssm(slm->ssm, d_embedded_t, t);
+    }
 
     // Z_t = Y_t W_1
     // A_t = Z_t σ(Z_t)
@@ -395,15 +399,37 @@ void generate_text_slm(SLM* slm, const char* seed_text, int generation_length, f
         return;
     }
     
-    // Store original dimensions to restore later
-    int original_seq_len = slm->ssm->seq_len;
-    int original_ssm_batch_size = slm->ssm->batch_size;
-    int original_mlp_batch_size = slm->mlp->batch_size;
+    // Create a temporary SLM instance for generation with batch_size=1
+    int max_timesteps = seed_len + generation_length;
+    SLM* gen_slm = init_slm(slm->embed_dim, slm->ssm->state_dim, max_timesteps, 1);
     
-    // Temporarily set dimensions for single-token processing
-    slm->ssm->seq_len = 1;
-    slm->ssm->batch_size = 1;
-    slm->mlp->batch_size = 1;
+    // Copy trained weights from main model to generation model
+    // Copy SSM weights
+    CHECK_CUDA(cudaMemcpy(gen_slm->ssm->d_A, slm->ssm->d_A, 
+                         slm->ssm->state_dim * slm->ssm->state_dim * sizeof(float), 
+                         cudaMemcpyDeviceToDevice));
+    CHECK_CUDA(cudaMemcpy(gen_slm->ssm->d_B, slm->ssm->d_B, 
+                         slm->ssm->state_dim * slm->ssm->input_dim * sizeof(float), 
+                         cudaMemcpyDeviceToDevice));
+    CHECK_CUDA(cudaMemcpy(gen_slm->ssm->d_C, slm->ssm->d_C, 
+                         slm->ssm->output_dim * slm->ssm->state_dim * sizeof(float), 
+                         cudaMemcpyDeviceToDevice));
+    CHECK_CUDA(cudaMemcpy(gen_slm->ssm->d_D, slm->ssm->d_D, 
+                         slm->ssm->output_dim * slm->ssm->input_dim * sizeof(float), 
+                         cudaMemcpyDeviceToDevice));
+    
+    // Copy MLP weights
+    CHECK_CUDA(cudaMemcpy(gen_slm->mlp->d_fc1_weight, slm->mlp->d_fc1_weight,
+                         slm->mlp->hidden_dim * slm->mlp->input_dim * sizeof(float),
+                         cudaMemcpyDeviceToDevice));
+    CHECK_CUDA(cudaMemcpy(gen_slm->mlp->d_fc2_weight, slm->mlp->d_fc2_weight,
+                         slm->mlp->output_dim * slm->mlp->hidden_dim * sizeof(float),
+                         cudaMemcpyDeviceToDevice));
+    
+    // Copy embeddings
+    CHECK_CUDA(cudaMemcpy(gen_slm->d_embeddings, slm->d_embeddings,
+                         slm->vocab_size * slm->embed_dim * sizeof(float),
+                         cudaMemcpyDeviceToDevice));
     
     // Allocate temporary buffers for generation
     unsigned char* h_input = (unsigned char*)malloc(sizeof(unsigned char));
@@ -411,7 +437,9 @@ void generate_text_slm(SLM* slm, const char* seed_text, int generation_length, f
     float* h_probs = (float*)malloc(slm->vocab_size * sizeof(float));
     
     CHECK_CUDA(cudaMalloc(&d_input, sizeof(unsigned char)));
-    CHECK_CUDA(cudaMemset(slm->ssm->d_states, 0, slm->ssm->state_dim * sizeof(float)));
+    
+    // Reset SSM state for generation
+    reset_state_ssm(gen_slm->ssm);
     
     printf("Seed: \"%s\"\nGenerated: ", seed_text);
     
@@ -424,13 +452,11 @@ void generate_text_slm(SLM* slm, const char* seed_text, int generation_length, f
         dim3 block(256);
         dim3 grid(1, 1);
         embedding_lookup_kernel<<<grid, block>>>(
-            slm->d_embedded_input, slm->d_embeddings, d_input, 1, slm->embed_dim
+            gen_slm->d_embedded_input, gen_slm->d_embeddings, d_input, 1, gen_slm->embed_dim
         );
         
         // Forward through SSM
-        forward_pass_ssm(slm->ssm, slm->d_embedded_input);
-        
-        // No need for MLP during seed processing - only building SSM state
+        forward_pass_ssm(gen_slm->ssm, gen_slm->d_embedded_input, i);
     }
     
     // Now generate new characters
@@ -446,32 +472,36 @@ void generate_text_slm(SLM* slm, const char* seed_text, int generation_length, f
         dim3 block(256);
         dim3 grid(1, 1);
         embedding_lookup_kernel<<<grid, block>>>(
-            slm->d_embedded_input, slm->d_embeddings, d_input, 1, slm->embed_dim
+            gen_slm->d_embedded_input, gen_slm->d_embeddings, d_input, 1, gen_slm->embed_dim
         );
         
         // Forward through SSM
-        forward_pass_ssm(slm->ssm, slm->d_embedded_input);
+        int timestep = seed_len + i;
+        forward_pass_ssm(gen_slm->ssm, gen_slm->d_embedded_input, timestep);
+        
+        // Get the SSM output for this timestep
+        float* d_y_t = gen_slm->ssm->d_predictions + timestep * 1 * gen_slm->ssm->output_dim;
         
         // Forward through MLP
-        forward_pass_mlp(slm->mlp, slm->ssm->d_predictions);
+        forward_pass_mlp(gen_slm->mlp, d_y_t);
         
         // Apply softmax to get probabilities
         softmax_kernel<<<1, 256>>>(
-            slm->d_softmax, slm->mlp->d_predictions, 1, slm->vocab_size
+            gen_slm->d_softmax, gen_slm->mlp->d_predictions, 1, gen_slm->vocab_size
         );
         
         // Copy probabilities to host
-        CHECK_CUDA(cudaMemcpy(h_probs, slm->d_softmax, slm->vocab_size * sizeof(float), cudaMemcpyDeviceToHost));
+        CHECK_CUDA(cudaMemcpy(h_probs, gen_slm->d_softmax, gen_slm->vocab_size * sizeof(float), cudaMemcpyDeviceToHost));
         
         // P_τ(c) = exp(L_c / τ) / Σ_{c'} exp(L_{c'} / τ) - Apply temperature scaling
         if (temperature != 1.0f) {
             float sum = 0.0f;
-            for (int j = 0; j < slm->vocab_size; j++) {
+            for (int j = 0; j < gen_slm->vocab_size; j++) {
                 h_probs[j] = expf(logf(h_probs[j] + 1e-15f) / temperature);
                 sum += h_probs[j];
             }
             // Renormalize
-            for (int j = 0; j < slm->vocab_size; j++) {
+            for (int j = 0; j < gen_slm->vocab_size; j++) {
                 h_probs[j] /= sum;
             }
         }
@@ -481,7 +511,7 @@ void generate_text_slm(SLM* slm, const char* seed_text, int generation_length, f
         float cumulative = 0.0f;
         int sampled_char = 0;
         
-        for (int j = 0; j < slm->vocab_size; j++) {
+        for (int j = 0; j < gen_slm->vocab_size; j++) {
             cumulative += h_probs[j];
             if (random_val <= cumulative) {
                 sampled_char = j;
@@ -503,13 +533,9 @@ void generate_text_slm(SLM* slm, const char* seed_text, int generation_length, f
     
     printf("\n");
     
-    // Restore original dimensions
-    slm->ssm->seq_len = original_seq_len;
-    slm->ssm->batch_size = original_ssm_batch_size;
-    slm->mlp->batch_size = original_mlp_batch_size;
-    
     // Cleanup
     free(h_input);
     free(h_probs);
     cudaFree(d_input);
+    free_slm(gen_slm);
 }
