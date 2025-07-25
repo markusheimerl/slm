@@ -6,8 +6,9 @@
 
 typedef struct {
     SSM* ssm1;                  // First state space model layer
+    MLP* mlp1;                  // First MLP layer (between SSM1 and SSM2) 
     SSM* ssm2;                  // Second state space model layer
-    MLP* mlp;                   // Multi-layer perceptron for output mapping
+    MLP* mlp2;                  // Second MLP layer for output mapping
     
     // Language modeling specific buffers
     float* d_embeddings;        // vocab_size x embed_dim
@@ -18,9 +19,11 @@ typedef struct {
     // Working buffers
     float* d_embedded_input;    // seq_len x batch_size x embed_dim
     float* d_ssm1_output;       // seq_len x batch_size x embed_dim (output from first SSM)
+    float* d_mlp1_output;       // seq_len x batch_size x embed_dim (output from first MLP)
     float* d_softmax;           // seq_len x batch_size x vocab_size
     float* d_input_gradients;   // seq_len x batch_size x embed_dim
     float* d_ssm1_gradients;    // seq_len x batch_size x embed_dim (gradients for first SSM input)
+    float* d_mlp1_gradients;    // seq_len x batch_size x embed_dim (gradients for first MLP input)
     float* d_losses;            // seq_len x batch_size
     
     // Dimensions
@@ -38,6 +41,7 @@ __global__ void cross_entropy_loss_kernel(float* losses, float* softmax, unsigne
                                          int batch_size, int vocab_size);
 __global__ void embedding_gradient_kernel(float* embed_grad, float* input_grad, unsigned char* chars,
                                          int batch_size, int embed_dim);
+__global__ void residual_add_kernel(float* output, float* mlp_output, float* residual_input, int size);
 
 // Function prototypes
 SLM* init_slm(int embed_dim, int state_dim, int seq_len, int batch_size);
