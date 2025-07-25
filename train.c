@@ -20,11 +20,21 @@ float cosine_schedule(float lr_init, float lr_min, int current_batch, int total_
 size_t calculate_model_parameters(SLM* slm) {
     size_t total_params = 0;
     total_params += slm->vocab_size * slm->embed_dim;
-    SSM* ssm = slm->ssm;
-    total_params += ssm->state_dim * ssm->state_dim;
-    total_params += ssm->state_dim * ssm->input_dim;
-    total_params += ssm->output_dim * ssm->state_dim;
-    total_params += ssm->output_dim * ssm->input_dim;
+    
+    // Count parameters for first SSM
+    SSM* ssm1 = slm->ssm1;
+    total_params += ssm1->state_dim * ssm1->state_dim;
+    total_params += ssm1->state_dim * ssm1->input_dim;
+    total_params += ssm1->output_dim * ssm1->state_dim;
+    total_params += ssm1->output_dim * ssm1->input_dim;
+    
+    // Count parameters for second SSM
+    SSM* ssm2 = slm->ssm2;
+    total_params += ssm2->state_dim * ssm2->state_dim;
+    total_params += ssm2->state_dim * ssm2->input_dim;
+    total_params += ssm2->output_dim * ssm2->state_dim;
+    total_params += ssm2->output_dim * ssm2->input_dim;
+    
     MLP* mlp = slm->mlp;
     total_params += mlp->hidden_dim * mlp->input_dim;
     total_params += mlp->output_dim * mlp->hidden_dim;

@@ -23,6 +23,7 @@ struct DownloadBuffer {
 // Function prototypes
 char* extract_title(const char* content);
 char* extract_author(const char* content);
+char* extract_language(const char* content);
 int download_book(int book_id, int process_id, const char* output_file, 
                   const char* temp_dir, const char* lock_file, 
                   const char* size_file, const char* book_count_file,
