@@ -1,50 +1,69 @@
 # slm
 A small language model implementation
 
-Consider a character-level language model built on a dual state space model backbone with MLP projection, operating on character sequences of shape (seq_len × batch_size). The architecture combines learned character embeddings with temporal state dynamics through two sequential SSM layers, followed by MLP transformation and softmax normalization for next-character prediction. 
-
-The forward propagation flows through the embeddings, then through both SSM layers, and finally through the MLP to produce character probabilities. For each SSM layer, the computation follows the standard state space model formulation:
+Consider a character-level language model built on a dual state space model backbone with MLP projection, operating on character sequences of shape (seq_len × batch_size). The architecture combines learned character embeddings with temporal state dynamics through two sequential SSM layers, followed by MLP transformation and softmax normalization for next-character prediction. The forward propagation follows:
 
 $$
 \begin{align*}
-E_t &= W_E[X_t] \\
-H_t &= Y_{t}^{(\text{in})}B^T + H_{t-1}A^T \\
-O_t &= H_t\sigma(H_t) \\
-Y_t &= O_tC^T + Y_{t}^{(\text{in})}D^T \\
-Z_t &= Y_tW_1 \\
-A_t &= Z_t\sigma(Z_t) \\
-L_t &= A_tW_2 \\
-P_t &= \frac{\exp(L_t)}{\sum_c \exp(L_{t,c})}
+E_t &= W_E[X_t]
 \end{align*}
 $$
 
-The embedding matrix $W_E$ maps discrete character indices to dense vector representations via indexing $W_E[X_t]$. Each SSM processes its input $Y_{t}^{(\text{in})}$ through state transition matrix $A$, input matrix $B$, output matrix $C$, and feedthrough matrix $D$, where the first SSM takes embeddings $E_t$ as input and the second SSM takes the first SSM's output. The MLP then transforms the final SSM outputs through weight matrices $W_1$ and $W_2$ with Swish activation $z\sigma(z)$. Finally, softmax normalization produces probability distributions over the character vocabulary.
+The embedding matrix $W_E$ maps discrete character indices to dense vector representations via indexing $W_E[X_t]$. Both SSM layers then process their inputs through the standard state space model formulation:
+
+$$
+\begin{align*}
+H_t &= X_tB^T + H_{t-1}A^T \\
+O_t &= H_t\sigma(H_t) \\
+Y_t &= O_tC^T + X_tD^T
+\end{align*}
+$$
+
+The state transition matrix $A$ captures temporal dependencies, input matrix $B$ maps current inputs to state updates, output matrix $C$ projects nonlinearly activated states to outputs, and feedthrough matrix $D$ provides direct input-output connections. The first SSM takes embeddings $E_t$ as input $X_t$, while the second SSM takes the first SSM's output as its input. The MLP then transforms the final SSM outputs:
+
+$$
+\begin{align*}
+Z &= YW_1 \\
+A &= Z\sigma(Z) \\
+L &= AW_2 \\
+P &= \frac{\exp(L)}{\sum_c \exp(L_c)}
+\end{align*}
+$$
+
+The swish activation $z\sigma(z)$ interpolates between linear and nonlinear regimes, followed by softmax normalization to produce probability distributions over the character vocabulary.
 
 For language modeling, the cross-entropy loss between predicted and actual next characters is minimized, where $\odot$ denotes elementwise multiplication:
 
 $$
 \begin{align*}
-\mathcal{L} &= -\frac{1}{T \cdot B}\sum_{t=1}^{T}\sum_{b=1}^{B} \log P_{t,b,y_{t,b}} \\
-\frac{\partial \mathcal{L}}{\partial L_t} &= P_t - \mathbf{1}_{y_t} \\
-\frac{\partial \mathcal{L}}{\partial W_2} &= A_t^T(\frac{\partial \mathcal{L}}{\partial L_t}) \\
-\frac{\partial \mathcal{L}}{\partial A_t} &= (\frac{\partial \mathcal{L}}{\partial L_t})(W_2)^T \\
-\frac{\partial \mathcal{L}}{\partial Z_t} &= \frac{\partial \mathcal{L}}{\partial A_t} \odot [\sigma(Z_t) + Z_t\sigma(Z_t)(1-\sigma(Z_t))] \\
-\frac{\partial \mathcal{L}}{\partial W_1} &= Y_t^T(\frac{\partial \mathcal{L}}{\partial Z_t}) \\
-\frac{\partial \mathcal{L}}{\partial Y_t} &= (\frac{\partial \mathcal{L}}{\partial Z_t})(W_1)^T
+L &= -\frac{1}{T \cdot B}\sum_{t=1}^{T}\sum_{b=1}^{B} \log P_{t,b,y_{t,b}}
 \end{align*}
 $$
 
-The gradient then flows backward through both SSM layers following standard BPTT with Swish derivatives. The gradient flows from the MLP back through the second SSM, then through the first SSM to the embeddings:
+The gradient flows backward through the MLP following the chain rule:
 
 $$
 \begin{align*}
-\frac{\partial \mathcal{L}}{\partial C} &= \sum_t (\frac{\partial \mathcal{L}}{\partial Y_t})^T O_t \\
-\frac{\partial \mathcal{L}}{\partial D} &= \sum_t (\frac{\partial \mathcal{L}}{\partial Y_t})^T E_t \\
-\frac{\partial \mathcal{L}}{\partial O_t} &= (\frac{\partial \mathcal{L}}{\partial Y_t})C \\
-\frac{\partial \mathcal{L}}{\partial H_t} &= \frac{\partial \mathcal{L}}{\partial O_t} \odot [\sigma(H_t) + H_t\sigma(H_t)(1-\sigma(H_t))] + (\frac{\partial \mathcal{L}}{\partial H_{t+1}})A \\
-\frac{\partial \mathcal{L}}{\partial A} &= \sum_t (\frac{\partial \mathcal{L}}{\partial H_t})^T H_{t-1} \\
-\frac{\partial \mathcal{L}}{\partial B} &= \sum_t (\frac{\partial \mathcal{L}}{\partial H_t})^T E_t \\
-\frac{\partial \mathcal{L}}{\partial W_E[c]} &= \sum_{\substack{t,b \\ X_{t,b}=c}} \left(B^T\frac{\partial \mathcal{L}}{\partial H_t} + D^T\frac{\partial \mathcal{L}}{\partial Y_t}\right)
+\frac{\partial L}{\partial L_t} &= P_t - \mathbf{1}_{y_t} \\
+\frac{\partial L}{\partial W_2} &= A_t^T(\frac{\partial L}{\partial L_t}) \\
+\frac{\partial L}{\partial A_t} &= (\frac{\partial L}{\partial L_t})(W_2)^T \\
+\frac{\partial L}{\partial Z_t} &= \frac{\partial L}{\partial A_t} \odot [\sigma(Z_t) + Z_t\sigma(Z_t)(1-\sigma(Z_t))] \\
+\frac{\partial L}{\partial W_1} &= Y_t^T(\frac{\partial L}{\partial Z_t}) \\
+\frac{\partial L}{\partial Y_t} &= (\frac{\partial L}{\partial Z_t})(W_1)^T
+\end{align*}
+$$
+
+The gradient then flows backward through both SSM layers following standard BPTT with Swish derivatives:
+
+$$
+\begin{align*}
+\frac{\partial L}{\partial C} &= \sum_t (\frac{\partial L}{\partial Y_t})^T O_t \\
+\frac{\partial L}{\partial D} &= \sum_t (\frac{\partial L}{\partial Y_t})^T X_t \\
+\frac{\partial L}{\partial O_t} &= (\frac{\partial L}{\partial Y_t})C \\
+\frac{\partial L}{\partial H_t} &= \frac{\partial L}{\partial O_t} \odot [\sigma(H_t) + H_t\sigma(H_t)(1-\sigma(H_t))] + (\frac{\partial L}{\partial H_{t+1}})A \\
+\frac{\partial L}{\partial A} &= \sum_t (\frac{\partial L}{\partial H_t})^T H_{t-1} \\
+\frac{\partial L}{\partial B} &= \sum_t (\frac{\partial L}{\partial H_t})^T X_t \\
+\frac{\partial L}{\partial W_E[c]} &= \sum_{\substack{t,b \\ X_{t,b}=c}} \left(B^T\frac{\partial L}{\partial H_t} + D^T\frac{\partial L}{\partial Y_t}\right)
 \end{align*}
 $$
 
