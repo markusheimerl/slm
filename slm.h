@@ -6,7 +6,7 @@
 
 typedef struct {
     SSM* ssm1;                  // First state space model layer
-    MLP* mlp1;                  // First MLP layer (between SSM1 and SSM2) 
+    MLP* mlp1;                  // First MLP layer (between SSM1 and SSM2)
     SSM* ssm2;                  // Second state space model layer
     MLP* mlp2;                  // Second MLP layer for output mapping
     
@@ -41,7 +41,6 @@ __global__ void cross_entropy_loss_kernel(float* losses, float* softmax, unsigne
                                          int batch_size, int vocab_size);
 __global__ void embedding_gradient_kernel(float* embed_grad, float* input_grad, unsigned char* chars,
                                          int batch_size, int embed_dim);
-__global__ void residual_add_kernel(float* output, float* mlp_output, float* residual_input, int size);
 
 // Function prototypes
 SLM* init_slm(int embed_dim, int state_dim, int seq_len, int batch_size);

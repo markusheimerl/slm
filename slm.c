@@ -87,14 +87,6 @@ __global__ void embedding_gradient_kernel(float* embed_grad, float* input_grad, 
     }
 }
 
-// CUDA kernel for residual connection: output = mlp_output + residual_input
-__global__ void residual_add_kernel(float* output, float* mlp_output, float* residual_input, int size) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < size) {
-        output[idx] = mlp_output[idx] + residual_input[idx];
-    }
-}
-
 // Initialize SLM
 SLM* init_slm(int embed_dim, int state_dim, int seq_len, int batch_size) {
     SLM* slm = (SLM*)malloc(sizeof(SLM));
@@ -106,13 +98,13 @@ SLM* init_slm(int embed_dim, int state_dim, int seq_len, int batch_size) {
     // Initialize first SSM (embed_dim -> embed_dim)
     slm->ssm1 = init_ssm(embed_dim, state_dim, embed_dim, seq_len, batch_size);
     
-    // Initialize first MLP (embed_dim -> embed_dim) - between SSM1 and SSM2
+    // Initialize first MLP (embed_dim -> embed_dim, between SSM1 and SSM2)
     slm->mlp1 = init_mlp(embed_dim, 4 * embed_dim, embed_dim, seq_len * batch_size);
     
     // Initialize second SSM (embed_dim -> embed_dim)  
     slm->ssm2 = init_ssm(embed_dim, state_dim, embed_dim, seq_len, batch_size);
     
-    // Initialize second MLP (embed_dim -> vocab_size) - final output
+    // Initialize second MLP (embed_dim -> vocab_size, final output layer)
     slm->mlp2 = init_mlp(embed_dim, 4 * embed_dim, slm->vocab_size, seq_len * batch_size);
 
     // Allocate embedding matrices
@@ -151,8 +143,8 @@ SLM* init_slm(int embed_dim, int state_dim, int seq_len, int batch_size) {
 void free_slm(SLM* slm) {
     if (slm) {
         if (slm->ssm1) free_ssm(slm->ssm1);
-        if (slm->mlp1) free_mlp(slm->mlp1);
         if (slm->ssm2) free_ssm(slm->ssm2);
+        if (slm->mlp1) free_mlp(slm->mlp1);
         if (slm->mlp2) free_mlp(slm->mlp2);
         cudaFree(slm->d_embeddings);
         cudaFree(slm->d_embeddings_grad);
@@ -197,18 +189,15 @@ void forward_pass_slm(SLM* slm, unsigned char* d_X) {
     CHECK_CUDA(cudaMemcpy(slm->d_ssm1_output, slm->ssm1->d_predictions, 
                          ssm_output_size * sizeof(float), cudaMemcpyDeviceToDevice));
     
-    // First MLP layer: SSM1 output -> MLP1
+    // First MLP layer: SSM1 output -> MLP1 (with internal residual connection)
     // Z1_t = Y1_t W1_1
-    // A1_t = Z1_t σ(Z1_t)
-    // M1_t = A1_t W1_2
+    // A1_t = Z1_t σ(Z1_t)  
+    // M1_t = A1_t W1_2 + Y1_t (residual handled internally by MLP)
     forward_pass_mlp(slm->mlp1, slm->d_ssm1_output);
     
-    // Residual connection: M1_t = MLP1(Y1_t) + Y1_t
-    int total_elements = seq_len * batch_size * slm->embed_dim;
-    int blocks = (total_elements + 255) / 256;
-    residual_add_kernel<<<blocks, 256>>>(
-        slm->d_mlp1_output, slm->mlp1->d_predictions, slm->d_ssm1_output, total_elements
-    );
+    // Copy MLP1 output to intermediate buffer
+    CHECK_CUDA(cudaMemcpy(slm->d_mlp1_output, slm->mlp1->d_predictions, 
+                         ssm_output_size * sizeof(float), cudaMemcpyDeviceToDevice));
     
     // Second SSM layer: MLP1 output -> SSM2
     // H2_t = M1_t B2^T + H2_{t-1} A2^T
@@ -220,16 +209,16 @@ void forward_pass_slm(SLM* slm, unsigned char* d_X) {
         forward_pass_ssm(slm->ssm2, d_mlp1_output_t, t);
     }
 
-    // Second MLP layer: SSM2 output -> MLP2
+    // Second MLP layer: SSM2 output -> MLP2 (final output)
     // Z2_t = Y2_t W2_1
     // A2_t = Z2_t σ(Z2_t)
-    // L_t = A2_t W2_2 - Forward through final MLP
+    // L_t = A2_t W2_2 + Y2_t (residual handled internally by MLP)
     forward_pass_mlp(slm->mlp2, slm->ssm2->d_predictions);
     
     // P_t = softmax(L_t) - Apply softmax for probability distribution
     int total_tokens = seq_len * batch_size;
-    int softmax_blocks = (total_tokens + 255) / 256;
-    softmax_kernel<<<softmax_blocks, 256>>>(
+    int blocks = (total_tokens + 255) / 256;
+    softmax_kernel<<<blocks, 256>>>(
         slm->d_softmax, slm->mlp2->d_predictions, total_tokens, slm->vocab_size
     );
 }
@@ -262,8 +251,8 @@ float calculate_loss_slm(SLM* slm, unsigned char* d_y) {
 // Zero gradients
 void zero_gradients_slm(SLM* slm) {
     zero_gradients_ssm(slm->ssm1);
-    zero_gradients_mlp(slm->mlp1);
     zero_gradients_ssm(slm->ssm2);
+    zero_gradients_mlp(slm->mlp1);
     zero_gradients_mlp(slm->mlp2);
     CHECK_CUDA(cudaMemset(slm->d_embeddings_grad, 0, 
                          slm->vocab_size * slm->embed_dim * sizeof(float)));
@@ -271,11 +260,11 @@ void zero_gradients_slm(SLM* slm) {
 
 // Backward pass
 void backward_pass_slm(SLM* slm, unsigned char* d_X) {
-    // Backward through second MLP (MLP2)
+    // Start backward pass from MLP2 (final output layer)
     // ∂L/∂W2_2 = A2_t^T (∂L/∂L_t)
-    // ∂L/∂A2_t = (∂L/∂L_t)(W2_2)^T
+    // ∂L/∂A2_t = (∂L/∂L_t)(W2_2)^T  
     // ∂L/∂Z2_t = ∂L/∂A2_t ⊙ [σ(Z2_t) + Z2_t σ(Z2_t)(1-σ(Z2_t))]
-    // ∂L/∂W2_1 = Y2_t^T (∂L/∂Z2_t)
+    // ∂L/∂W2_1 = Y2_t^T (∂L/∂Z2_t) - Backward through MLP2
     backward_pass_mlp(slm->mlp2, slm->ssm2->d_predictions);
     
     // Copy MLP2 input gradients to second SSM output error
@@ -322,33 +311,19 @@ void backward_pass_slm(SLM* slm, unsigned char* d_X) {
                                 &alpha, d_mlp1_grad_t, slm->ssm2->input_dim));
     }
     
-    // Copy gradients to first MLP output error for backward pass through residual connection
+    // Copy gradients to MLP1 output error
     CHECK_CUDA(cudaMemcpy(slm->mlp1->d_error, slm->d_mlp1_gradients, 
                          total_elements * sizeof(float), cudaMemcpyDeviceToDevice));
     
-    // Backward through first MLP (MLP1) 
+    // Backward through first MLP layer (MLP1)
     // ∂L/∂W1_2 = A1_t^T (∂L/∂M1_t)
-    // ∂L/∂A1_t = (∂L/∂M1_t)(W1_2)^T
+    // ∂L/∂A1_t = (∂L/∂M1_t)(W1_2)^T  
     // ∂L/∂Z1_t = ∂L/∂A1_t ⊙ [σ(Z1_t) + Z1_t σ(Z1_t)(1-σ(Z1_t))]
-    // ∂L/∂W1_1 = Y1_t^T (∂L/∂Z1_t)
+    // ∂L/∂W1_1 = Y1_t^T (∂L/∂Z1_t) - Backward through MLP1 (with internal residual handling)
     backward_pass_mlp(slm->mlp1, slm->d_ssm1_output);
     
-    // Compute total gradients with respect to SSM1 output (includes residual connection)
-    // ∂L/∂Y1_t = ∂L/∂M1_t + (∂L/∂Z1_t)(W1_1)^T (from residual connection and MLP1 input)
-    CHECK_CUDA(cudaMemset(slm->d_ssm1_gradients, 0, 
-                         slm->ssm1->seq_len * slm->ssm1->batch_size * slm->ssm1->output_dim * sizeof(float)));
-    
-    // Add gradient from residual connection (∂L/∂Y1_t += ∂L/∂M1_t)
-    CHECK_CUDA(cudaMemcpy(slm->d_ssm1_gradients, slm->d_mlp1_gradients, 
-                         total_elements * sizeof(float), cudaMemcpyDeviceToDevice));
-    
-    // Add gradient from MLP1 input (∂L/∂Y1_t += (∂L/∂Z1_t)(W1_1)^T)
-    // This gradient is already computed in slm->mlp1->d_error from backward_pass_mlp
-    CHECK_CUBLAS(cublasSaxpy(slm->ssm1->cublas_handle, total_elements, &alpha, 
-                            slm->mlp1->d_error, 1, slm->d_ssm1_gradients, 1));
-    
-    // Copy gradients to first SSM output error
-    CHECK_CUDA(cudaMemcpy(slm->ssm1->d_error, slm->d_ssm1_gradients, 
+    // Copy MLP1 input gradients to first SSM output error
+    CHECK_CUDA(cudaMemcpy(slm->ssm1->d_error, slm->mlp1->d_error, 
                          total_elements * sizeof(float), cudaMemcpyDeviceToDevice));
     
     // Backward through first SSM layer (SSM1)
@@ -496,7 +471,7 @@ SLM* load_slm(const char* filename, int custom_batch_size) {
     SLM* slm = (SLM*)malloc(sizeof(SLM));
     slm->ssm1 = ssm1;
     slm->ssm2 = ssm2;
-    slm->vocab_size = 256;
+    slm->vocab_size = ssm1->output_dim;
     slm->embed_dim = ssm1->input_dim;
     
     // Load first MLP
@@ -600,15 +575,15 @@ void generate_text_slm(SLM* slm, const char* seed_text, int generation_length, f
                          slm->ssm2->output_dim * slm->ssm2->input_dim * sizeof(float), 
                          cudaMemcpyDeviceToDevice));
     
-    // Copy MLP1 weights
+    // Copy first MLP weights
     CHECK_CUDA(cudaMemcpy(gen_slm->mlp1->d_fc1_weight, slm->mlp1->d_fc1_weight,
                          slm->mlp1->hidden_dim * slm->mlp1->input_dim * sizeof(float),
                          cudaMemcpyDeviceToDevice));
     CHECK_CUDA(cudaMemcpy(gen_slm->mlp1->d_fc2_weight, slm->mlp1->d_fc2_weight,
                          slm->mlp1->output_dim * slm->mlp1->hidden_dim * sizeof(float),
                          cudaMemcpyDeviceToDevice));
-    
-    // Copy MLP2 weights
+                         
+    // Copy second MLP weights
     CHECK_CUDA(cudaMemcpy(gen_slm->mlp2->d_fc1_weight, slm->mlp2->d_fc1_weight,
                          slm->mlp2->hidden_dim * slm->mlp2->input_dim * sizeof(float),
                          cudaMemcpyDeviceToDevice));
@@ -679,25 +654,27 @@ void generate_text_slm(SLM* slm, const char* seed_text, int generation_length, f
         int timestep = seed_len + i;
         forward_pass_ssm(gen_slm->ssm1, gen_slm->d_embedded_input, timestep);
         
-        // Get the first SSM output for this timestep
+        // Get the first SSM output for this timestep and copy to intermediate buffer
         float* d_y1_t = gen_slm->ssm1->d_predictions + timestep * 1 * gen_slm->ssm1->output_dim;
+        float* d_ssm1_out_t = gen_slm->d_ssm1_output + timestep * 1 * gen_slm->embed_dim;
+        CHECK_CUDA(cudaMemcpy(d_ssm1_out_t, d_y1_t, 
+                             gen_slm->embed_dim * sizeof(float), cudaMemcpyDeviceToDevice));
         
-        // Forward through first MLP
-        forward_pass_mlp(gen_slm->mlp1, d_y1_t);
+        // Forward through first MLP (SSM1 output -> MLP1)
+        forward_pass_mlp(gen_slm->mlp1, d_ssm1_out_t);
         
-        // Apply residual connection: M1_t = MLP1(Y1_t) + Y1_t
+        // Get MLP1 output and copy to intermediate buffer
         float* d_mlp1_out_t = gen_slm->d_mlp1_output + timestep * 1 * gen_slm->embed_dim;
-        residual_add_kernel<<<1, gen_slm->embed_dim>>>(
-            d_mlp1_out_t, gen_slm->mlp1->d_predictions, d_y1_t, gen_slm->embed_dim
-        );
+        CHECK_CUDA(cudaMemcpy(d_mlp1_out_t, gen_slm->mlp1->d_predictions,
+                             gen_slm->embed_dim * sizeof(float), cudaMemcpyDeviceToDevice));
         
-        // Forward through second SSM using the residual output
+        // Forward through second SSM (MLP1 output -> SSM2)
         forward_pass_ssm(gen_slm->ssm2, d_mlp1_out_t, timestep);
         
         // Get the second SSM output for this timestep
         float* d_y2_t = gen_slm->ssm2->d_predictions + timestep * 1 * gen_slm->ssm2->output_dim;
         
-        // Forward through second MLP
+        // Forward through second MLP (SSM2 output -> MLP2)
         forward_pass_mlp(gen_slm->mlp2, d_y2_t);
         
         // Apply softmax to get probabilities
