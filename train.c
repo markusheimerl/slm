@@ -31,6 +31,12 @@ size_t calculate_model_parameters(SLM* slm) {
     total_params += ssm1->output_dim * ssm1->state_dim;
     total_params += ssm1->output_dim * ssm1->input_dim;
     
+    // Count parameters for first MLP
+    MLP* mlp1 = slm->mlp1;
+    total_params += mlp1->hidden_dim * mlp1->input_dim;
+    total_params += mlp1->output_dim * mlp1->hidden_dim;
+    total_params += mlp1->input_dim * mlp1->output_dim;
+    
     // Count parameters for second SSM
     SSM* ssm2 = slm->ssm2;
     total_params += ssm2->state_dim * ssm2->state_dim;
@@ -38,11 +44,11 @@ size_t calculate_model_parameters(SLM* slm) {
     total_params += ssm2->output_dim * ssm2->state_dim;
     total_params += ssm2->output_dim * ssm2->input_dim;
     
-    // Count parameters for MLP
-    MLP* mlp = slm->mlp;
-    total_params += mlp->hidden_dim * mlp->input_dim;
-    total_params += mlp->output_dim * mlp->hidden_dim;
-    total_params += mlp->input_dim * mlp->output_dim;
+    // Count parameters for second MLP
+    MLP* mlp2 = slm->mlp2;
+    total_params += mlp2->hidden_dim * mlp2->input_dim;
+    total_params += mlp2->output_dim * mlp2->hidden_dim;
+    total_params += mlp2->input_dim * mlp2->output_dim;
     return total_params;
 }
 
