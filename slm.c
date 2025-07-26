@@ -491,6 +491,8 @@ SLM* load_slm(const char* filename, int custom_batch_size) {
     strcat(mlp1_file, "_mlp1.bin");
     slm->mlp1 = load_mlp(mlp1_file, ssm1->seq_len * ssm1->batch_size);
     if (!slm->mlp1) {
+        printf("Error: Could not load %s. This model uses dual-MLP architecture.\n", mlp1_file);
+        printf("If loading an old single-MLP model, please retrain with the new architecture.\n");
         free_ssm(ssm1);
         free_ssm(ssm2);
         free(slm);
@@ -505,6 +507,7 @@ SLM* load_slm(const char* filename, int custom_batch_size) {
     strcat(mlp2_file, "_mlp2.bin");
     slm->mlp2 = load_mlp(mlp2_file, ssm1->seq_len * ssm1->batch_size);
     if (!slm->mlp2) {
+        printf("Error: Could not load %s. This model uses dual-MLP architecture.\n", mlp2_file);
         free_ssm(ssm1);
         free_ssm(ssm2);
         free_mlp(slm->mlp1);
@@ -538,12 +541,20 @@ SLM* load_slm(const char* filename, int custom_batch_size) {
     
     FILE* f = fopen(embed_file, "rb");
     if (f) {
-        int vocab_size, embed_dim, intermediate_dim;
+        int vocab_size, embed_dim, intermediate_dim = 2 * slm->embed_dim; // default value
         fread(&vocab_size, sizeof(int), 1, f);
         fread(&embed_dim, sizeof(int), 1, f);
-        fread(&intermediate_dim, sizeof(int), 1, f);
         
-        // Update dimensions if loaded from file
+        // Try to read intermediate_dim (new format), fallback to default if not present
+        size_t pos = ftell(f);
+        if (fread(&intermediate_dim, sizeof(int), 1, f) != 1) {
+            // Old format - rewind and use default intermediate_dim
+            fseek(f, pos, SEEK_SET);
+            intermediate_dim = 2 * embed_dim;
+            printf("Loading old format embeddings, using default intermediate_dim=%d\n", intermediate_dim);
+        }
+        
+        // Update dimensions based on loaded values
         slm->intermediate_dim = intermediate_dim;
         
         float* h_embeddings = (float*)malloc(vocab_size * embed_dim * sizeof(float));
