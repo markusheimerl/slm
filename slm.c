@@ -525,10 +525,10 @@ void generate_text_slm(SLM* slm, const char* seed_text, int generation_length, f
                          cudaMemcpyDeviceToDevice));
     
     // Copy MLP weights
-    CHECK_CUDA(cudaMemcpy(gen_slm->mlp->d_fc1_weight, slm->mlp->d_fc1_weight,
+    CHECK_CUDA(cudaMemcpy(gen_slm->mlp->d_W1, slm->mlp->d_W1,
                          slm->mlp->hidden_dim * slm->mlp->input_dim * sizeof(float),
                          cudaMemcpyDeviceToDevice));
-    CHECK_CUDA(cudaMemcpy(gen_slm->mlp->d_fc2_weight, slm->mlp->d_fc2_weight,
+    CHECK_CUDA(cudaMemcpy(gen_slm->mlp->d_W2, slm->mlp->d_W2,
                          slm->mlp->output_dim * slm->mlp->hidden_dim * sizeof(float),
                          cudaMemcpyDeviceToDevice));
     
