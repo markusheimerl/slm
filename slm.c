@@ -608,6 +608,7 @@ void generate_text_slm(SLM* slm, const char* seed_text, int generation_length, f
                          cudaMemcpyDeviceToDevice));
     CHECK_CUDA(cudaMemcpy(gen_slm->mlp2->d_R, slm->mlp2->d_R,
                          slm->mlp2->input_dim * slm->mlp2->output_dim * sizeof(float),
+                         cudaMemcpyDeviceToDevice));
     
     // Copy embeddings
     CHECK_CUDA(cudaMemcpy(gen_slm->d_embeddings, slm->d_embeddings,
