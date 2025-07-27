@@ -269,10 +269,27 @@ void backward_pass_slm(SLM* slm, unsigned char* d_X) {
     // ∂L/∂W2_1 = O1_t^T (∂L/∂Z2_t) - Backward through second MLP
     backward_pass_mlp(slm->mlp2, slm->d_mlp1_output);
     
-    // Copy MLP2 input gradients to MLP1 output gradients
+    // Compute MLP2 input gradients: ∂L/∂X₂ = (∂L/∂Z₂)(W₁)ᵀ + (∂L/∂Y₂)(R)ᵀ
     int mlp1_output_elements = slm->ssm2->seq_len * slm->ssm2->batch_size * slm->intermediate_dim;
-    CHECK_CUDA(cudaMemcpy(slm->d_mlp1_gradients, slm->mlp2->d_input_gradients, 
-                         mlp1_output_elements * sizeof(float), cudaMemcpyDeviceToDevice));
+    const float alpha = 1.0f;
+    const float beta = 0.0f;
+    const float beta_add = 1.0f;
+    
+    // ∂L/∂X₂ = (∂L/∂Z₂)(W₁)ᵀ (gradients from hidden layer)
+    CHECK_CUBLAS(cublasSgemm(slm->mlp2->cublas_handle,
+                            CUBLAS_OP_T, CUBLAS_OP_N,
+                            slm->mlp2->input_dim, slm->ssm2->batch_size * slm->ssm2->seq_len, slm->mlp2->hidden_dim,
+                            &alpha, slm->mlp2->d_W1, slm->mlp2->input_dim,
+                            slm->mlp2->d_error_hidden, slm->mlp2->hidden_dim,
+                            &beta, slm->d_mlp1_gradients, slm->mlp2->input_dim));
+    
+    // ∂L/∂X₂ += (∂L/∂Y₂)(R)ᵀ (gradients from residual connection)
+    CHECK_CUBLAS(cublasSgemm(slm->mlp2->cublas_handle,
+                            CUBLAS_OP_T, CUBLAS_OP_N,
+                            slm->mlp2->input_dim, slm->ssm2->batch_size * slm->ssm2->seq_len, slm->mlp2->output_dim,
+                            &alpha, slm->mlp2->d_R, slm->mlp2->input_dim,
+                            slm->mlp2->d_error, slm->mlp2->output_dim,
+                            &beta_add, slm->d_mlp1_gradients, slm->mlp2->input_dim));
     
     // Copy gradients to first MLP output error for backprop
     CHECK_CUDA(cudaMemcpy(slm->mlp1->d_error, slm->d_mlp1_gradients, 
@@ -285,10 +302,24 @@ void backward_pass_slm(SLM* slm, unsigned char* d_X) {
     // ∂L/∂W1_1 = Y2_t^T (∂L/∂Z1_t) - Backward through first MLP
     backward_pass_mlp(slm->mlp1, slm->ssm2->d_predictions);
     
-    // Copy MLP1 input gradients to second SSM output error
+    // Compute MLP1 input gradients: ∂L/∂X₁ = (∂L/∂Z₁)(W₁)ᵀ + (∂L/∂Y₁)(R)ᵀ
     int total_elements = slm->ssm2->seq_len * slm->ssm2->batch_size * slm->ssm2->output_dim;
-    CHECK_CUDA(cudaMemcpy(slm->ssm2->d_error, slm->mlp1->d_input_gradients, 
-                         total_elements * sizeof(float), cudaMemcpyDeviceToDevice));
+    
+    // ∂L/∂X₁ = (∂L/∂Z₁)(W₁)ᵀ (gradients from hidden layer)
+    CHECK_CUBLAS(cublasSgemm(slm->mlp1->cublas_handle,
+                            CUBLAS_OP_T, CUBLAS_OP_N,
+                            slm->mlp1->input_dim, slm->ssm2->batch_size * slm->ssm2->seq_len, slm->mlp1->hidden_dim,
+                            &alpha, slm->mlp1->d_W1, slm->mlp1->input_dim,
+                            slm->mlp1->d_error_hidden, slm->mlp1->hidden_dim,
+                            &beta, slm->ssm2->d_error, slm->mlp1->input_dim));
+    
+    // ∂L/∂X₁ += (∂L/∂Y₁)(R)ᵀ (gradients from residual connection)
+    CHECK_CUBLAS(cublasSgemm(slm->mlp1->cublas_handle,
+                            CUBLAS_OP_T, CUBLAS_OP_N,
+                            slm->mlp1->input_dim, slm->ssm2->batch_size * slm->ssm2->seq_len, slm->mlp1->output_dim,
+                            &alpha, slm->mlp1->d_R, slm->mlp1->input_dim,
+                            slm->mlp1->d_error, slm->mlp1->output_dim,
+                            &beta_add, slm->ssm2->d_error, slm->mlp1->input_dim));
     
     // Backward through second SSM layer (SSM2)
     // ∂L/∂C2 = Σ_t (∂L/∂Y2_t)^T O2_t
