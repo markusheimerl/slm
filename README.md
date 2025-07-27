@@ -36,9 +36,19 @@ For language modeling, the cross-entropy loss between predicted and actual next 
 
 $$
 \begin{align*}
-L &= -\frac{1}{T \cdot B}\sum_{t=1}^{T}\sum_{b=1}^{B} \log P_{t,b,y_{t,b}}
+L_{CE} &= -\frac{1}{T \cdot B}\sum_{t=1}^{T}\sum_{b=1}^{B} \log P_{t,b,y_{t,b}}
 \end{align*}
 $$
+
+The model also supports **KL divergence regularization** to prevent overconfident predictions:
+
+$$
+\begin{align*}
+L_{total} &= L_{CE} + \lambda_{KL} \cdot KL(P||U)
+\end{align*}
+$$
+
+where $KL(P||U)$ is the KL divergence between the predicted distribution $P$ and uniform distribution $U$, and $\lambda_{KL}$ is the penalty weight (default: 0.01). See `KL_DIVERGENCE.md` for details.
 
 The gradient flows backward through the MLP following the chain rule:
 
