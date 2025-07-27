@@ -1,7 +1,7 @@
 # slm
 A small language model implementation
 
-Consider a character-level language model built on a dual state space model backbone with MLP projection, operating on character sequences of shape (seq_len × batch_size). The architecture combines learned character embeddings with temporal state dynamics through two sequential SSM layers, followed by MLP transformation and softmax normalization for next-character prediction. The forward propagation follows:
+Consider a character-level language model built on a quad state space model backbone with MLP projection, operating on character sequences of shape (seq_len × batch_size). The architecture combines learned character embeddings with temporal state dynamics through four sequential SSM layers, followed by MLP transformation and softmax normalization for next-character prediction. The forward propagation follows:
 
 $$
 \begin{align*}
@@ -9,7 +9,7 @@ E_t &= W_E[X_t]
 \end{align*}
 $$
 
-The embedding matrix $W_E$ maps discrete character indices to dense vector representations via indexing $W_E[X_t]$. Both SSM layers then process their inputs through the standard state space model formulation:
+The embedding matrix $W_E$ maps discrete character indices to dense vector representations via indexing $W_E[X_t]$. All four SSM layers then process their inputs through the standard state space model formulation:
 
 $$
 \begin{align*}
@@ -19,7 +19,7 @@ Y_t &= O_tC^T + X_tD^T
 \end{align*}
 $$
 
-The state transition matrix $A$ captures temporal dependencies, input matrix $B$ maps current inputs to state updates, output matrix $C$ projects nonlinearly activated states to outputs, and feedthrough matrix $D$ provides direct input-output connections. The first SSM takes embeddings $E_t$ as input $X_t$, while the second SSM takes the first SSM's output as its input. The MLP then transforms the final SSM outputs:
+The state transition matrix $A$ captures temporal dependencies, input matrix $B$ maps current inputs to state updates, output matrix $C$ projects nonlinearly activated states to outputs, and feedthrough matrix $D$ provides direct input-output connections. The first SSM takes embeddings $E_t$ as input $X_t$, while subsequent SSM layers process the outputs from previous layers in sequence. The MLP then transforms the final SSM outputs:
 
 $$
 \begin{align*}
@@ -53,7 +53,7 @@ $$
 \end{align*}
 $$
 
-The gradient then flows backward through both SSM layers following standard BPTT with Swish derivatives:
+The gradient then flows backward through all four SSM layers following standard BPTT with Swish derivatives:
 
 $$
 \begin{align*}
