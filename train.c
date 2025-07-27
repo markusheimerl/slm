@@ -67,18 +67,8 @@ int main(int argc, char* argv[]) {
     
     // Parse command line arguments
     char* model_file = NULL;
-    int gradient_accumulation_steps = 4;  // Default gradient accumulation steps
-    
-    for (int i = 1; i < argc; i++) {
-        if (strncmp(argv[i], "--grad-accum=", 13) == 0) {
-            gradient_accumulation_steps = atoi(argv[i] + 13);
-            if (gradient_accumulation_steps < 1) {
-                printf("Error: gradient accumulation steps must be >= 1\n");
-                return 1;
-            }
-        } else if (argv[i][0] != '-') {
-            model_file = argv[i];
-        }
+    if (argc > 1) {
+        model_file = argv[1];
     }
     
     // Model parameters
@@ -120,7 +110,6 @@ int main(int argc, char* argv[]) {
 
     int model_size = calculate_model_parameters(slm);
     printf("Model initialized with %d parameters\n", model_size);
-    printf("Gradient accumulation steps: %d\n", gradient_accumulation_steps);
     
     // Load training corpus
     size_t corpus_size;
@@ -131,6 +120,7 @@ int main(int argc, char* argv[]) {
     char* val_corpus = load_corpus("gutenberg_corpus_val.txt", &val_corpus_size, model_size * 5);
     
     // Gradient accumulation variables
+    int gradient_accumulation_steps = 4;  // Fixed gradient accumulation steps
     int accumulation_step = 0;
     float accumulated_loss = 0.0f;
 
@@ -228,13 +218,12 @@ int main(int argc, char* argv[]) {
         }
         
         if (batch % 2 == 0) {
-            float effective_lr = current_lr / gradient_accumulation_steps;
             if (val_loss >= 0.0f) {
-                printf("Batch [%d/%d], Loss: %.6f, LR: %.6f (eff: %.6f), Acc Step: %d/%d, Val Loss: %.6f\n", 
-                       batch, num_batches, loss, current_lr, effective_lr, accumulation_step, gradient_accumulation_steps, val_loss);
+                printf("Batch [%d/%d], Loss: %.6f, LR: %.6f, Val Loss: %.6f\n", 
+                       batch, num_batches, loss, current_lr, val_loss);
             } else {
-                printf("Batch [%d/%d], Loss: %.6f, LR: %.6f (eff: %.6f), Acc Step: %d/%d\n", 
-                       batch, num_batches, loss, current_lr, effective_lr, accumulation_step, gradient_accumulation_steps);
+                printf("Batch [%d/%d], Loss: %.6f, LR: %.6f\n", 
+                       batch, num_batches, loss, current_lr);
             }
         }
 
