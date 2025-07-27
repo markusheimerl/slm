@@ -91,6 +91,7 @@ int main(int argc, char* argv[]) {
 
     int model_size = calculate_model_parameters(slm);
     printf("Model initialized with %d parameters\n", model_size);
+    printf("KL divergence penalty weight: %.4f\n", slm->kl_penalty_weight);
     
     // Load training corpus
     size_t corpus_size;

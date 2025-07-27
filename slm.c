@@ -72,6 +72,41 @@ __global__ void cross_entropy_loss_kernel(float* losses, float* softmax, unsigne
     losses[idx] = -logf(prob);
 }
 
+// CUDA kernel for KL divergence loss: KL(P||U) = Σ P(c) log(P(c)) + log(V)
+// Since log(V) is constant, we compute only the entropy: -Σ P(c) log(P(c))
+__global__ void kl_divergence_loss_kernel(float* kl_losses, float* softmax, 
+                                        int batch_size, int vocab_size) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= batch_size) return;
+    
+    float* softmax_ptr = softmax + idx * vocab_size;
+    
+    // Compute negative entropy: -Σ P(c) log(P(c))
+    float neg_entropy = 0.0f;
+    for (int i = 0; i < vocab_size; i++) {
+        float prob = fmaxf(softmax_ptr[i], 1e-15f); // Avoid log(0)
+        neg_entropy -= prob * logf(prob);
+    }
+    kl_losses[idx] = neg_entropy;
+}
+
+// CUDA kernel for KL divergence gradient: ∂KL/∂L_t = kl_weight * P(c) * (log(P(c)) + 1 - log(V))
+// For uniform reference distribution U, log(V) is constant, so gradient is: kl_weight * P(c) * (log(P(c)) + 1)
+__global__ void kl_divergence_gradient_kernel(float* grad, float* softmax, float kl_weight,
+                                            int batch_size, int vocab_size) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= batch_size) return;
+    
+    float* grad_ptr = grad + idx * vocab_size;
+    float* softmax_ptr = softmax + idx * vocab_size;
+    
+    // Add KL divergence gradient to existing gradient
+    for (int i = 0; i < vocab_size; i++) {
+        float prob = fmaxf(softmax_ptr[i], 1e-15f); // Avoid log(0)
+        grad_ptr[i] += kl_weight * prob * (logf(prob) + 1.0f);
+    }
+}
+
 // CUDA kernel for embedding gradient accumulation: ∂L/∂W_E[c] = Σ_{t,b: X_{t,b}=c} ∂L/∂E_t
 __global__ void embedding_gradient_kernel(float* embed_grad, float* input_grad, unsigned char* chars,
                                          int batch_size, int embed_dim) {
@@ -94,6 +129,9 @@ SLM* init_slm(int embed_dim, int state_dim, int seq_len, int batch_size) {
     // Set dimensions
     slm->vocab_size = 256;
     slm->embed_dim = embed_dim;
+    
+    // Set KL divergence penalty weight (can be tuned)
+    slm->kl_penalty_weight = 0.01f;
 
     // Initialize first SSM (embed_dim -> embed_dim)
     slm->ssm1 = init_ssm(embed_dim, state_dim, embed_dim, seq_len, batch_size);
@@ -117,6 +155,7 @@ SLM* init_slm(int embed_dim, int state_dim, int seq_len, int batch_size) {
     CHECK_CUDA(cudaMalloc(&slm->d_input_gradients, seq_len * batch_size * embed_dim * sizeof(float)));
     CHECK_CUDA(cudaMalloc(&slm->d_ssm1_gradients, seq_len * batch_size * embed_dim * sizeof(float)));
     CHECK_CUDA(cudaMalloc(&slm->d_losses, seq_len * batch_size * sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&slm->d_kl_losses, seq_len * batch_size * sizeof(float)));
     
     // Initialize embeddings with Xavier initialization
     float* h_embeddings = (float*)malloc(slm->vocab_size * slm->embed_dim * sizeof(float));
@@ -150,6 +189,7 @@ void free_slm(SLM* slm) {
         cudaFree(slm->d_input_gradients);
         cudaFree(slm->d_ssm1_gradients);
         cudaFree(slm->d_losses);
+        cudaFree(slm->d_kl_losses);
         free(slm);
     }
 }
@@ -204,7 +244,7 @@ void forward_pass_slm(SLM* slm, unsigned char* d_X) {
     );
 }
 
-// Calculate loss: L = -1/(T·B) Σ_t Σ_b log P_{t,b,y_{t,b}}
+// Calculate loss: L = -1/(T·B) Σ_t Σ_b log P_{t,b,y_{t,b}} + λ_KL * KL(P||U)
 float calculate_loss_slm(SLM* slm, unsigned char* d_y) {
     int seq_len = slm->ssm1->seq_len;
     int batch_size = slm->ssm1->batch_size;
@@ -216,17 +256,39 @@ float calculate_loss_slm(SLM* slm, unsigned char* d_y) {
         slm->mlp->d_error, slm->d_softmax, d_y, total_tokens, slm->vocab_size
     );
     
-    // L = -log(P_{y_t}) - Calculate actual cross-entropy loss
+    // Add KL divergence gradient to the existing gradient
+    if (slm->kl_penalty_weight > 0.0f) {
+        kl_divergence_gradient_kernel<<<blocks, 256>>>(
+            slm->mlp->d_error, slm->d_softmax, slm->kl_penalty_weight, total_tokens, slm->vocab_size
+        );
+    }
+    
+    // L_CE = -log(P_{y_t}) - Calculate actual cross-entropy loss
     cross_entropy_loss_kernel<<<blocks, 256>>>(
         slm->d_losses, slm->d_softmax, d_y, total_tokens, slm->vocab_size
     );
     
-    // Sum all losses
-    float total_loss;
-    CHECK_CUBLAS(cublasSasum(slm->ssm1->cublas_handle, total_tokens, 
-                            slm->d_losses, 1, &total_loss));
+    // Calculate KL divergence loss if penalty weight > 0
+    float kl_loss = 0.0f;
+    if (slm->kl_penalty_weight > 0.0f) {
+        kl_divergence_loss_kernel<<<blocks, 256>>>(
+            slm->d_kl_losses, slm->d_softmax, total_tokens, slm->vocab_size
+        );
+        
+        // Sum KL divergence losses
+        CHECK_CUBLAS(cublasSasum(slm->ssm1->cublas_handle, total_tokens, 
+                                slm->d_kl_losses, 1, &kl_loss));
+        kl_loss /= total_tokens;
+    }
     
-    return total_loss / total_tokens;
+    // Sum cross-entropy losses
+    float ce_loss;
+    CHECK_CUBLAS(cublasSasum(slm->ssm1->cublas_handle, total_tokens, 
+                            slm->d_losses, 1, &ce_loss));
+    ce_loss /= total_tokens;
+    
+    // Total loss = cross-entropy + KL penalty
+    return ce_loss + slm->kl_penalty_weight * kl_loss;
 }
 
 // Zero gradients
@@ -401,6 +463,7 @@ void save_slm(SLM* slm, const char* filename) {
     if (f) {
         fwrite(&slm->vocab_size, sizeof(int), 1, f);
         fwrite(&slm->embed_dim, sizeof(int), 1, f);
+        fwrite(&slm->kl_penalty_weight, sizeof(float), 1, f);
         fwrite(h_embeddings, sizeof(float), slm->vocab_size * slm->embed_dim, f);
         fclose(f);
         printf("Embeddings saved to %s\n", embed_file);
@@ -433,6 +496,9 @@ SLM* load_slm(const char* filename, int custom_batch_size) {
     slm->vocab_size = ssm1->output_dim;
     slm->embed_dim = ssm1->input_dim;
     
+    // Set default KL divergence penalty weight
+    slm->kl_penalty_weight = 0.01f;
+    
     // Load MLP
     char mlp_file[256];
     strcpy(mlp_file, filename);
@@ -452,6 +518,7 @@ SLM* load_slm(const char* filename, int custom_batch_size) {
     CHECK_CUDA(cudaMalloc(&slm->d_input_gradients, ssm1->seq_len * ssm1->batch_size * ssm1->input_dim * sizeof(float)));
     CHECK_CUDA(cudaMalloc(&slm->d_ssm1_gradients, ssm1->seq_len * ssm1->batch_size * ssm1->output_dim * sizeof(float)));
     CHECK_CUDA(cudaMalloc(&slm->d_losses, ssm1->seq_len * ssm1->batch_size * sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&slm->d_kl_losses, ssm1->seq_len * ssm1->batch_size * sizeof(float)));
     
     // Load embeddings
     char embed_file[256];
@@ -463,8 +530,12 @@ SLM* load_slm(const char* filename, int custom_batch_size) {
     FILE* f = fopen(embed_file, "rb");
     if (f) {
         int vocab_size, embed_dim;
+        float kl_penalty_weight;
         fread(&vocab_size, sizeof(int), 1, f);
         fread(&embed_dim, sizeof(int), 1, f);
+        fread(&kl_penalty_weight, sizeof(float), 1, f);
+        
+        slm->kl_penalty_weight = kl_penalty_weight;
         
         float* h_embeddings = (float*)malloc(vocab_size * embed_dim * sizeof(float));
         fread(h_embeddings, sizeof(float), vocab_size * embed_dim, f);
@@ -474,7 +545,7 @@ SLM* load_slm(const char* filename, int custom_batch_size) {
         
         free(h_embeddings);
         fclose(f);
-        printf("Embeddings loaded from %s\n", embed_file);
+        printf("Embeddings loaded from %s (KL penalty weight: %.4f)\n", embed_file, kl_penalty_weight);
     }
     
     CHECK_CUDA(cudaMemset(slm->d_embeddings_m, 0, slm->vocab_size * slm->embed_dim * sizeof(float)));
@@ -663,4 +734,12 @@ void generate_text_slm(SLM* slm, const char* seed_text, int generation_length, f
     free(h_probs);
     cudaFree(d_input);
     free_slm(gen_slm);
+}
+
+// Set KL divergence penalty weight
+void set_kl_penalty_weight_slm(SLM* slm, float weight) {
+    if (slm) {
+        slm->kl_penalty_weight = weight;
+        printf("KL divergence penalty weight set to: %.4f\n", weight);
+    }
 }

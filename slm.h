@@ -22,10 +22,14 @@ typedef struct {
     float* d_input_gradients;   // seq_len x batch_size x embed_dim
     float* d_ssm1_gradients;    // seq_len x batch_size x embed_dim (gradients for first SSM input)
     float* d_losses;            // seq_len x batch_size
+    float* d_kl_losses;         // seq_len x batch_size (KL divergence losses)
     
     // Dimensions
     int vocab_size;
     int embed_dim;
+    
+    // KL divergence penalty weight
+    float kl_penalty_weight;
 } SLM;
 
 // CUDA kernel prototypes
@@ -36,6 +40,10 @@ __global__ void cross_entropy_gradient_kernel(float* grad, float* softmax, unsig
                                              int batch_size, int vocab_size);
 __global__ void cross_entropy_loss_kernel(float* losses, float* softmax, unsigned char* targets, 
                                          int batch_size, int vocab_size);
+__global__ void kl_divergence_loss_kernel(float* kl_losses, float* softmax, 
+                                        int batch_size, int vocab_size);
+__global__ void kl_divergence_gradient_kernel(float* grad, float* softmax, float kl_weight,
+                                            int batch_size, int vocab_size);
 __global__ void embedding_gradient_kernel(float* embed_grad, float* input_grad, unsigned char* chars,
                                          int batch_size, int embed_dim);
 
@@ -50,5 +58,6 @@ void update_weights_slm(SLM* slm, float learning_rate);
 void save_slm(SLM* slm, const char* filename);
 SLM* load_slm(const char* filename, int custom_batch_size);
 void generate_text_slm(SLM* slm, const char* seed_text, int generation_length, float temperature);
+void set_kl_penalty_weight_slm(SLM* slm, float weight);
 
 #endif
