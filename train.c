@@ -56,15 +56,15 @@ int main(int argc, char* argv[]) {
     }
     
     // Model parameters
-    const int embed_dim = 128;
-    const int state_dim = 64;
+    const int embed_dim = 256;
+    const int state_dim = 128;
     const int seq_len = 4096;
-    const int batch_size = 64;
+    const int batch_size = 16;
     
     // Training parameters
     const int num_batches = 100000;
-    const float lr_init = 0.0001f;
-    const float lr_min = 0.00001f;
+    const float lr_init = 0.00001f;
+    const float lr_min = 0.000001f;
     
     // Pre-allocate memory for sequences
     unsigned char *input_chars = (unsigned char*)malloc(batch_size * seq_len * sizeof(unsigned char));
