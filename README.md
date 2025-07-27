@@ -89,6 +89,31 @@ $$
 
 The implementation leverages CUDA for parallel computation across batch and sequence dimensions, with efficient kernel implementations for embedding lookup, Swish activation, softmax normalization, and gradient accumulation. Character sequences are extracted from text corpora through random position sampling, providing diverse training contexts.
 
+## Gradient Accumulation
+
+This implementation supports gradient accumulation, allowing you to simulate larger effective batch sizes without increasing memory usage. Gradients are accumulated across multiple backward passes before updating model weights.
+
+### Usage
+```bash
+# Default gradient accumulation (4 steps)
+make run
+
+# Custom gradient accumulation steps  
+./train.out --grad-accum=8
+
+# Load saved model with gradient accumulation
+./train.out model.bin --grad-accum=2
+
+# Disable gradient accumulation (original behavior)
+./train.out --grad-accum=1
+```
+
+### Benefits
+- **Memory Efficiency**: Simulate larger batch sizes without increasing GPU memory
+- **Training Stability**: Larger effective batch sizes improve training stability  
+- **Flexibility**: Easily adjust effective batch size via command line
+- **Automatic LR Scaling**: Learning rate is automatically scaled by 1/N for consistent training dynamics
+
 ## How to run
 ```
 sudo apt update
