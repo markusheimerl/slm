@@ -19,6 +19,16 @@ float lr_schedule(float lr_init, float lr_min, int current_batch, int total_batc
     }
 }
 
+// Cosine annealing learning rate schedule
+float cosine_schedule(float lr_init, float lr_min, int current_batch, int total_batches) {
+    if (current_batch >= total_batches) return lr_min;
+    
+    float progress = (float)current_batch / (float)total_batches;
+    float cosine_factor = 0.5f * (1.0f + cosf(M_PI * progress));
+    
+    return lr_min + (lr_init - lr_min) * cosine_factor;
+}
+
 // Function to calculate total model parameters
 size_t calculate_model_parameters(SLM* slm) {
     size_t total_params = 0;
@@ -111,8 +121,8 @@ int main(int argc, char* argv[]) {
 
     // Training loop
     for (int batch = 0; batch <= num_batches; batch++) {
-        // Calculate current learning rate using lr schedule with warmup + cosine annealing
-        float current_lr = lr_schedule(lr_init, lr_min, batch, num_batches);
+        // Calculate current learning rate
+        float current_lr = cosine_schedule(lr_init, lr_min, batch, num_batches);
         
         // Generate fresh training data from random corpus locations
         generate_char_sequences_from_corpus(&input_chars, &target_chars, 
