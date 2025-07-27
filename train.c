@@ -56,8 +56,8 @@ int main(int argc, char* argv[]) {
     }
     
     // Model parameters
-    const int embed_dim = 256;
-    const int state_dim = 128;
+    const int embed_dim = 128;
+    const int state_dim = 64;
     const int seq_len = 4096;
     const int batch_size = 64;
     
