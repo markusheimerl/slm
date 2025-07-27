@@ -6,27 +6,11 @@
 #include "data.h"
 #include "slm.h"
 
-// Learning rate schedule with linear warmup followed by cosine annealing
-float lr_schedule(float lr_init, float lr_min, int current_batch, int total_batches) {
-    if (current_batch >= total_batches) return lr_min;
-    float warmup_batches = total_batches * 0.05f;
-    
-    if (current_batch <= warmup_batches) {
-        return lr_init * ((float)current_batch / warmup_batches);
-    } else {
-        float progress = (float)(current_batch - warmup_batches) / (float)(total_batches - warmup_batches);
-        return lr_min + (lr_init - lr_min) * (0.5f * (1.0f + cosf(M_PI * progress)));
-    }
-}
-
 // Cosine annealing learning rate schedule
 float cosine_schedule(float lr_init, float lr_min, int current_batch, int total_batches) {
     if (current_batch >= total_batches) return lr_min;
-    
     float progress = (float)current_batch / (float)total_batches;
-    float cosine_factor = 0.5f * (1.0f + cosf(M_PI * progress));
-    
-    return lr_min + (lr_init - lr_min) * cosine_factor;
+    return lr_min + (lr_init - lr_min) * (0.5f * (1.0f + cosf(M_PI * progress)));
 }
 
 // Function to calculate total model parameters
