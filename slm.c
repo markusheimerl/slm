@@ -271,7 +271,7 @@ void backward_pass_slm(SLM* slm, unsigned char* d_X) {
     
     // Copy MLP2 input gradients to MLP1 output gradients
     int mlp1_output_elements = slm->ssm2->seq_len * slm->ssm2->batch_size * slm->intermediate_dim;
-    CHECK_CUDA(cudaMemcpy(slm->d_mlp1_gradients, slm->mlp2->d_error, 
+    CHECK_CUDA(cudaMemcpy(slm->d_mlp1_gradients, slm->mlp2->d_input_gradients, 
                          mlp1_output_elements * sizeof(float), cudaMemcpyDeviceToDevice));
     
     // Copy gradients to first MLP output error for backprop
@@ -287,7 +287,7 @@ void backward_pass_slm(SLM* slm, unsigned char* d_X) {
     
     // Copy MLP1 input gradients to second SSM output error
     int total_elements = slm->ssm2->seq_len * slm->ssm2->batch_size * slm->ssm2->output_dim;
-    CHECK_CUDA(cudaMemcpy(slm->ssm2->d_error, slm->mlp1->d_error, 
+    CHECK_CUDA(cudaMemcpy(slm->ssm2->d_error, slm->mlp1->d_input_gradients, 
                          total_elements * sizeof(float), cudaMemcpyDeviceToDevice));
     
     // Backward through second SSM layer (SSM2)
