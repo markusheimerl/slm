@@ -9,22 +9,13 @@
 // Learning rate schedule with linear warmup followed by cosine annealing
 float lr_schedule(float lr_init, float lr_min, int current_batch, int total_batches) {
     if (current_batch >= total_batches) return lr_min;
-    if (current_batch < 0) return 0.0f; // Handle negative batches gracefully
-    
-    float warmup_batches = total_batches * 0.05f; // 5% of total batches for warmup
+    float warmup_batches = total_batches * 0.05f;
     
     if (current_batch <= warmup_batches) {
-        // Linear warmup from 0 to lr_init
-        // Handle batch 0 case by starting with a tiny learning rate
-        if (current_batch == 0) return 0.0f;
         return lr_init * ((float)current_batch / warmup_batches);
     } else {
-        // Cosine annealing from lr_init to lr_min
-        // Adjust progress to start from 0 after warmup
         float progress = (float)(current_batch - warmup_batches) / (float)(total_batches - warmup_batches);
-        float cosine_factor = 0.5f * (1.0f + cosf(M_PI * progress));
-        
-        return lr_min + (lr_init - lr_min) * cosine_factor;
+        return lr_min + (lr_init - lr_min) * (0.5f * (1.0f + cosf(M_PI * progress)));
     }
 }
 
