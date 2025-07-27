@@ -5,9 +5,8 @@
 #include "mlp/gpu/mlp.h"
 
 typedef struct {
-    SSM* ssm1;                  // First state space model layer
-    SSM* ssm2;                  // Second state space model layer
-    MLP* mlp;                   // Multi-layer perceptron for output mapping
+    SSM* ssm[4];                // Four state space model layers
+    MLP* mlp[4];                // Four multi-layer perceptron layers
     
     // Language modeling specific buffers
     float* d_embeddings;        // vocab_size x embed_dim
@@ -17,10 +16,10 @@ typedef struct {
     
     // Working buffers
     float* d_embedded_input;    // seq_len x batch_size x embed_dim
-    float* d_ssm1_output;       // seq_len x batch_size x embed_dim (output from first SSM)
+    float* d_layer_outputs[8];  // Intermediate outputs for each layer (SSM[0], MLP[0], SSM[1], MLP[1], etc.)
     float* d_softmax;           // seq_len x batch_size x vocab_size
     float* d_input_gradients;   // seq_len x batch_size x embed_dim
-    float* d_ssm1_gradients;    // seq_len x batch_size x embed_dim (gradients for first SSM input)
+    float* d_layer_gradients[8]; // Gradients for each layer input
     float* d_losses;            // seq_len x batch_size
     
     // Dimensions
