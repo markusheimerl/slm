@@ -1,7 +1,7 @@
 # slm
 A small language model implementation
 
-Consider a character-level language model built on a dual state space model backbone with MLP projection, operating on character sequences of shape (seq_len × batch_size). The architecture combines learned character embeddings with temporal state dynamics through two sequential SSM layers, followed by MLP transformation and softmax normalization for next-character prediction. The forward propagation follows:
+Consider a character-level language model built on a dual state space model backbone with dual MLP projection, operating on character sequences of shape (seq_len × batch_size). The architecture combines learned character embeddings with temporal state dynamics through two sequential SSM layers, followed by two sequential MLP transformations and softmax normalization for next-character prediction. The forward propagation follows:
 
 $$
 \begin{align*}
@@ -19,18 +19,21 @@ Y_t &= O_tC^T + X_tD^T
 \end{align*}
 $$
 
-The state transition matrix $A$ captures temporal dependencies, input matrix $B$ maps current inputs to state updates, output matrix $C$ projects nonlinearly activated states to outputs, and feedthrough matrix $D$ provides direct input-output connections. The first SSM takes embeddings $E_t$ as input $X_t$, while the second SSM takes the first SSM's output as its input. The MLP then transforms the final SSM outputs:
+The state transition matrix $A$ captures temporal dependencies, input matrix $B$ maps current inputs to state updates, output matrix $C$ projects nonlinearly activated states to outputs, and feedthrough matrix $D$ provides direct input-output connections. The first SSM takes embeddings $E_t$ as input $X_t$, while the second SSM takes the first SSM's output as its input. The first MLP then transforms the final SSM outputs, and the second MLP produces the final logits:
 
 $$
 \begin{align*}
-Z &= YW_1 \\
-A &= Z\sigma(Z) \\
-L &= AW_2 \\
+Z_1 &= Y_2W_{1,1} \\
+A_1 &= Z_1\sigma(Z_1) \\
+M_1 &= A_1W_{2,1} \\
+Z_2 &= M_1W_{1,2} \\
+A_2 &= Z_2\sigma(Z_2) \\
+L &= A_2W_{2,2} \\
 P &= \frac{\exp(L)}{\sum_c \exp(L_c)}
 \end{align*}
 $$
 
-The swish activation $z\sigma(z)$ interpolates between linear and nonlinear regimes, followed by softmax normalization to produce probability distributions over the character vocabulary.
+The swish activation $z\sigma(z)$ interpolates between linear and nonlinear regimes in both MLP layers, followed by softmax normalization to produce probability distributions over the character vocabulary.
 
 For language modeling, the cross-entropy loss between predicted and actual next characters is minimized, where $\odot$ denotes elementwise multiplication:
 
@@ -40,16 +43,21 @@ L &= -\frac{1}{T \cdot B}\sum_{t=1}^{T}\sum_{b=1}^{B} \log P_{t,b,y_{t,b}}
 \end{align*}
 $$
 
-The gradient flows backward through the MLP following the chain rule:
+The gradient flows backward through both MLP layers following the chain rule:
 
 $$
 \begin{align*}
 \frac{\partial L}{\partial L_t} &= P_t - \mathbf{1}_{y_t} \\
-\frac{\partial L}{\partial W_2} &= A_t^T(\frac{\partial L}{\partial L_t}) \\
-\frac{\partial L}{\partial A_t} &= (\frac{\partial L}{\partial L_t})(W_2)^T \\
-\frac{\partial L}{\partial Z_t} &= \frac{\partial L}{\partial A_t} \odot [\sigma(Z_t) + Z_t\sigma(Z_t)(1-\sigma(Z_t))] \\
-\frac{\partial L}{\partial W_1} &= Y_t^T(\frac{\partial L}{\partial Z_t}) \\
-\frac{\partial L}{\partial Y_t} &= (\frac{\partial L}{\partial Z_t})(W_1)^T
+\frac{\partial L}{\partial W_{2,2}} &= A_{2,t}^T(\frac{\partial L}{\partial L_t}) \\
+\frac{\partial L}{\partial A_{2,t}} &= (\frac{\partial L}{\partial L_t})(W_{2,2})^T \\
+\frac{\partial L}{\partial Z_{2,t}} &= \frac{\partial L}{\partial A_{2,t}} \odot [\sigma(Z_{2,t}) + Z_{2,t}\sigma(Z_{2,t})(1-\sigma(Z_{2,t}))] \\
+\frac{\partial L}{\partial W_{1,2}} &= M_{1,t}^T(\frac{\partial L}{\partial Z_{2,t}}) \\
+\frac{\partial L}{\partial M_{1,t}} &= (\frac{\partial L}{\partial Z_{2,t}})(W_{1,2})^T \\
+\frac{\partial L}{\partial W_{2,1}} &= A_{1,t}^T(\frac{\partial L}{\partial M_{1,t}}) \\
+\frac{\partial L}{\partial A_{1,t}} &= (\frac{\partial L}{\partial M_{1,t}})(W_{2,1})^T \\
+\frac{\partial L}{\partial Z_{1,t}} &= \frac{\partial L}{\partial A_{1,t}} \odot [\sigma(Z_{1,t}) + Z_{1,t}\sigma(Z_{1,t})(1-\sigma(Z_{1,t}))] \\
+\frac{\partial L}{\partial W_{1,1}} &= Y_{2,t}^T(\frac{\partial L}{\partial Z_{1,t}}) \\
+\frac{\partial L}{\partial Y_{2,t}} &= (\frac{\partial L}{\partial Z_{1,t}})(W_{1,1})^T
 \end{align*}
 $$
 
@@ -77,7 +85,7 @@ $$
 
 where temperature $\tau$ controls sampling entropy - $\tau \rightarrow 0$ approaches argmax sampling while $\tau > 1$ increases randomness.
 
-The AdamW optimizer maintains exponential moving averages for all parameters $\theta = \{A, B, C, D, W_E, W_1, W_2\}$ with momentum $\beta_1$, second moment $\beta_2$, and weight decay $\lambda$. The learning rate is denoted by $\eta$, $t$ is the current training iteration, and $\epsilon$ is a small constant for numerical stability. For each weight matrix $W$, the update rule is:
+The AdamW optimizer maintains exponential moving averages for all parameters $\theta = \{A, B, C, D, W_E, W_{1,1}, W_{2,1}, W_{1,2}, W_{2,2}\}$ with momentum $\beta_1$, second moment $\beta_2$, and weight decay $\lambda$. The learning rate is denoted by $\eta$, $t$ is the current training iteration, and $\epsilon$ is a small constant for numerical stability. For each weight matrix $W$, the update rule is:
 
 $$
 \begin{align*}
