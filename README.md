@@ -25,15 +25,15 @@ $$
 \begin{align*}
 Z_1 &= Y_2W_{1,1} \\
 A_1 &= Z_1\sigma(Z_1) \\
-M_1 &= A_1W_{2,1} \\
+M_1 &= A_1W_{2,1} + Y_2R_1 \\
 Z_2 &= M_1W_{1,2} \\
 A_2 &= Z_2\sigma(Z_2) \\
-L &= A_2W_{2,2} \\
+L &= A_2W_{2,2} + M_1R_2 \\
 P &= \frac{\exp(L)}{\sum_c \exp(L_c)}
 \end{align*}
 $$
 
-The swish activation $z\sigma(z)$ interpolates between linear and nonlinear regimes in both MLP layers, followed by softmax normalization to produce probability distributions over the character vocabulary.
+The swish activation $z\sigma(z)$ interpolates between linear and nonlinear regimes in both MLP layers, with residual connections $R_1$ and $R_2$ providing direct pathways from inputs to outputs in each MLP layer respectively, followed by softmax normalization to produce probability distributions over the character vocabulary.
 
 For language modeling, the cross-entropy loss between predicted and actual next characters is minimized, where $\odot$ denotes elementwise multiplication:
 
@@ -49,15 +49,17 @@ $$
 \begin{align*}
 \frac{\partial L}{\partial L_t} &= P_t - \mathbf{1}_{y_t} \\
 \frac{\partial L}{\partial W_{2,2}} &= A_{2,t}^T(\frac{\partial L}{\partial L_t}) \\
+\frac{\partial L}{\partial R_2} &= M_{1,t}^T(\frac{\partial L}{\partial L_t}) \\
 \frac{\partial L}{\partial A_{2,t}} &= (\frac{\partial L}{\partial L_t})(W_{2,2})^T \\
+\frac{\partial L}{\partial M_{1,t}} &= (\frac{\partial L}{\partial L_t})(W_{2,2})^T + (\frac{\partial L}{\partial L_t})(R_2)^T \\
 \frac{\partial L}{\partial Z_{2,t}} &= \frac{\partial L}{\partial A_{2,t}} \odot [\sigma(Z_{2,t}) + Z_{2,t}\sigma(Z_{2,t})(1-\sigma(Z_{2,t}))] \\
 \frac{\partial L}{\partial W_{1,2}} &= M_{1,t}^T(\frac{\partial L}{\partial Z_{2,t}}) \\
-\frac{\partial L}{\partial M_{1,t}} &= (\frac{\partial L}{\partial Z_{2,t}})(W_{1,2})^T \\
 \frac{\partial L}{\partial W_{2,1}} &= A_{1,t}^T(\frac{\partial L}{\partial M_{1,t}}) \\
+\frac{\partial L}{\partial R_1} &= Y_{2,t}^T(\frac{\partial L}{\partial M_{1,t}}) \\
 \frac{\partial L}{\partial A_{1,t}} &= (\frac{\partial L}{\partial M_{1,t}})(W_{2,1})^T \\
+\frac{\partial L}{\partial Y_{2,t}} &= (\frac{\partial L}{\partial M_{1,t}})(W_{2,1})^T + (\frac{\partial L}{\partial M_{1,t}})(R_1)^T \\
 \frac{\partial L}{\partial Z_{1,t}} &= \frac{\partial L}{\partial A_{1,t}} \odot [\sigma(Z_{1,t}) + Z_{1,t}\sigma(Z_{1,t})(1-\sigma(Z_{1,t}))] \\
-\frac{\partial L}{\partial W_{1,1}} &= Y_{2,t}^T(\frac{\partial L}{\partial Z_{1,t}}) \\
-\frac{\partial L}{\partial Y_{2,t}} &= (\frac{\partial L}{\partial Z_{1,t}})(W_{1,1})^T
+\frac{\partial L}{\partial W_{1,1}} &= Y_{2,t}^T(\frac{\partial L}{\partial Z_{1,t}})
 \end{align*}
 $$
 
@@ -85,7 +87,7 @@ $$
 
 where temperature $\tau$ controls sampling entropy - $\tau \rightarrow 0$ approaches argmax sampling while $\tau > 1$ increases randomness.
 
-The AdamW optimizer maintains exponential moving averages for all parameters $\theta = \{A, B, C, D, W_E, W_{1,1}, W_{2,1}, W_{1,2}, W_{2,2}\}$ with momentum $\beta_1$, second moment $\beta_2$, and weight decay $\lambda$. The learning rate is denoted by $\eta$, $t$ is the current training iteration, and $\epsilon$ is a small constant for numerical stability. For each weight matrix $W$, the update rule is:
+The AdamW optimizer maintains exponential moving averages for all parameters $\theta = \{A, B, C, D, W_E, W_{1,1}, W_{2,1}, W_{1,2}, W_{2,2}, R_1, R_2\}$ with momentum $\beta_1$, second moment $\beta_2$, and weight decay $\lambda$. The learning rate is denoted by $\eta$, $t$ is the current training iteration, and $\epsilon$ is a small constant for numerical stability. For each weight matrix $W$, the update rule is:
 
 $$
 \begin{align*}
