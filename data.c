@@ -461,8 +461,24 @@ int download_corpus(const char* filename, int target_size_mb) {
 char* load_corpus(const char* filename, size_t* corpus_size, int target_size_bytes) {
     FILE* file = fopen(filename, "r");
     
+    // If file exists, check its size against target
+    if (file) {
+        // Get file size
+        fseek(file, 0, SEEK_END);
+        long existing_size = ftell(file);
+        fseek(file, 0, SEEK_SET);
+        
+        // Check if existing file size is significantly different from target
+        double size_ratio = (double)existing_size / target_size_bytes;
+        if (size_ratio < 0.5 || size_ratio > 2.0) {
+            long existing_mb = existing_size / (1024 * 1024);
+            long target_mb = target_size_bytes / (1024 * 1024);
+            
+            printf("WARNING: Existing corpus '%s' is %ldMB, but target size is %ldMB\n", filename, existing_mb, target_mb);
+        }
+    }
     // If file doesn't exist, try to download it
-    if (!file) {
+    else {
         printf("Corpus file not found: %s\n", filename);
         
         // Attempt download for gutenberg corpus files (training and validation)
