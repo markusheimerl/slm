@@ -25,7 +25,7 @@ $$
 \begin{align*}
 Z &= YW_1 \\
 A &= Z\sigma(Z) \\
-L &= AW_2 \\
+L &= AW_2 + XR
 P &= \frac{\exp(L)}{\sum_c \exp(L_c)}
 \end{align*}
 $$
