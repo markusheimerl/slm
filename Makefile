@@ -6,8 +6,8 @@ ARCH ?= sm_87
 CUDAFLAGS = --cuda-gpu-arch=$(ARCH) -x cuda -Wno-unknown-cuda-version
 CUDALIBS = -L/usr/local/cuda/lib64 -lcudart -lcublas
 
-train.out: slm.o data.o train.o ssm/gpu/ssm.o mlp/gpu/mlp.o
-	$(CC) slm.o data.o train.o ssm/gpu/ssm.o mlp/gpu/mlp.o $(CUDALIBS) $(LDFLAGS) -o $@
+train.out: slm.o data.o train.o ssm/gpu/ssm.o
+	$(CC) slm.o data.o train.o ssm/gpu/ssm.o $(CUDALIBS) $(LDFLAGS) -o $@
 
 slm.o: slm.c slm.h
 	$(CC) $(CFLAGS) $(CUDAFLAGS) -c slm.c -o $@
@@ -21,14 +21,8 @@ train.o: train.c slm.h data.h
 ssm/gpu/ssm.o:
 	$(MAKE) -C ssm/gpu ssm.o ARCH=$(ARCH)
 
-mlp/gpu/mlp.o:
-	$(MAKE) -C mlp/gpu mlp.o ARCH=$(ARCH)
-
 ssm/gpu/data.o:
 	$(MAKE) -C ssm/gpu data.o ARCH=$(ARCH)
-
-mlp/gpu/data.o:
-	$(MAKE) -C mlp/gpu data.o ARCH=$(ARCH)
 
 run: train.out
 	@time ./train.out
@@ -39,4 +33,3 @@ cont: train.out
 clean:
 	rm -f *.out *.o *.csv *.bin
 	$(MAKE) -C ssm/gpu clean
-	$(MAKE) -C mlp/gpu clean
