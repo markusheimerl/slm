@@ -442,6 +442,14 @@ void save_slm(SLM* slm, const char* filename) {
     strcat(ssm2_file, "_ssm2.bin");
     save_ssm(slm->ssm2, ssm2_file);
     
+    // Save third SSM  
+    char ssm3_file[256];
+    strcpy(ssm3_file, filename);
+    dot = strrchr(ssm3_file, '.');
+    if (dot) *dot = '\0';
+    strcat(ssm3_file, "_ssm3.bin");
+    save_ssm(slm->ssm3, ssm3_file);
+    
     // Save MLP
     char mlp_file[256];
     strcpy(mlp_file, filename);
@@ -491,9 +499,23 @@ SLM* load_slm(const char* filename, int custom_batch_size) {
         return NULL;
     }
     
+    // Load third SSM
+    char ssm3_file[256];
+    strcpy(ssm3_file, filename);
+    dot = strrchr(ssm3_file, '.');
+    if (dot) *dot = '\0';
+    strcat(ssm3_file, "_ssm3.bin");
+    SSM* ssm3 = load_ssm(ssm3_file, custom_batch_size);
+    if (!ssm3) {
+        free_ssm(ssm1);
+        free_ssm(ssm2);
+        return NULL;
+    }
+    
     SLM* slm = (SLM*)malloc(sizeof(SLM));
     slm->ssm1 = ssm1;
     slm->ssm2 = ssm2;
+    slm->ssm3 = ssm3;
     slm->vocab_size = ssm1->output_dim;
     slm->embed_dim = ssm1->input_dim;
     
@@ -512,9 +534,11 @@ SLM* load_slm(const char* filename, int custom_batch_size) {
     CHECK_CUDA(cudaMalloc(&slm->d_embeddings_v, slm->vocab_size * slm->embed_dim * sizeof(float)));
     CHECK_CUDA(cudaMalloc(&slm->d_embedded_input, ssm1->seq_len * ssm1->batch_size * ssm1->input_dim * sizeof(float)));
     CHECK_CUDA(cudaMalloc(&slm->d_ssm1_output, ssm1->seq_len * ssm1->batch_size * ssm1->output_dim * sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&slm->d_ssm2_output, ssm2->seq_len * ssm2->batch_size * ssm2->output_dim * sizeof(float)));
     CHECK_CUDA(cudaMalloc(&slm->d_softmax, ssm1->seq_len * ssm1->batch_size * slm->vocab_size * sizeof(float)));
     CHECK_CUDA(cudaMalloc(&slm->d_input_gradients, ssm1->seq_len * ssm1->batch_size * ssm1->input_dim * sizeof(float)));
     CHECK_CUDA(cudaMalloc(&slm->d_ssm1_gradients, ssm1->seq_len * ssm1->batch_size * ssm1->output_dim * sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&slm->d_ssm2_gradients, ssm2->seq_len * ssm2->batch_size * ssm2->output_dim * sizeof(float)));
     CHECK_CUDA(cudaMalloc(&slm->d_losses, ssm1->seq_len * ssm1->batch_size * sizeof(float)));
     
     // Load embeddings
@@ -588,6 +612,20 @@ void generate_text_slm(SLM* slm, const char* seed_text, int generation_length, f
                          slm->ssm2->output_dim * slm->ssm2->input_dim * sizeof(float), 
                          cudaMemcpyDeviceToDevice));
     
+    // Copy third SSM weights
+    CHECK_CUDA(cudaMemcpy(gen_slm->ssm3->d_A, slm->ssm3->d_A, 
+                         slm->ssm3->state_dim * slm->ssm3->state_dim * sizeof(float), 
+                         cudaMemcpyDeviceToDevice));
+    CHECK_CUDA(cudaMemcpy(gen_slm->ssm3->d_B, slm->ssm3->d_B, 
+                         slm->ssm3->state_dim * slm->ssm3->input_dim * sizeof(float), 
+                         cudaMemcpyDeviceToDevice));
+    CHECK_CUDA(cudaMemcpy(gen_slm->ssm3->d_C, slm->ssm3->d_C, 
+                         slm->ssm3->output_dim * slm->ssm3->state_dim * sizeof(float), 
+                         cudaMemcpyDeviceToDevice));
+    CHECK_CUDA(cudaMemcpy(gen_slm->ssm3->d_D, slm->ssm3->d_D, 
+                         slm->ssm3->output_dim * slm->ssm3->input_dim * sizeof(float), 
+                         cudaMemcpyDeviceToDevice));
+    
     // Copy MLP weights
     CHECK_CUDA(cudaMemcpy(gen_slm->mlp->d_W1, slm->mlp->d_W1,
                          slm->mlp->hidden_dim * slm->mlp->input_dim * sizeof(float),
@@ -611,6 +649,7 @@ void generate_text_slm(SLM* slm, const char* seed_text, int generation_length, f
     // Reset SSM state for generation
     reset_state_ssm(gen_slm->ssm1);
     reset_state_ssm(gen_slm->ssm2);
+    reset_state_ssm(gen_slm->ssm3);
     
     printf("Seed: \"%s\"\nGenerated: ", seed_text);
     
@@ -637,6 +676,15 @@ void generate_text_slm(SLM* slm, const char* seed_text, int generation_length, f
         
         // Forward through second SSM
         forward_pass_ssm(gen_slm->ssm2, d_ssm1_out_t, i);
+        
+        // Get the second SSM output for this timestep and copy to intermediate buffer
+        float* d_y2_t = gen_slm->ssm2->d_predictions + i * 1 * gen_slm->ssm2->output_dim;
+        float* d_ssm2_out_t = gen_slm->d_ssm2_output + i * 1 * gen_slm->embed_dim;
+        CHECK_CUDA(cudaMemcpy(d_ssm2_out_t, d_y2_t, 
+                             gen_slm->embed_dim * sizeof(float), cudaMemcpyDeviceToDevice));
+        
+        // Forward through third SSM
+        forward_pass_ssm(gen_slm->ssm3, d_ssm2_out_t, i);
     }
     
     // Now generate new characters
@@ -668,11 +716,20 @@ void generate_text_slm(SLM* slm, const char* seed_text, int generation_length, f
         // Forward through second SSM
         forward_pass_ssm(gen_slm->ssm2, d_ssm1_out_t, timestep);
         
-        // Get the second SSM output for this timestep
+        // Get the second SSM output for this timestep and copy to intermediate buffer
         float* d_y2_t = gen_slm->ssm2->d_predictions + timestep * 1 * gen_slm->ssm2->output_dim;
+        float* d_ssm2_out_t = gen_slm->d_ssm2_output + timestep * 1 * gen_slm->embed_dim;
+        CHECK_CUDA(cudaMemcpy(d_ssm2_out_t, d_y2_t, 
+                             gen_slm->embed_dim * sizeof(float), cudaMemcpyDeviceToDevice));
+        
+        // Forward through third SSM
+        forward_pass_ssm(gen_slm->ssm3, d_ssm2_out_t, timestep);
+        
+        // Get the third SSM output for this timestep
+        float* d_y3_t = gen_slm->ssm3->d_predictions + timestep * 1 * gen_slm->ssm3->output_dim;
         
         // Forward through MLP
-        forward_pass_mlp(gen_slm->mlp, d_y2_t);
+        forward_pass_mlp(gen_slm->mlp, d_y3_t);
         
         // Apply softmax to get probabilities
         softmax_kernel<<<1, 256>>>(
