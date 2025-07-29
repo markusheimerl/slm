@@ -9,17 +9,20 @@ E_t &= W_E[X_t]
 \end{align*}
 $$
 
-The embedding matrix $W_E$ maps discrete character indices to dense vector representations via indexing $W_E[X_t]$. Both SSM layers then process their inputs through the standard state space model formulation:
+The embedding matrix $W_E$ maps discrete character indices to dense vector representations via indexing $W_E[X_t]$. Both SSM layers then process their inputs through the modified state space model formulation with input-dependent state transitions:
 
 $$
 \begin{align*}
-H_t &= X_tB^T + H_{t-1}A^T \\
-O_t &= H_t\sigma(H_t) \\
-Y_t &= O_tC^T + X_tD^T
+Z_t &= X_t W_1^T \\
+U_t &= \sigma(Z_t \odot \sigma(Z_t)) \\
+A_t &= \tanh(U_t W_2^T) \\
+H_t &= X_t B^T + H_{t-1} A_t^T \\
+O_t &= H_t \odot \sigma(H_t) \\
+Y_t &= O_t C^T + X_t D^T
 \end{align*}
 $$
 
-The state transition matrix $A$ captures temporal dependencies, input matrix $B$ maps current inputs to state updates, output matrix $C$ projects nonlinearly activated states to outputs, and feedthrough matrix $D$ provides direct input-output connections. The first SSM takes embeddings $E_t$ as input $X_t$, while the second SSM takes the first SSM's output as its input. The MLP then transforms the final SSM outputs:
+The key innovation is that the state transition matrix $A_t$ is now computed dynamically from the input $X_t$ through transformation matrices $W_1$ and $W_2$. The spectral radius of $A_t$ is constrained through the $\tanh$ activation to ensure stability. The intermediate computation $U_t = \sigma(Z_t \odot \sigma(Z_t))$ applies a double Swish activation for enhanced nonlinearity. The first SSM takes embeddings $E_t$ as input $X_t$, while the second SSM takes the first SSM's output as its input. The MLP then transforms the final SSM outputs:
 
 $$
 \begin{align*}
