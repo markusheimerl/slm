@@ -96,10 +96,11 @@ SLM* init_slm(int embed_dim, int state_dim, int seq_len, int batch_size) {
     slm->embed_dim = embed_dim;
 
     // Initialize first SSM (embed_dim -> embed_dim)
-    slm->ssm1 = init_ssm(embed_dim, state_dim, embed_dim, seq_len, batch_size);
+    int intermediate_dim = state_dim; // Use state_dim as intermediate dimension
+    slm->ssm1 = init_ssm(embed_dim, state_dim, embed_dim, seq_len, batch_size, intermediate_dim);
     
     // Initialize second SSM (embed_dim -> embed_dim)  
-    slm->ssm2 = init_ssm(embed_dim, state_dim, embed_dim, seq_len, batch_size);
+    slm->ssm2 = init_ssm(embed_dim, state_dim, embed_dim, seq_len, batch_size, intermediate_dim);
     
     // Initialize MLP
     slm->mlp = init_mlp(embed_dim, 4 * embed_dim, slm->vocab_size, seq_len * batch_size);
