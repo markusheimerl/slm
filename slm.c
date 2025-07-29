@@ -101,6 +101,9 @@ SLM* init_slm(int embed_dim, int state_dim, int seq_len, int batch_size) {
     // Initialize second SSM (embed_dim -> embed_dim)  
     slm->ssm2 = init_ssm(embed_dim, state_dim, embed_dim, seq_len, batch_size);
     
+    // Initialize third SSM (embed_dim -> embed_dim)
+    slm->ssm3 = init_ssm(embed_dim, state_dim, embed_dim, seq_len, batch_size);
+    
     // Initialize MLP
     slm->mlp = init_mlp(embed_dim, 4 * embed_dim, slm->vocab_size, seq_len * batch_size);
 
@@ -113,9 +116,11 @@ SLM* init_slm(int embed_dim, int state_dim, int seq_len, int batch_size) {
     // Allocate working buffers
     CHECK_CUDA(cudaMalloc(&slm->d_embedded_input, seq_len * batch_size * embed_dim * sizeof(float)));
     CHECK_CUDA(cudaMalloc(&slm->d_ssm1_output, seq_len * batch_size * embed_dim * sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&slm->d_ssm2_output, seq_len * batch_size * embed_dim * sizeof(float)));
     CHECK_CUDA(cudaMalloc(&slm->d_softmax, seq_len * batch_size * slm->vocab_size * sizeof(float)));
     CHECK_CUDA(cudaMalloc(&slm->d_input_gradients, seq_len * batch_size * embed_dim * sizeof(float)));
     CHECK_CUDA(cudaMalloc(&slm->d_ssm1_gradients, seq_len * batch_size * embed_dim * sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&slm->d_ssm2_gradients, seq_len * batch_size * embed_dim * sizeof(float)));
     CHECK_CUDA(cudaMalloc(&slm->d_losses, seq_len * batch_size * sizeof(float)));
     
     // Initialize embeddings with Xavier initialization
@@ -139,6 +144,7 @@ void free_slm(SLM* slm) {
     if (slm) {
         if (slm->ssm1) free_ssm(slm->ssm1);
         if (slm->ssm2) free_ssm(slm->ssm2);
+        if (slm->ssm3) free_ssm(slm->ssm3);
         if (slm->mlp) free_mlp(slm->mlp);
         cudaFree(slm->d_embeddings);
         cudaFree(slm->d_embeddings_grad);
@@ -146,9 +152,11 @@ void free_slm(SLM* slm) {
         cudaFree(slm->d_embeddings_v);
         cudaFree(slm->d_embedded_input);
         cudaFree(slm->d_ssm1_output);
+        cudaFree(slm->d_ssm2_output);
         cudaFree(slm->d_softmax);
         cudaFree(slm->d_input_gradients);
         cudaFree(slm->d_ssm1_gradients);
+        cudaFree(slm->d_ssm2_gradients);
         cudaFree(slm->d_losses);
         free(slm);
     }
@@ -191,10 +199,24 @@ void forward_pass_slm(SLM* slm, unsigned char* d_X) {
         forward_pass_ssm(slm->ssm2, d_ssm1_output_t, t);
     }
 
-    // Z_t = Y2_t W_1
+    // Copy SSM2 output to intermediate buffer
+    CHECK_CUDA(cudaMemcpy(slm->d_ssm2_output, slm->ssm2->d_predictions, 
+                         ssm_output_size * sizeof(float), cudaMemcpyDeviceToDevice));
+    
+    // Third SSM layer: SSM2 output -> SSM3
+    // H3_t = Y2_t B3^T + H3_{t-1} A3^T
+    // O3_t = H3_t σ(H3_t)
+    // Y3_t = O3_t C3^T + Y2_t D3^T
+    reset_state_ssm(slm->ssm3);
+    for (int t = 0; t < seq_len; t++) {
+        float* d_ssm2_output_t = slm->d_ssm2_output + t * batch_size * slm->embed_dim;
+        forward_pass_ssm(slm->ssm3, d_ssm2_output_t, t);
+    }
+
+    // Z_t = Y3_t W_1
     // A_t = Z_t σ(Z_t)
     // L_t = A_t W_2 - Forward through MLP
-    forward_pass_mlp(slm->mlp, slm->ssm2->d_predictions);
+    forward_pass_mlp(slm->mlp, slm->ssm3->d_predictions);
     
     // P_t = softmax(L_t) - Apply softmax for probability distribution
     int total_tokens = seq_len * batch_size;
@@ -233,6 +255,7 @@ float calculate_loss_slm(SLM* slm, unsigned char* d_y) {
 void zero_gradients_slm(SLM* slm) {
     zero_gradients_ssm(slm->ssm1);
     zero_gradients_ssm(slm->ssm2);
+    zero_gradients_ssm(slm->ssm3);
     zero_gradients_mlp(slm->mlp);
     CHECK_CUDA(cudaMemset(slm->d_embeddings_grad, 0, 
                          slm->vocab_size * slm->embed_dim * sizeof(float)));
@@ -243,12 +266,55 @@ void backward_pass_slm(SLM* slm, unsigned char* d_X) {
     // ∂L/∂W_2 = A_t^T (∂L/∂L_t)
     // ∂L/∂A_t = (∂L/∂L_t)(W_2)^T
     // ∂L/∂Z_t = ∂L/∂A_t ⊙ [σ(Z_t) + Z_t σ(Z_t)(1-σ(Z_t))]
-    // ∂L/∂W_1 = Y2_t^T (∂L/∂Z_t) - Backward through MLP
-    backward_pass_mlp(slm->mlp, slm->ssm2->d_predictions);
+    // ∂L/∂W_1 = Y3_t^T (∂L/∂Z_t) - Backward through MLP
+    backward_pass_mlp(slm->mlp, slm->ssm3->d_predictions);
     
-    // Copy MLP input gradients to second SSM output error
-    int total_elements = slm->ssm2->seq_len * slm->ssm2->batch_size * slm->ssm2->output_dim;
-    CHECK_CUDA(cudaMemcpy(slm->ssm2->d_error, slm->mlp->d_error, 
+    // Copy MLP input gradients to third SSM output error
+    int total_elements = slm->ssm3->seq_len * slm->ssm3->batch_size * slm->ssm3->output_dim;
+    CHECK_CUDA(cudaMemcpy(slm->ssm3->d_error, slm->mlp->d_error, 
+                         total_elements * sizeof(float), cudaMemcpyDeviceToDevice));
+    
+    // Backward through third SSM layer (SSM3)
+    // ∂L/∂C3 = Σ_t (∂L/∂Y3_t)^T O3_t
+    // ∂L/∂D3 = Σ_t (∂L/∂Y3_t)^T Y2_t  
+    // ∂L/∂O3_t = (∂L/∂Y3_t)C3
+    // ∂L/∂H3_t = ∂L/∂O3_t ⊙ [σ(H3_t) + H3_t σ(H3_t)(1-σ(H3_t))] + (∂L/∂H3_{t+1})A3
+    // ∂L/∂A3 = Σ_t (∂L/∂H3_t)^T H3_{t-1}
+    // ∂L/∂B3 = Σ_t (∂L/∂H3_t)^T Y2_t
+    backward_pass_ssm(slm->ssm3, slm->d_ssm2_output);
+    
+    // Compute gradients with respect to SSM2 output (input to SSM3)
+    // ∂L/∂Y2_t = (∂L/∂H3_t) B3 + (∂L/∂Y3_t) D3
+    const float alpha = 1.0f;
+    const float beta = 0.0f;
+    
+    CHECK_CUDA(cudaMemset(slm->d_ssm2_gradients, 0, 
+                         slm->ssm3->seq_len * slm->ssm3->batch_size * slm->ssm3->input_dim * sizeof(float)));
+    
+    for (int t = 0; t < slm->ssm3->seq_len; t++) {
+        float* d_ssm2_grad_t = slm->d_ssm2_gradients + t * slm->ssm3->batch_size * slm->ssm3->input_dim;
+        float* d_state_error_t = slm->ssm3->d_state_error + t * slm->ssm3->batch_size * slm->ssm3->state_dim;
+        float* d_output_error_t = slm->ssm3->d_error + t * slm->ssm3->batch_size * slm->ssm3->output_dim;
+        
+        // ∂L/∂Y2_t += B3^T (∂L/∂H3_t) - Gradient from state path
+        CHECK_CUBLAS(cublasSgemm(slm->ssm3->cublas_handle,
+                                CUBLAS_OP_N, CUBLAS_OP_N,
+                                slm->ssm3->input_dim, slm->ssm3->batch_size, slm->ssm3->state_dim,
+                                &alpha, slm->ssm3->d_B, slm->ssm3->input_dim,
+                                d_state_error_t, slm->ssm3->state_dim,
+                                &beta, d_ssm2_grad_t, slm->ssm3->input_dim));
+        
+        // ∂L/∂Y2_t += D3^T (∂L/∂Y3_t) - Gradient from output path
+        CHECK_CUBLAS(cublasSgemm(slm->ssm3->cublas_handle,
+                                CUBLAS_OP_N, CUBLAS_OP_N,
+                                slm->ssm3->input_dim, slm->ssm3->batch_size, slm->ssm3->output_dim,
+                                &alpha, slm->ssm3->d_D, slm->ssm3->input_dim,
+                                d_output_error_t, slm->ssm3->output_dim,
+                                &alpha, d_ssm2_grad_t, slm->ssm3->input_dim));
+    }
+    
+    // Copy gradients to second SSM output error
+    CHECK_CUDA(cudaMemcpy(slm->ssm2->d_error, slm->d_ssm2_gradients, 
                          total_elements * sizeof(float), cudaMemcpyDeviceToDevice));
     
     // Backward through second SSM layer (SSM2)
@@ -262,9 +328,6 @@ void backward_pass_slm(SLM* slm, unsigned char* d_X) {
     
     // Compute gradients with respect to SSM1 output (input to SSM2)
     // ∂L/∂Y1_t = (∂L/∂H2_t) B2 + (∂L/∂Y2_t) D2
-    const float alpha = 1.0f;
-    const float beta = 0.0f;
-    
     CHECK_CUDA(cudaMemset(slm->d_ssm1_gradients, 0, 
                          slm->ssm2->seq_len * slm->ssm2->batch_size * slm->ssm2->input_dim * sizeof(float)));
     
@@ -340,9 +403,10 @@ void backward_pass_slm(SLM* slm, unsigned char* d_X) {
 
 // Update weights using AdamW: W = (1-λη)W - η·m̂/√v̂
 void update_weights_slm(SLM* slm, float learning_rate) {
-    // Update both SSM weights
+    // Update all three SSM weights
     update_weights_ssm(slm->ssm1, learning_rate);
     update_weights_ssm(slm->ssm2, learning_rate);
+    update_weights_ssm(slm->ssm3, learning_rate);
     
     // Update MLP weights
     update_weights_mlp(slm->mlp, learning_rate);
