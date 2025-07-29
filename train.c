@@ -35,6 +35,13 @@ size_t calculate_model_parameters(SLM* slm) {
     total_params += ssm2->output_dim * ssm2->state_dim;
     total_params += ssm2->output_dim * ssm2->input_dim;
     
+    // Count parameters for third SSM
+    SSM* ssm3 = slm->ssm3;
+    total_params += ssm3->state_dim * ssm3->state_dim;
+    total_params += ssm3->state_dim * ssm3->input_dim;
+    total_params += ssm3->output_dim * ssm3->state_dim;
+    total_params += ssm3->output_dim * ssm3->input_dim;
+    
     // Count parameters for MLP
     MLP* mlp = slm->mlp;
     total_params += mlp->hidden_dim * mlp->input_dim;
