@@ -89,17 +89,8 @@ $$
 
 The implementation leverages CUDA for parallel computation across batch and sequence dimensions, with efficient kernel implementations for embedding lookup, Swish activation, softmax normalization, and gradient accumulation. Character sequences are extracted from text corpora through random position sampling, providing diverse training contexts.
 
-## Features
-
-- **Gradient Accumulation**: Enables larger effective batch sizes without proportional memory increase
-- **Memory Efficient Training**: Train with 4x-8x larger effective batches using the same GPU memory
-- **Configurable**: Command line control over accumulation steps
-- **Production Ready**: Comprehensive testing and edge case handling
-
 ## How to run
-
-### Basic Training
-```bash
+```
 sudo apt update
 sudo apt install clang time libcurl-dev
 git submodule init
@@ -107,17 +98,3 @@ git submodule update
 # Ensure CUDA toolkit is installed
 make run
 ```
-
-### Advanced Training with Gradient Accumulation
-```bash
-# Standard training (effective batch size = 64)
-./train.out model.bin 1
-
-# Memory-efficient training (effective batch size = 256, same memory usage)
-./train.out model.bin 4
-
-# High-efficiency training (effective batch size = 512, same memory usage)
-./train.out model.bin 8
-```
-
-See [GRADIENT_ACCUMULATION.md](GRADIENT_ACCUMULATION.md) for detailed documentation.

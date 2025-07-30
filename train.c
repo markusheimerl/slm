@@ -3,7 +3,6 @@
 #include <math.h>
 #include <time.h>
 #include <string.h>
-#include <stdbool.h>
 #include "data.h"
 #include "slm.h"
 
@@ -55,18 +54,8 @@ int main(int argc, char* argv[]) {
     
     // Parse command line arguments
     char* model_file = NULL;
-    int grad_accumulation_steps = 4;  // Default value
-    
     if (argc > 1) {
         model_file = argv[1];
-    }
-    if (argc > 2) {
-        grad_accumulation_steps = atoi(argv[2]);
-        if (grad_accumulation_steps < 1) {
-            printf("Error: Gradient accumulation steps must be >= 1\n");
-            printf("Usage: %s [model_file] [grad_accumulation_steps]\n", argv[0]);
-            return 1;
-        }
     }
     
     // Model parameters
@@ -79,11 +68,7 @@ int main(int argc, char* argv[]) {
     const int num_batches = 100000;
     const float lr_init = 0.0001f;
     const float lr_min = 0.00001f;
-    
-    // Gradient accumulation allows for larger effective batch sizes
-    // by accumulating gradients over multiple mini-batches before updating weights.
-    // This reduces memory usage while maintaining training stability.
-    // Can be configured via command line: ./train.out [model_file] [grad_accumulation_steps]
+    const int grad_accumulation_steps = 4;
     
     // Pre-allocate memory for sequences
     unsigned char *input_chars = (unsigned char*)malloc(batch_size * seq_len * sizeof(unsigned char));
@@ -113,9 +98,6 @@ int main(int argc, char* argv[]) {
 
     int model_size = calculate_model_parameters(slm);
     printf("Model initialized with %d parameters\n", model_size);
-    printf("Batch size: %d, Gradient accumulation steps: %d\n", batch_size, grad_accumulation_steps);
-    printf("Effective batch size: %d\n", batch_size * grad_accumulation_steps);
-    printf("Usage: %s [model_file] [grad_accumulation_steps]\n", argv[0]);
     
     // Load training corpus
     size_t corpus_size;
@@ -126,17 +108,9 @@ int main(int argc, char* argv[]) {
     char* val_corpus = load_corpus("gutenberg_corpus_val.txt", &val_corpus_size, model_size * 5);
 
     // Training loop
-    float accumulated_loss = 0.0f;
-    int accumulation_count = 0;
-    
     for (int batch = 0; batch <= num_batches; batch++) {
         // Calculate current learning rate using cosine schedule
         float current_lr = cosine_schedule(lr_init, lr_min, batch, num_batches);
-        
-        // Zero gradients at the start of accumulation cycle
-        if (accumulation_count == 0) {
-            zero_gradients_slm(slm);
-        }
         
         // Generate fresh training data from random corpus locations
         generate_char_sequences_from_corpus(&input_chars, &target_chars, 
@@ -161,7 +135,6 @@ int main(int argc, char* argv[]) {
         
         // Calculate loss
         float loss = calculate_loss_slm(slm, d_target_chars);
-        accumulated_loss += loss;
 
         if(loss >= 5.6) {
             printf("Loss too high: %.6f, stopping training\n", loss);
@@ -175,27 +148,6 @@ int main(int argc, char* argv[]) {
             cudaFree(d_input_chars);
             cudaFree(d_target_chars);
             return -1;
-        }
-        
-        // Backward pass (accumulate gradients)
-        backward_pass_slm(slm, d_input_chars);
-        accumulation_count++;
-        
-        // Check if we should update weights (every grad_accumulation_steps or at the end)
-        bool should_update = (accumulation_count >= grad_accumulation_steps) || (batch == num_batches);
-        
-        if (should_update) {
-            // Scale gradients by 1/accumulation_steps for proper averaging
-            float grad_scale = 1.0f / accumulation_count;
-            scale_gradients_slm(slm, grad_scale);
-            
-            // Update weights with scaled learning rate for SSM/MLP gradients
-            float scaled_lr = current_lr * grad_scale;
-            update_weights_slm(slm, scaled_lr);
-            
-            // Reset accumulation
-            accumulation_count = 0;
-            accumulated_loss = 0.0f;
         }
         
         // Calculate validation loss every 50 batches
@@ -249,13 +201,10 @@ int main(int argc, char* argv[]) {
         }
         
         if (batch % 2 == 0) {
-            float avg_accumulated_loss = accumulation_count > 0 ? accumulated_loss / accumulation_count : loss;
             if (val_loss >= 0.0f) {
-                printf("Batch [%d/%d], Loss: %.6f, Avg Loss: %.6f, LR: %.6f, Val Loss: %.6f, Accum: %d/%d\n", 
-                       batch, num_batches, loss, avg_accumulated_loss, current_lr, val_loss, accumulation_count, grad_accumulation_steps);
+                printf("Batch [%d/%d], Loss: %.6f, LR: %.6f, Val Loss: %.6f\n", batch, num_batches, loss, current_lr, val_loss);
             } else {
-                printf("Batch [%d/%d], Loss: %.6f, Avg Loss: %.6f, LR: %.6f, Accum: %d/%d\n", 
-                       batch, num_batches, loss, avg_accumulated_loss, current_lr, accumulation_count, grad_accumulation_steps);
+                printf("Batch [%d/%d], Loss: %.6f, LR: %.6f\n", batch, num_batches, loss, current_lr);
             }
         }
 
@@ -269,6 +218,19 @@ int main(int argc, char* argv[]) {
         }
         
         if (batch == num_batches) break;
+        
+        // Gradient accumulation: zero gradients only at start of accumulation cycle
+        if (batch % grad_accumulation_steps == 0) {
+            zero_gradients_slm(slm);
+        }
+        
+        // Backward pass (accumulate gradients)
+        backward_pass_slm(slm, d_input_chars);
+        
+        // Update weights only at end of accumulation cycle
+        if ((batch + 1) % grad_accumulation_steps == 0 || batch == num_batches - 1) {
+            update_weights_slm(slm, current_lr);
+        }
     }
 
     // Save model
