@@ -62,13 +62,13 @@ int main(int argc, char* argv[]) {
     const int embed_dim = 256;
     const int state_dim = 128;
     const int seq_len = 4096;
-    const int batch_size = 64;
+    const int batch_size = 32;
     
     // Training parameters
     const int num_batches = 100000;
     const float lr_init = 0.0001f;
     const float lr_min = 0.00001f;
-    const int grad_accumulation_steps = 4;
+    const int acc_steps = 2;
     
     // Pre-allocate memory for sequences
     unsigned char *input_chars = (unsigned char*)malloc(batch_size * seq_len * sizeof(unsigned char));
@@ -111,6 +111,11 @@ int main(int argc, char* argv[]) {
     for (int batch = 0; batch <= num_batches; batch++) {
         // Calculate current learning rate using cosine schedule
         float current_lr = cosine_schedule(lr_init, lr_min, batch, num_batches);
+        
+        // Zero gradients
+        if (batch % acc_steps == 0) {
+            zero_gradients_slm(slm);
+        }
         
         // Generate fresh training data from random corpus locations
         generate_char_sequences_from_corpus(&input_chars, &target_chars, 
@@ -219,16 +224,11 @@ int main(int argc, char* argv[]) {
         
         if (batch == num_batches) break;
         
-        // Gradient accumulation: zero gradients only at start of accumulation cycle
-        if (batch % grad_accumulation_steps == 0) {
-            zero_gradients_slm(slm);
-        }
-        
-        // Backward pass (accumulate gradients)
+        // Backward pass
         backward_pass_slm(slm, d_input_chars);
         
-        // Update weights only at end of accumulation cycle
-        if ((batch + 1) % grad_accumulation_steps == 0 || batch == num_batches - 1) {
+        // Update weights
+        if ((batch + 1) % acc_steps == 0) {
             update_weights_slm(slm, current_lr);
         }
     }
