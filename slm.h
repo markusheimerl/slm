@@ -41,6 +41,7 @@ __global__ void cross_entropy_loss_kernel(float* losses, float* softmax, unsigne
                                          int batch_size, int vocab_size);
 __global__ void embedding_gradient_kernel(float* embed_grad, float* input_grad, unsigned char* chars,
                                          int batch_size, int embed_dim);
+__global__ void scale_gradients_kernel(float* gradients, float scale, int size);
 
 // Function prototypes
 SLM* init_slm(int embed_dim, int state_dim, int seq_len, int batch_size);
@@ -49,6 +50,7 @@ void forward_pass_slm(SLM* slm, unsigned char* d_X);
 float calculate_loss_slm(SLM* slm, unsigned char* d_y);
 void zero_gradients_slm(SLM* slm);
 void backward_pass_slm(SLM* slm, unsigned char* d_X);
+void scale_gradients_slm(SLM* slm, float scale);
 void update_weights_slm(SLM* slm, float learning_rate);
 void save_slm(SLM* slm, const char* filename);
 SLM* load_slm(const char* filename, int custom_batch_size);

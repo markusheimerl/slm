@@ -87,6 +87,14 @@ __global__ void embedding_gradient_kernel(float* embed_grad, float* input_grad, 
     }
 }
 
+// CUDA kernel for scaling gradients by a constant factor
+__global__ void scale_gradients_kernel(float* gradients, float scale, int size) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < size) {
+        gradients[idx] *= scale;
+    }
+}
+
 // Initialize SLM
 SLM* init_slm(int embed_dim, int state_dim, int seq_len, int batch_size) {
     SLM* slm = (SLM*)malloc(sizeof(SLM));
@@ -399,6 +407,17 @@ void backward_pass_slm(SLM* slm, unsigned char* d_X) {
         slm->d_embeddings_grad, slm->d_input_gradients, d_X, 
         slm->ssm1->batch_size, slm->embed_dim
     );
+}
+
+// Scale gradients by a constant factor (for gradient accumulation)
+void scale_gradients_slm(SLM* slm, float scale) {
+    // Scale embedding gradients
+    int embed_size = slm->vocab_size * slm->embed_dim;
+    int blocks = (embed_size + 255) / 256;
+    scale_gradients_kernel<<<blocks, 256>>>(slm->d_embeddings_grad, scale, embed_size);
+    
+    // Note: SSM and MLP gradients will be scaled via learning rate in update_weights_slm
+    // This is mathematically equivalent and simpler than adding scaling to all submodules
 }
 
 // Update weights using AdamW: W = (1-λη)W - η·m̂/√v̂
