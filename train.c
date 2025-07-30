@@ -55,8 +55,18 @@ int main(int argc, char* argv[]) {
     
     // Parse command line arguments
     char* model_file = NULL;
+    int grad_accumulation_steps = 4;  // Default value
+    
     if (argc > 1) {
         model_file = argv[1];
+    }
+    if (argc > 2) {
+        grad_accumulation_steps = atoi(argv[2]);
+        if (grad_accumulation_steps < 1) {
+            printf("Error: Gradient accumulation steps must be >= 1\n");
+            printf("Usage: %s [model_file] [grad_accumulation_steps]\n", argv[0]);
+            return 1;
+        }
     }
     
     // Model parameters
@@ -73,8 +83,7 @@ int main(int argc, char* argv[]) {
     // Gradient accumulation allows for larger effective batch sizes
     // by accumulating gradients over multiple mini-batches before updating weights.
     // This reduces memory usage while maintaining training stability.
-    // Set to 1 to disable gradient accumulation (standard training)
-    const int grad_accumulation_steps = 4;  // Accumulate gradients over N mini-batches
+    // Can be configured via command line: ./train.out [model_file] [grad_accumulation_steps]
     
     // Pre-allocate memory for sequences
     unsigned char *input_chars = (unsigned char*)malloc(batch_size * seq_len * sizeof(unsigned char));
@@ -106,6 +115,7 @@ int main(int argc, char* argv[]) {
     printf("Model initialized with %d parameters\n", model_size);
     printf("Batch size: %d, Gradient accumulation steps: %d\n", batch_size, grad_accumulation_steps);
     printf("Effective batch size: %d\n", batch_size * grad_accumulation_steps);
+    printf("Usage: %s [model_file] [grad_accumulation_steps]\n", argv[0]);
     
     // Load training corpus
     size_t corpus_size;
