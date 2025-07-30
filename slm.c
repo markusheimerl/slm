@@ -303,8 +303,6 @@ void backward_pass_slm(SLM* slm, unsigned char* d_X) {
     
     // Compute gradients with respect to SSM1 output (input to SSM2)
     // ∂L/∂Y1_t = (∂L/∂H2_t) B2 + (∂L/∂Y2_t) D2
-    const float alpha = 1.0f;
-    const float beta = 0.0f;
     
     CHECK_CUDA(cudaMemset(slm->d_ssm1_gradients, 0, 
                          slm->ssm2->seq_len * slm->ssm2->batch_size * slm->ssm2->input_dim * sizeof(float)));
