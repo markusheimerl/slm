@@ -112,11 +112,6 @@ int main(int argc, char* argv[]) {
         // Calculate current learning rate using cosine schedule
         float current_lr = cosine_schedule(lr_init, lr_min, batch, num_batches);
         
-        // Zero gradients
-        if (batch % acc_steps == 0) {
-            zero_gradients_slm(slm);
-        }
-        
         // Generate fresh training data from random corpus locations
         generate_char_sequences_from_corpus(&input_chars, &target_chars, 
                                           batch_size, seq_len, corpus, corpus_size);
@@ -223,14 +218,15 @@ int main(int argc, char* argv[]) {
         }
         
         if (batch == num_batches) break;
+
+        // Zero gradients
+        if (batch % acc_steps == 0) zero_gradients_slm(slm);
         
         // Backward pass
         backward_pass_slm(slm, d_input_chars);
         
         // Update weights
-        if ((batch + 1) % acc_steps == 0) {
-            update_weights_slm(slm, current_lr);
-        }
+        if ((batch + 1) % acc_steps == 0) update_weights_slm(slm, current_lr);
     }
 
     // Save model
