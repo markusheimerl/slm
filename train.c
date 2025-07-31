@@ -51,6 +51,7 @@ int main(int argc, char* argv[]) {
     const int state_dim = 128;
     const int seq_len = 4096;
     const int batch_size = 32;
+    const int num_ssm_layers = 3;  // Default to 3 layers for backward compatibility
     
     // Training parameters
     const int num_batches = 100000;
@@ -81,7 +82,7 @@ int main(int argc, char* argv[]) {
         printf("Continuing training from loaded model\n");
     } else {
         printf("Initializing new model\n");
-        slm = init_slm(embed_dim, state_dim, seq_len, batch_size);
+        slm = init_slm(embed_dim, state_dim, seq_len, batch_size, num_ssm_layers);
     }
 
     int model_size = calculate_model_parameters(slm);
