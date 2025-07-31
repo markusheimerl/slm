@@ -39,7 +39,7 @@ __global__ void embedding_gradient_kernel(float* embed_grad, float* input_grad, 
                                          int batch_size, int embed_dim);
 
 // Function prototypes
-SLM* init_slm(int embed_dim, int state_dim, int seq_len, int batch_size, int num_ssm_layers);
+SLM* init_slm(int embed_dim, int state_dim, int seq_len, int batch_size);
 void free_slm(SLM* slm);
 void forward_pass_slm(SLM* slm, unsigned char* d_X);
 float calculate_loss_slm(SLM* slm, unsigned char* d_y);
