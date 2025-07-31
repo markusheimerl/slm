@@ -21,26 +21,14 @@ size_t calculate_model_parameters(SLM* slm) {
     size_t total_params = 0;
     total_params += slm->vocab_size * slm->embed_dim;
     
-    // Count parameters for first SSM
-    SSM* ssm1 = slm->ssm1;
-    total_params += ssm1->state_dim * ssm1->state_dim;
-    total_params += ssm1->state_dim * ssm1->input_dim;
-    total_params += ssm1->output_dim * ssm1->state_dim;
-    total_params += ssm1->output_dim * ssm1->input_dim;
-    
-    // Count parameters for second SSM
-    SSM* ssm2 = slm->ssm2;
-    total_params += ssm2->state_dim * ssm2->state_dim;
-    total_params += ssm2->state_dim * ssm2->input_dim;
-    total_params += ssm2->output_dim * ssm2->state_dim;
-    total_params += ssm2->output_dim * ssm2->input_dim;
-    
-    // Count parameters for third SSM
-    SSM* ssm3 = slm->ssm3;
-    total_params += ssm3->state_dim * ssm3->state_dim;
-    total_params += ssm3->state_dim * ssm3->input_dim;
-    total_params += ssm3->output_dim * ssm3->state_dim;
-    total_params += ssm3->output_dim * ssm3->input_dim;
+    // Count parameters for all SSMs
+    for (int i = 0; i < 3; i++) {
+        SSM* ssm = slm->ssms[i];
+        total_params += ssm->state_dim * ssm->state_dim;
+        total_params += ssm->state_dim * ssm->input_dim;
+        total_params += ssm->output_dim * ssm->state_dim;
+        total_params += ssm->output_dim * ssm->input_dim;
+    }
     
     // Count parameters for MLP
     MLP* mlp = slm->mlp;
