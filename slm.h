@@ -5,7 +5,7 @@
 #include "mlp/gpu/mlp.h"
 
 typedef struct {
-    SSM* ssms[3];               // Array of state space model layers
+    SSM** ssms;                 // Dynamic array of state space model layers
     MLP* mlp;                   // Multi-layer perceptron for output mapping
     
     // Language modeling specific buffers
@@ -16,15 +16,16 @@ typedef struct {
     
     // Working buffers
     float* d_embedded_input;    // seq_len x batch_size x embed_dim
-    float* d_ssm_outputs[2];    // seq_len x batch_size x embed_dim (outputs from first two SSMs)
+    float** d_ssm_outputs;      // seq_len x batch_size x embed_dim (outputs from intermediate SSMs)
     float* d_softmax;           // seq_len x batch_size x vocab_size
     float* d_input_gradients;   // seq_len x batch_size x embed_dim
-    float* d_ssm_gradients[2];  // seq_len x batch_size x embed_dim (gradients for first two SSM inputs)
+    float** d_ssm_gradients;    // seq_len x batch_size x embed_dim (gradients for intermediate SSM inputs)
     float* d_losses;            // seq_len x batch_size
     
     // Dimensions
     int vocab_size;
     int embed_dim;
+    int num_ssms;               // Number of SSM layers
 } SLM;
 
 // CUDA kernel prototypes
@@ -39,7 +40,7 @@ __global__ void embedding_gradient_kernel(float* embed_grad, float* input_grad, 
                                          int batch_size, int embed_dim);
 
 // Function prototypes
-SLM* init_slm(int embed_dim, int state_dim, int seq_len, int batch_size);
+SLM* init_slm(int embed_dim, int state_dim, int seq_len, int batch_size, int num_ssms);
 void free_slm(SLM* slm);
 void forward_pass_slm(SLM* slm, unsigned char* d_X);
 float calculate_loss_slm(SLM* slm, unsigned char* d_y);
