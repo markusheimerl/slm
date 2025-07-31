@@ -22,7 +22,7 @@ size_t calculate_model_parameters(SLM* slm) {
     total_params += slm->vocab_size * slm->embed_dim;
     
     // Count parameters for all SSMs
-    for (int i = 0; i < slm->num_ssms; i++) {
+    for (int i = 0; i < 3; i++) {
         SSM* ssm = slm->ssms[i];
         total_params += ssm->state_dim * ssm->state_dim;
         total_params += ssm->state_dim * ssm->input_dim;
@@ -51,7 +51,6 @@ int main(int argc, char* argv[]) {
     const int state_dim = 128;
     const int seq_len = 4096;
     const int batch_size = 32;
-    const int num_ssms = 3;  // Number of SSM layers
     
     // Training parameters
     const int num_batches = 100000;
@@ -82,7 +81,7 @@ int main(int argc, char* argv[]) {
         printf("Continuing training from loaded model\n");
     } else {
         printf("Initializing new model\n");
-        slm = init_slm(embed_dim, state_dim, seq_len, batch_size, num_ssms);
+        slm = init_slm(embed_dim, state_dim, seq_len, batch_size);
     }
 
     int model_size = calculate_model_parameters(slm);
