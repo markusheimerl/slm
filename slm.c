@@ -89,12 +89,6 @@ __global__ void embedding_gradient_kernel(float* embed_grad, float* input_grad, 
 
 // Initialize SLM
 SLM* init_slm(int embed_dim, int state_dim, int seq_len, int batch_size, int num_ssms) {
-    // Validate parameters
-    if (num_ssms < 1) {
-        printf("Error: num_ssms must be at least 1, got %d\n", num_ssms);
-        return NULL;
-    }
-    
     SLM* slm = (SLM*)malloc(sizeof(SLM));
         
     // Set dimensions

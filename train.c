@@ -51,7 +51,7 @@ int main(int argc, char* argv[]) {
     const int state_dim = 128;
     const int seq_len = 4096;
     const int batch_size = 32;
-    const int num_ssms = 3;  // Number of SSM layers - change this to experiment with different architectures!
+    const int num_ssms = 3;  // Number of SSM layers
     
     // Training parameters
     const int num_batches = 100000;
