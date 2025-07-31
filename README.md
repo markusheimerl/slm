@@ -92,9 +92,8 @@ The implementation leverages CUDA for parallel computation across batch and sequ
 ## How to run
 ```
 sudo apt update
-sudo apt install clang time libcurl-dev
+sudo apt install clang time libcurl4-openssl-dev nvidia-cuda-toolkit
 git submodule init
 git submodule update
-# Ensure CUDA toolkit is installed
-make run
+make run -j 4
 ```
