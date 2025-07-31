@@ -177,7 +177,7 @@ int main(int argc, char* argv[]) {
             CHECK_CUDA(cudaMemcpy(d_target_chars, target_reshaped, 
                                  seq_len * batch_size * sizeof(unsigned char), cudaMemcpyHostToDevice));
             
-            // Forward pass on validation data (no gradients needed)
+            // Forward pass on validation data
             forward_pass_slm(slm, d_input_chars);
             
             // Calculate validation loss
