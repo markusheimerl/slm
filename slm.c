@@ -170,43 +170,29 @@ void forward_pass_slm(SLM* slm, unsigned char* d_X) {
         slm->d_embedded_input, slm->d_embeddings, d_X, batch_size, slm->embed_dim
     );
     
-    // First SSM layer: Embedding -> SSM[0]
-    // H1_t = E_t B1^T + H1_{t-1} A1^T
-    // O1_t = H1_t σ(H1_t)  
-    // Y1_t = O1_t C1^T + E_t D1^T
-    reset_state_ssm(slm->ssms[0]);
-    for (int t = 0; t < seq_len; t++) {
-        float* d_embedded_t = slm->d_embedded_input + t * batch_size * slm->embed_dim;
-        forward_pass_ssm(slm->ssms[0], d_embedded_t, t);
-    }
+    // Process through all three SSM layers in sequence
+    float* current_input = slm->d_embedded_input;
     
-    // Copy SSM[0] output to intermediate buffer
-    int ssm_output_size = seq_len * batch_size * slm->embed_dim;
-    CHECK_CUDA(cudaMemcpy(slm->d_ssm_outputs[0], slm->ssms[0]->d_predictions, 
-                         ssm_output_size * sizeof(float), cudaMemcpyDeviceToDevice));
-    
-    // Second SSM layer: SSM[0] output -> SSM[1]
-    // H2_t = Y1_t B2^T + H2_{t-1} A2^T
-    // O2_t = H2_t σ(H2_t)
-    // Y2_t = O2_t C2^T + Y1_t D2^T
-    reset_state_ssm(slm->ssms[1]);
-    for (int t = 0; t < seq_len; t++) {
-        float* d_ssm_output_t = slm->d_ssm_outputs[0] + t * batch_size * slm->embed_dim;
-        forward_pass_ssm(slm->ssms[1], d_ssm_output_t, t);
-    }
-
-    // Copy SSM[1] output to intermediate buffer
-    CHECK_CUDA(cudaMemcpy(slm->d_ssm_outputs[1], slm->ssms[1]->d_predictions, 
-                         ssm_output_size * sizeof(float), cudaMemcpyDeviceToDevice));
-    
-    // Third SSM layer: SSM[1] output -> SSM[2]
-    // H3_t = Y2_t B3^T + H3_{t-1} A3^T
-    // O3_t = H3_t σ(H3_t)
-    // Y3_t = O3_t C3^T + Y2_t D3^T
-    reset_state_ssm(slm->ssms[2]);
-    for (int t = 0; t < seq_len; t++) {
-        float* d_ssm_output_t = slm->d_ssm_outputs[1] + t * batch_size * slm->embed_dim;
-        forward_pass_ssm(slm->ssms[2], d_ssm_output_t, t);
+    for (int layer = 0; layer < 3; layer++) {
+        // Reset SSM state for this layer
+        reset_state_ssm(slm->ssms[layer]);
+        
+        // Forward through timesteps for current layer
+        for (int t = 0; t < seq_len; t++) {
+            float* input_t = current_input + t * batch_size * slm->embed_dim;
+            // H_t = X_t B^T + H_{t-1} A^T
+            // O_t = H_t σ(H_t)  
+            // Y_t = O_t C^T + X_t D^T
+            forward_pass_ssm(slm->ssms[layer], input_t, t);
+        }
+        
+        // For first two layers, copy output to intermediate buffer and set as next input
+        if (layer < 2) {
+            int output_size = seq_len * batch_size * slm->embed_dim;
+            CHECK_CUDA(cudaMemcpy(slm->d_ssm_outputs[layer], slm->ssms[layer]->d_predictions, 
+                                 output_size * sizeof(float), cudaMemcpyDeviceToDevice));
+            current_input = slm->d_ssm_outputs[layer];
+        }
     }
 
     // Z_t = Y3_t W_1
@@ -270,97 +256,62 @@ void backward_pass_slm(SLM* slm, unsigned char* d_X) {
     CHECK_CUDA(cudaMemcpy(slm->ssms[2]->d_error, slm->mlp->d_error, 
                          total_elements * sizeof(float), cudaMemcpyDeviceToDevice));
     
-    // Backward through third SSM layer (SSM[2])
-    // ∂L/∂C3 = Σ_t (∂L/∂Y3_t)^T O3_t
-    // ∂L/∂D3 = Σ_t (∂L/∂Y3_t)^T Y2_t  
-    // ∂L/∂O3_t = (∂L/∂Y3_t)C3
-    // ∂L/∂H3_t = ∂L/∂O3_t ⊙ [σ(H3_t) + H3_t σ(H3_t)(1-σ(H3_t))] + (∂L/∂H3_{t+1})A3
-    // ∂L/∂A3 = Σ_t (∂L/∂H3_t)^T H3_{t-1}
-    // ∂L/∂B3 = Σ_t (∂L/∂H3_t)^T Y2_t
-    backward_pass_ssm(slm->ssms[2], slm->d_ssm_outputs[1]);
-    
-    // Compute gradients with respect to SSM[1] output (input to SSM[2])
-    // ∂L/∂Y2_t = (∂L/∂H3_t) B3 + (∂L/∂Y3_t) D3
     const float alpha = 1.0f;
     const float beta = 0.0f;
     
-    CHECK_CUDA(cudaMemset(slm->d_ssm_gradients[1], 0, 
-                         slm->ssms[2]->seq_len * slm->ssms[2]->batch_size * slm->ssms[2]->input_dim * sizeof(float)));
-    
-    for (int t = 0; t < slm->ssms[2]->seq_len; t++) {
-        float* d_ssm_grad_t = slm->d_ssm_gradients[1] + t * slm->ssms[2]->batch_size * slm->ssms[2]->input_dim;
-        float* d_state_error_t = slm->ssms[2]->d_state_error + t * slm->ssms[2]->batch_size * slm->ssms[2]->state_dim;
-        float* d_output_error_t = slm->ssms[2]->d_error + t * slm->ssms[2]->batch_size * slm->ssms[2]->output_dim;
+    // Process SSM layers in reverse order
+    for (int layer = 2; layer >= 0; layer--) {
+        // Get the input that was used for this layer during forward pass
+        float* layer_input;
+        if (layer == 0) {
+            layer_input = slm->d_embedded_input;
+        } else {
+            layer_input = slm->d_ssm_outputs[layer - 1];
+        }
         
-        // ∂L/∂Y2_t += B3^T (∂L/∂H3_t) - Gradient from state path
-        CHECK_CUBLAS(cublasSgemm(slm->ssms[2]->cublas_handle,
-                                CUBLAS_OP_N, CUBLAS_OP_N,
-                                slm->ssms[2]->input_dim, slm->ssms[2]->batch_size, slm->ssms[2]->state_dim,
-                                &alpha, slm->ssms[2]->d_B, slm->ssms[2]->input_dim,
-                                d_state_error_t, slm->ssms[2]->state_dim,
-                                &beta, d_ssm_grad_t, slm->ssms[2]->input_dim));
+        // Backward pass through current SSM layer
+        // ∂L/∂C = Σ_t (∂L/∂Y_t)^T O_t
+        // ∂L/∂D = Σ_t (∂L/∂Y_t)^T X_t  
+        // ∂L/∂O_t = (∂L/∂Y_t)C
+        // ∂L/∂H_t = ∂L/∂O_t ⊙ [σ(H_t) + H_t σ(H_t)(1-σ(H_t))] + (∂L/∂H_{t+1})A
+        // ∂L/∂A = Σ_t (∂L/∂H_t)^T H_{t-1}
+        // ∂L/∂B = Σ_t (∂L/∂H_t)^T X_t
+        backward_pass_ssm(slm->ssms[layer], layer_input);
         
-        // ∂L/∂Y2_t += D3^T (∂L/∂Y3_t) - Gradient from output path
-        CHECK_CUBLAS(cublasSgemm(slm->ssms[2]->cublas_handle,
-                                CUBLAS_OP_N, CUBLAS_OP_N,
-                                slm->ssms[2]->input_dim, slm->ssms[2]->batch_size, slm->ssms[2]->output_dim,
-                                &alpha, slm->ssms[2]->d_D, slm->ssms[2]->input_dim,
-                                d_output_error_t, slm->ssms[2]->output_dim,
-                                &alpha, d_ssm_grad_t, slm->ssms[2]->input_dim));
+        // Compute gradients for the input to this layer (except for first layer)
+        if (layer > 0) {
+            // Clear gradient buffer
+            CHECK_CUDA(cudaMemset(slm->d_ssm_gradients[layer - 1], 0, 
+                                 total_elements * sizeof(float)));
+            
+            // Compute input gradients: ∂L/∂input = (∂L/∂H_t) B + (∂L/∂Y_t) D
+            for (int t = 0; t < slm->ssms[layer]->seq_len; t++) {
+                float* d_input_grad_t = slm->d_ssm_gradients[layer - 1] + t * slm->ssms[layer]->batch_size * slm->ssms[layer]->input_dim;
+                float* d_state_error_t = slm->ssms[layer]->d_state_error + t * slm->ssms[layer]->batch_size * slm->ssms[layer]->state_dim;
+                float* d_output_error_t = slm->ssms[layer]->d_error + t * slm->ssms[layer]->batch_size * slm->ssms[layer]->output_dim;
+                
+                // ∂L/∂input += B^T (∂L/∂H_t) - Gradient from state path
+                CHECK_CUBLAS(cublasSgemm(slm->ssms[layer]->cublas_handle,
+                                        CUBLAS_OP_N, CUBLAS_OP_N,
+                                        slm->ssms[layer]->input_dim, slm->ssms[layer]->batch_size, slm->ssms[layer]->state_dim,
+                                        &alpha, slm->ssms[layer]->d_B, slm->ssms[layer]->input_dim,
+                                        d_state_error_t, slm->ssms[layer]->state_dim,
+                                        &beta, d_input_grad_t, slm->ssms[layer]->input_dim));
+                
+                // ∂L/∂input += D^T (∂L/∂Y_t) - Gradient from output path
+                CHECK_CUBLAS(cublasSgemm(slm->ssms[layer]->cublas_handle,
+                                        CUBLAS_OP_N, CUBLAS_OP_N,
+                                        slm->ssms[layer]->input_dim, slm->ssms[layer]->batch_size, slm->ssms[layer]->output_dim,
+                                        &alpha, slm->ssms[layer]->d_D, slm->ssms[layer]->input_dim,
+                                        d_output_error_t, slm->ssms[layer]->output_dim,
+                                        &alpha, d_input_grad_t, slm->ssms[layer]->input_dim));
+            }
+            
+            // Copy computed gradients to previous layer's error buffer
+            CHECK_CUDA(cudaMemcpy(slm->ssms[layer - 1]->d_error, slm->d_ssm_gradients[layer - 1], 
+                                 total_elements * sizeof(float), cudaMemcpyDeviceToDevice));
+        }
     }
-    
-    // Copy gradients to second SSM output error
-    CHECK_CUDA(cudaMemcpy(slm->ssms[1]->d_error, slm->d_ssm_gradients[1], 
-                         total_elements * sizeof(float), cudaMemcpyDeviceToDevice));
-    
-    // Backward through second SSM layer (SSM[1])
-    // ∂L/∂C2 = Σ_t (∂L/∂Y2_t)^T O2_t
-    // ∂L/∂D2 = Σ_t (∂L/∂Y2_t)^T Y1_t  
-    // ∂L/∂O2_t = (∂L/∂Y2_t)C2
-    // ∂L/∂H2_t = ∂L/∂O2_t ⊙ [σ(H2_t) + H2_t σ(H2_t)(1-σ(H2_t))] + (∂L/∂H2_{t+1})A2
-    // ∂L/∂A2 = Σ_t (∂L/∂H2_t)^T H2_{t-1}
-    // ∂L/∂B2 = Σ_t (∂L/∂H2_t)^T Y1_t
-    backward_pass_ssm(slm->ssms[1], slm->d_ssm_outputs[0]);
-    
-    // Compute gradients with respect to SSM[0] output (input to SSM[1])
-    // ∂L/∂Y1_t = (∂L/∂H2_t) B2 + (∂L/∂Y2_t) D2
-    CHECK_CUDA(cudaMemset(slm->d_ssm_gradients[0], 0, 
-                         slm->ssms[1]->seq_len * slm->ssms[1]->batch_size * slm->ssms[1]->input_dim * sizeof(float)));
-    
-    for (int t = 0; t < slm->ssms[1]->seq_len; t++) {
-        float* d_ssm_grad_t = slm->d_ssm_gradients[0] + t * slm->ssms[1]->batch_size * slm->ssms[1]->input_dim;
-        float* d_state_error_t = slm->ssms[1]->d_state_error + t * slm->ssms[1]->batch_size * slm->ssms[1]->state_dim;
-        float* d_output_error_t = slm->ssms[1]->d_error + t * slm->ssms[1]->batch_size * slm->ssms[1]->output_dim;
-        
-        // ∂L/∂Y1_t += B2^T (∂L/∂H2_t) - Gradient from state path
-        CHECK_CUBLAS(cublasSgemm(slm->ssms[1]->cublas_handle,
-                                CUBLAS_OP_N, CUBLAS_OP_N,
-                                slm->ssms[1]->input_dim, slm->ssms[1]->batch_size, slm->ssms[1]->state_dim,
-                                &alpha, slm->ssms[1]->d_B, slm->ssms[1]->input_dim,
-                                d_state_error_t, slm->ssms[1]->state_dim,
-                                &beta, d_ssm_grad_t, slm->ssms[1]->input_dim));
-        
-        // ∂L/∂Y1_t += D2^T (∂L/∂Y2_t) - Gradient from output path
-        CHECK_CUBLAS(cublasSgemm(slm->ssms[1]->cublas_handle,
-                                CUBLAS_OP_N, CUBLAS_OP_N,
-                                slm->ssms[1]->input_dim, slm->ssms[1]->batch_size, slm->ssms[1]->output_dim,
-                                &alpha, slm->ssms[1]->d_D, slm->ssms[1]->input_dim,
-                                d_output_error_t, slm->ssms[1]->output_dim,
-                                &alpha, d_ssm_grad_t, slm->ssms[1]->input_dim));
-    }
-    
-    // Copy gradients to first SSM output error
-    CHECK_CUDA(cudaMemcpy(slm->ssms[0]->d_error, slm->d_ssm_gradients[0], 
-                         total_elements * sizeof(float), cudaMemcpyDeviceToDevice));
-    
-    // Backward through first SSM layer (SSM[0])
-    // ∂L/∂C1 = Σ_t (∂L/∂Y1_t)^T O1_t
-    // ∂L/∂D1 = Σ_t (∂L/∂Y1_t)^T E_t  
-    // ∂L/∂O1_t = (∂L/∂Y1_t)C1
-    // ∂L/∂H1_t = ∂L/∂O1_t ⊙ [σ(H1_t) + H1_t σ(H1_t)(1-σ(H1_t))] + (∂L/∂H1_{t+1})A1
-    // ∂L/∂A1 = Σ_t (∂L/∂H1_t)^T H1_{t-1}
-    // ∂L/∂B1 = Σ_t (∂L/∂H1_t)^T E_t
-    backward_pass_ssm(slm->ssms[0], slm->d_embedded_input);
     
     // ∂L/∂E_t = (∂L/∂H1_t) B1 + (∂L/∂Y1_t) D1 - Compute input gradients from first SSM
     CHECK_CUDA(cudaMemset(slm->d_input_gradients, 0, 
@@ -427,18 +378,15 @@ void update_weights_slm(SLM* slm, float learning_rate) {
 
 // Save model
 void save_slm(SLM* slm, const char* filename) {
-    // Save first SSM
-    save_ssm(slm->ssms[0], filename);
-    
-    // Save remaining SSMs with numbered suffixes
+    // Save SSMs
     char* dot;
-    for (int i = 1; i < 3; i++) {
+    for (int i = 0; i < 3; i++) {
         char ssm_file[256];
         strcpy(ssm_file, filename);
         dot = strrchr(ssm_file, '.');
         if (dot) *dot = '\0';
         char suffix[16];
-        sprintf(suffix, "_ssm%d.bin", i + 1);
+        sprintf(suffix, "_ssm%d.bin", i);
         strcat(ssm_file, suffix);
         save_ssm(slm->ssms[i], ssm_file);
     }
@@ -478,21 +426,14 @@ void save_slm(SLM* slm, const char* filename) {
 SLM* load_slm(const char* filename, int custom_batch_size) {
     SLM* slm = (SLM*)malloc(sizeof(SLM));
     
-    // Load first SSM
-    slm->ssms[0] = load_ssm(filename, custom_batch_size);
-    if (!slm->ssms[0]) {
-        free(slm);
-        return NULL;
-    }
-    
-    // Load remaining SSMs with numbered suffixes
-    for (int i = 1; i < 3; i++) {
+    // Load all SSMs with numbered suffixes
+    for (int i = 0; i < 3; i++) {
         char ssm_file[256];
         strcpy(ssm_file, filename);
         char* dot = strrchr(ssm_file, '.');
         if (dot) *dot = '\0';
         char suffix[16];
-        sprintf(suffix, "_ssm%d.bin", i + 1);
+        sprintf(suffix, "_ssm%d.bin", i);
         strcat(ssm_file, suffix);
         slm->ssms[i] = load_ssm(ssm_file, custom_batch_size);
         if (!slm->ssms[i]) {
@@ -505,7 +446,7 @@ SLM* load_slm(const char* filename, int custom_batch_size) {
         }
     }
     
-    slm->vocab_size = slm->ssms[0]->output_dim;
+    slm->vocab_size = 256;
     slm->embed_dim = slm->ssms[0]->input_dim;
     
     // Load MLP
@@ -628,26 +569,23 @@ void generate_text_slm(SLM* slm, const char* seed_text, int generation_length, f
             gen_slm->d_embedded_input, gen_slm->d_embeddings, d_input, 1, gen_slm->embed_dim
         );
         
-        // Forward through first SSM
-        forward_pass_ssm(gen_slm->ssms[0], gen_slm->d_embedded_input, i);
-        
-        // Get the first SSM output for this timestep and copy to intermediate buffer
-        float* d_y1_t = gen_slm->ssms[0]->d_predictions + i * 1 * gen_slm->ssms[0]->output_dim;
-        float* d_ssm_out_t = gen_slm->d_ssm_outputs[0] + i * 1 * gen_slm->embed_dim;
-        CHECK_CUDA(cudaMemcpy(d_ssm_out_t, d_y1_t, 
-                             gen_slm->embed_dim * sizeof(float), cudaMemcpyDeviceToDevice));
-        
-        // Forward through second SSM
-        forward_pass_ssm(gen_slm->ssms[1], d_ssm_out_t, i);
-        
-        // Get the second SSM output for this timestep and copy to intermediate buffer
-        float* d_y2_t = gen_slm->ssms[1]->d_predictions + i * 1 * gen_slm->ssms[1]->output_dim;
-        d_ssm_out_t = gen_slm->d_ssm_outputs[1] + i * 1 * gen_slm->embed_dim;
-        CHECK_CUDA(cudaMemcpy(d_ssm_out_t, d_y2_t, 
-                             gen_slm->embed_dim * sizeof(float), cudaMemcpyDeviceToDevice));
-        
-        // Forward through third SSM
-        forward_pass_ssm(gen_slm->ssms[2], d_ssm_out_t, i);
+        // Forward through all SSM layers using loop
+        float* current_input = gen_slm->d_embedded_input;
+        for (int layer = 0; layer < 3; layer++) {
+            // H_t = X_t B^T + H_{t-1} A^T
+            // O_t = H_t σ(H_t)
+            // Y_t = O_t C^T + X_t D^T
+            forward_pass_ssm(gen_slm->ssms[layer], current_input, i);
+            
+            // For first two layers, copy output to intermediate buffer for next layer
+            if (layer < 2) {
+                float* d_output_t = gen_slm->ssms[layer]->d_predictions + i * 1 * gen_slm->ssms[layer]->output_dim;
+                float* d_ssm_out_t = gen_slm->d_ssm_outputs[layer] + i * 1 * gen_slm->embed_dim;
+                CHECK_CUDA(cudaMemcpy(d_ssm_out_t, d_output_t, 
+                                     gen_slm->embed_dim * sizeof(float), cudaMemcpyDeviceToDevice));
+                current_input = d_ssm_out_t;
+            }
+        }
     }
     
     // Now generate new characters
@@ -666,35 +604,34 @@ void generate_text_slm(SLM* slm, const char* seed_text, int generation_length, f
             gen_slm->d_embedded_input, gen_slm->d_embeddings, d_input, 1, gen_slm->embed_dim
         );
         
-        // Forward through first SSM
+        // Forward through all SSM layers using loop
         int timestep = seed_len + i;
-        forward_pass_ssm(gen_slm->ssms[0], gen_slm->d_embedded_input, timestep);
-        
-        // Get the first SSM output for this timestep and copy to intermediate buffer
-        float* d_y1_t = gen_slm->ssms[0]->d_predictions + timestep * 1 * gen_slm->ssms[0]->output_dim;
-        float* d_ssm_out_t = gen_slm->d_ssm_outputs[0] + timestep * 1 * gen_slm->embed_dim;
-        CHECK_CUDA(cudaMemcpy(d_ssm_out_t, d_y1_t, 
-                             gen_slm->embed_dim * sizeof(float), cudaMemcpyDeviceToDevice));
-        
-        // Forward through second SSM
-        forward_pass_ssm(gen_slm->ssms[1], d_ssm_out_t, timestep);
-        
-        // Get the second SSM output for this timestep and copy to intermediate buffer
-        float* d_y2_t = gen_slm->ssms[1]->d_predictions + timestep * 1 * gen_slm->ssms[1]->output_dim;
-        d_ssm_out_t = gen_slm->d_ssm_outputs[1] + timestep * 1 * gen_slm->embed_dim;
-        CHECK_CUDA(cudaMemcpy(d_ssm_out_t, d_y2_t, 
-                             gen_slm->embed_dim * sizeof(float), cudaMemcpyDeviceToDevice));
-        
-        // Forward through third SSM
-        forward_pass_ssm(gen_slm->ssms[2], d_ssm_out_t, timestep);
+        float* current_input = gen_slm->d_embedded_input;
+        for (int layer = 0; layer < 3; layer++) {
+            // H_t = X_t B^T + H_{t-1} A^T
+            // O_t = H_t σ(H_t)
+            // Y_t = O_t C^T + X_t D^T
+            forward_pass_ssm(gen_slm->ssms[layer], current_input, timestep);
+            
+            // For first two layers, copy output to intermediate buffer for next layer
+            if (layer < 2) {
+                float* d_output_t = gen_slm->ssms[layer]->d_predictions + timestep * 1 * gen_slm->ssms[layer]->output_dim;
+                float* d_ssm_out_t = gen_slm->d_ssm_outputs[layer] + timestep * 1 * gen_slm->embed_dim;
+                CHECK_CUDA(cudaMemcpy(d_ssm_out_t, d_output_t, 
+                                     gen_slm->embed_dim * sizeof(float), cudaMemcpyDeviceToDevice));
+                current_input = d_ssm_out_t;
+            }
+        }
         
         // Get the third SSM output for this timestep
         float* d_y3_t = gen_slm->ssms[2]->d_predictions + timestep * 1 * gen_slm->ssms[2]->output_dim;
         
-        // Forward through MLP
+        // Z_t = Y3_t W_1
+        // A_t = Z_t σ(Z_t)
+        // L_t = A_t W_2 - Forward through MLP
         forward_pass_mlp(gen_slm->mlp, d_y3_t);
         
-        // Apply softmax to get probabilities
+        // P_t = softmax(L_t) - Apply softmax to get probabilities
         softmax_kernel<<<1, 256>>>(
             gen_slm->d_softmax, gen_slm->mlp->d_predictions, 1, gen_slm->vocab_size
         );
