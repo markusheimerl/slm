@@ -431,10 +431,11 @@ void save_slm(SLM* slm, const char* filename) {
     save_ssm(slm->ssms[0], filename);
     
     // Save remaining SSMs with numbered suffixes
+    char* dot;
     for (int i = 1; i < 3; i++) {
         char ssm_file[256];
         strcpy(ssm_file, filename);
-        char* dot = strrchr(ssm_file, '.');
+        dot = strrchr(ssm_file, '.');
         if (dot) *dot = '\0';
         char suffix[16];
         sprintf(suffix, "_ssm%d.bin", i + 1);
