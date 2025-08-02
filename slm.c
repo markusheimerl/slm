@@ -266,101 +266,101 @@ void zero_gradients_slm(SLM* slm) {
 
 // Backward pass
 void backward_pass_slm(SLM* slm, unsigned char* d_X) {
-    // ∂L/∂W_2 = A_t^T (∂L/∂L_t)
-    // ∂L/∂A_t = (∂L/∂L_t)(W_2)^T
-    // ∂L/∂Z_t = ∂L/∂A_t ⊙ [σ(Z_t) + Z_t σ(Z_t)(1-σ(Z_t))]
-    // ∂L/∂W_1 = Y_last_t^T (∂L/∂Z_t) - Backward through MLP
-    backward_pass_mlp(slm->mlp, slm->ssms[slm->num_layers - 1]->d_predictions);
-    
-    // Copy MLP input gradients to last SSM output error
-    int total_elements = slm->ssms[slm->num_layers - 1]->seq_len * slm->ssms[slm->num_layers - 1]->batch_size * slm->ssms[slm->num_layers - 1]->output_dim;
-    CHECK_CUDA(cudaMemcpy(slm->ssms[slm->num_layers - 1]->d_error, slm->mlp->d_error, 
-                         total_elements * sizeof(float), cudaMemcpyDeviceToDevice));
-    
     const float alpha = 1.0f;
     const float beta = 0.0f;
     
-    // Process SSM layers in reverse order
+    // Backward through MLP: Compute gradients for MLP weights and hidden layer errors
+    // ∂L/∂W_2 = A_t^T (∂L/∂L_t) - MLP output weight gradients
+    // ∂L/∂A_t = (∂L/∂L_t)(W_2)^T - Gradients w.r.t. MLP hidden activations
+    // ∂L/∂Z_t = ∂L/∂A_t ⊙ [σ(Z_t) + Z_t σ(Z_t)(1-σ(Z_t))] - Swish derivative through hidden layer
+    // ∂L/∂W_1 = Y_last_t^T (∂L/∂Z_t) - MLP input weight gradients
+    backward_pass_mlp(slm->mlp, slm->ssms[slm->num_layers - 1]->d_predictions);
+    
+    // Compute gradients w.r.t. MLP input (which flows back to last SSM output):
+    // ∂L/∂Y_last = ∂L/∂Z * W1^T - Chain rule from MLP hidden errors to last SSM output
+    // This computes: [seq_len*batch_size, embed_dim] = [seq_len*batch_size, hidden_dim] * [hidden_dim, embed_dim]^T
+    CHECK_CUBLAS(cublasSgemm(slm->mlp->cublas_handle,
+                            CUBLAS_OP_N, CUBLAS_OP_N,
+                            slm->mlp->input_dim, slm->mlp->batch_size, slm->mlp->hidden_dim,
+                            &alpha, slm->mlp->d_W1, slm->mlp->input_dim,
+                            slm->mlp->d_error_hidden, slm->mlp->hidden_dim,
+                            &beta, slm->ssms[slm->num_layers - 1]->d_error, slm->mlp->input_dim));
+    
+    // Process SSM layers in reverse order (last → ... → 1 → 0)
     for (int layer = slm->num_layers - 1; layer >= 0; layer--) {
         // Get the input that was used for this layer during forward pass
-        float* layer_input;
-        if (layer == 0) {
-            layer_input = slm->d_embedded_input;
-        } else {
-            layer_input = slm->d_ssm_outputs[layer - 1];
-        }
+        float* layer_input = (layer == 0) ? slm->d_embedded_input : slm->d_ssm_outputs[layer - 1];
         
-        // Backward pass through current SSM layer
-        // ∂L/∂C = Σ_t (∂L/∂Y_t)^T O_t
-        // ∂L/∂D = Σ_t (∂L/∂Y_t)^T X_t  
-        // ∂L/∂O_t = (∂L/∂Y_t)C
-        // ∂L/∂H_t = ∂L/∂O_t ⊙ [σ(H_t) + H_t σ(H_t)(1-σ(H_t))] + (∂L/∂H_{t+1})A
-        // ∂L/∂A = Σ_t (∂L/∂H_t)^T H_{t-1}
-        // ∂L/∂B = Σ_t (∂L/∂H_t)^T X_t
+        // Backward pass through current SSM layer:
+        // ∂L/∂C = Σ_t (∂L/∂Y_t)^T O_t - Output projection weight gradients
+        // ∂L/∂D = Σ_t (∂L/∂Y_t)^T X_t - Feedthrough weight gradients
+        // ∂L/∂O_t = (∂L/∂Y_t)C - Gradients w.r.t. activated states
+        // ∂L/∂H_t = ∂L/∂O_t ⊙ [σ(H_t) + H_t σ(H_t)(1-σ(H_t))] + (∂L/∂H_{t+1})A - Swish derivative + temporal flow
+        // ∂L/∂A = Σ_t (∂L/∂H_t)^T H_{t-1} - State transition weight gradients
+        // ∂L/∂B = Σ_t (∂L/∂H_t)^T X_t - Input-to-state weight gradients
         backward_pass_ssm(slm->ssms[layer], layer_input);
         
         // Compute gradients for the input to this layer (except for first layer)
+        // This implements: ∂L/∂X_{layer} = ∂L/∂H_{layer+1} B_{layer+1}^T + ∂L/∂Y_{layer+1} D_{layer+1}^T
         if (layer > 0) {
-            // Clear gradient buffer
+            int total_elements = slm->ssms[layer]->seq_len * slm->ssms[layer]->batch_size;
+            
+            // Clear gradient buffer for input gradients
             CHECK_CUDA(cudaMemset(slm->d_ssm_gradients[layer - 1], 0, 
-                                 total_elements * sizeof(float)));
+                                 total_elements * slm->ssms[layer]->input_dim * sizeof(float)));
             
-            // Compute input gradients: ∂L/∂input = (∂L/∂H_t) B + (∂L/∂Y_t) D
-            for (int t = 0; t < slm->ssms[layer]->seq_len; t++) {
-                float* d_input_grad_t = slm->d_ssm_gradients[layer - 1] + t * slm->ssms[layer]->batch_size * slm->ssms[layer]->input_dim;
-                float* d_state_error_t = slm->ssms[layer]->d_state_error + t * slm->ssms[layer]->batch_size * slm->ssms[layer]->state_dim;
-                float* d_output_error_t = slm->ssms[layer]->d_error + t * slm->ssms[layer]->batch_size * slm->ssms[layer]->output_dim;
-                
-                // ∂L/∂input += B^T (∂L/∂H_t) - Gradient from state path
-                CHECK_CUBLAS(cublasSgemm(slm->ssms[layer]->cublas_handle,
-                                        CUBLAS_OP_N, CUBLAS_OP_N,
-                                        slm->ssms[layer]->input_dim, slm->ssms[layer]->batch_size, slm->ssms[layer]->state_dim,
-                                        &alpha, slm->ssms[layer]->d_B, slm->ssms[layer]->input_dim,
-                                        d_state_error_t, slm->ssms[layer]->state_dim,
-                                        &beta, d_input_grad_t, slm->ssms[layer]->input_dim));
-                
-                // ∂L/∂input += D^T (∂L/∂Y_t) - Gradient from output path
-                CHECK_CUBLAS(cublasSgemm(slm->ssms[layer]->cublas_handle,
-                                        CUBLAS_OP_N, CUBLAS_OP_N,
-                                        slm->ssms[layer]->input_dim, slm->ssms[layer]->batch_size, slm->ssms[layer]->output_dim,
-                                        &alpha, slm->ssms[layer]->d_D, slm->ssms[layer]->input_dim,
-                                        d_output_error_t, slm->ssms[layer]->output_dim,
-                                        &alpha, d_input_grad_t, slm->ssms[layer]->input_dim));
-            }
+            // ∂L/∂X = B^T (∂L/∂H) - Gradient from state path (vectorized across all timesteps)
+            // Computes: [input_dim, seq_len*batch_size] = [input_dim, state_dim] * [state_dim, seq_len*batch_size]
+            CHECK_CUBLAS(cublasSgemm(slm->ssms[layer]->cublas_handle,
+                                    CUBLAS_OP_N, CUBLAS_OP_N,
+                                    slm->ssms[layer]->input_dim, total_elements, slm->ssms[layer]->state_dim,
+                                    &alpha, slm->ssms[layer]->d_B, slm->ssms[layer]->input_dim,
+                                    slm->ssms[layer]->d_state_error, slm->ssms[layer]->state_dim,
+                                    &beta, slm->d_ssm_gradients[layer - 1], slm->ssms[layer]->input_dim));
             
-            // Copy computed gradients to previous layer's error buffer
+            // ∂L/∂X += D^T (∂L/∂Y) - Gradient from output path (vectorized across all timesteps)
+            // Computes: [input_dim, seq_len*batch_size] += [input_dim, output_dim] * [output_dim, seq_len*batch_size]
+            CHECK_CUBLAS(cublasSgemm(slm->ssms[layer]->cublas_handle,
+                                    CUBLAS_OP_N, CUBLAS_OP_N,
+                                    slm->ssms[layer]->input_dim, total_elements, slm->ssms[layer]->output_dim,
+                                    &alpha, slm->ssms[layer]->d_D, slm->ssms[layer]->input_dim,
+                                    slm->ssms[layer]->d_error, slm->ssms[layer]->output_dim,
+                                    &alpha, slm->d_ssm_gradients[layer - 1], slm->ssms[layer]->input_dim));
+            
+            // Copy computed gradients to previous layer's error buffer for next iteration
             CHECK_CUDA(cudaMemcpy(slm->ssms[layer - 1]->d_error, slm->d_ssm_gradients[layer - 1], 
-                                 total_elements * sizeof(float), cudaMemcpyDeviceToDevice));
+                                 total_elements * slm->ssms[layer]->input_dim * sizeof(float), cudaMemcpyDeviceToDevice));
         }
     }
     
-    // ∂L/∂E_t = (∂L/∂H1_t) B1 + (∂L/∂Y1_t) D1 - Compute input gradients from first SSM
+    // Compute input gradients from first SSM back to embeddings (vectorized across all timesteps)
+    // ∂L/∂E_t = ∂L/∂H1_t B1^T + ∂L/∂Y1_t D1^T - Chain rule from SSM1 back to character embeddings
+    int total_elements = slm->ssms[0]->seq_len * slm->ssms[0]->batch_size;
+    
+    // Clear embedding gradient buffer
     CHECK_CUDA(cudaMemset(slm->d_input_gradients, 0, 
-                         slm->ssms[0]->seq_len * slm->ssms[0]->batch_size * slm->ssms[0]->input_dim * sizeof(float)));
+                         total_elements * slm->ssms[0]->input_dim * sizeof(float)));
     
-    for (int t = 0; t < slm->ssms[0]->seq_len; t++) {
-        float* d_input_grad_t = slm->d_input_gradients + t * slm->ssms[0]->batch_size * slm->ssms[0]->input_dim;
-        float* d_state_error_t = slm->ssms[0]->d_state_error + t * slm->ssms[0]->batch_size * slm->ssms[0]->state_dim;
-        float* d_output_error_t = slm->ssms[0]->d_error + t * slm->ssms[0]->batch_size * slm->ssms[0]->output_dim;
-        
-        // ∂L/∂E_t += B1^T (∂L/∂H1_t) - Gradient from state path
-        CHECK_CUBLAS(cublasSgemm(slm->ssms[0]->cublas_handle,
-                                CUBLAS_OP_N, CUBLAS_OP_N,
-                                slm->ssms[0]->input_dim, slm->ssms[0]->batch_size, slm->ssms[0]->state_dim,
-                                &alpha, slm->ssms[0]->d_B, slm->ssms[0]->input_dim,
-                                d_state_error_t, slm->ssms[0]->state_dim,
-                                &beta, d_input_grad_t, slm->ssms[0]->input_dim));
-        
-        // ∂L/∂E_t += D1^T (∂L/∂Y1_t) - Gradient from output path
-        CHECK_CUBLAS(cublasSgemm(slm->ssms[0]->cublas_handle,
-                                CUBLAS_OP_N, CUBLAS_OP_N,
-                                slm->ssms[0]->input_dim, slm->ssms[0]->batch_size, slm->ssms[0]->output_dim,
-                                &alpha, slm->ssms[0]->d_D, slm->ssms[0]->input_dim,
-                                d_output_error_t, slm->ssms[0]->output_dim,
-                                &alpha, d_input_grad_t, slm->ssms[0]->input_dim));
-    }
+    // ∂L/∂E += B1^T (∂L/∂H1) - Gradient from state path (vectorized across all timesteps)
+    // Computes: [embed_dim, seq_len*batch_size] = [embed_dim, state_dim] * [state_dim, seq_len*batch_size]
+    CHECK_CUBLAS(cublasSgemm(slm->ssms[0]->cublas_handle,
+                            CUBLAS_OP_N, CUBLAS_OP_N,
+                            slm->ssms[0]->input_dim, total_elements, slm->ssms[0]->state_dim,
+                            &alpha, slm->ssms[0]->d_B, slm->ssms[0]->input_dim,
+                            slm->ssms[0]->d_state_error, slm->ssms[0]->state_dim,
+                            &beta, slm->d_input_gradients, slm->ssms[0]->input_dim));
     
-    // ∂L/∂W_E[c] = Σ_{t,b: X_{t,b}=c} ∂L/∂E_t - Accumulate embedding gradients
+    // ∂L/∂E += D1^T (∂L/∂Y1) - Gradient from output path (vectorized across all timesteps)
+    // Computes: [embed_dim, seq_len*batch_size] += [embed_dim, output_dim] * [output_dim, seq_len*batch_size]
+    CHECK_CUBLAS(cublasSgemm(slm->ssms[0]->cublas_handle,
+                            CUBLAS_OP_N, CUBLAS_OP_N,
+                            slm->ssms[0]->input_dim, total_elements, slm->ssms[0]->output_dim,
+                            &alpha, slm->ssms[0]->d_D, slm->ssms[0]->input_dim,
+                            slm->ssms[0]->d_error, slm->ssms[0]->output_dim,
+                            &alpha, slm->d_input_gradients, slm->ssms[0]->input_dim));
+    
+    // Accumulate embedding gradients: ∂L/∂W_E[c] = Σ_{t,b: X_{t,b}=c} ∂L/∂E_t
+    // For each character c, sum gradients from all positions where that character appears
     dim3 block(256);
     dim3 grid((slm->ssms[0]->batch_size + 255) / 256, slm->ssms[0]->seq_len);
     embedding_gradient_kernel<<<grid, block>>>(
