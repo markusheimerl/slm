@@ -22,7 +22,7 @@ size_t calculate_model_parameters(SLM* slm) {
     total_params += slm->vocab_size * slm->embed_dim;
     
     // Count parameters for all SSMs
-    for (int i = 0; i < 3; i++) {
+    for (int i = 0; i < slm->num_layers; i++) {
         SSM* ssm = slm->ssms[i];
         total_params += ssm->state_dim * ssm->state_dim;
         total_params += ssm->state_dim * ssm->input_dim;
@@ -47,16 +47,17 @@ int main(int argc, char* argv[]) {
     }
     
     // Model parameters
-    const int embed_dim = 256;
+    const int embed_dim = 512;
     const int state_dim = 128;
     const int seq_len = 4096;
-    const int batch_size = 32;
+    const int num_layers = 3;
+    const int batch_size = 16;
     
     // Training parameters
     const int num_batches = 100000;
     const float lr_init = 0.0001f;
     const float lr_min = 0.00001f;
-    const int acc_steps = 2;
+    const int acc_steps = 4;
     
     // Pre-allocate memory for sequences
     unsigned char *input_chars = (unsigned char*)malloc(batch_size * seq_len * sizeof(unsigned char));
@@ -81,7 +82,7 @@ int main(int argc, char* argv[]) {
         printf("Continuing training from loaded model\n");
     } else {
         printf("Initializing new model\n");
-        slm = init_slm(embed_dim, state_dim, seq_len, batch_size);
+        slm = init_slm(embed_dim, state_dim, seq_len, num_layers, batch_size);
     }
 
     int model_size = calculate_model_parameters(slm);
