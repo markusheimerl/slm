@@ -69,7 +69,7 @@ $$
 
 where $\mathbf{1}_{y_t}$ denotes the one-hot encoding of target characters. The embedding gradients accumulate contributions from all occurrences of each character across the sequence.
 
-During generation, the model maintains hidden state across timesteps and samples from the predicted character distribution using temperature-controlled sampling combined with Top-p (nucleus) sampling:
+During generation, the model maintains hidden state across timesteps and samples from the predicted character distribution using temperature-controlled sampling combined with nucleus sampling:
 
 $$
 P_{\tau}(c) = \frac{\exp(L_c / \tau)}{\sum_{c'} \exp(L_{c'} / \tau)}
@@ -77,7 +77,7 @@ $$
 
 where temperature $\tau$ controls sampling entropy - $\tau \rightarrow 0$ approaches argmax sampling while $\tau > 1$ increases randomness.
 
-Top-p sampling further improves generation quality by restricting sampling to the nucleus of the probability distribution. For a given threshold $p \in (0,1)$, only tokens with cumulative probability $\leq p$ (when sorted in descending order by probability) are considered for sampling. This eliminates low-probability tokens that could lead to incoherent text, while preserving diversity within the most likely candidates.
+Nucleus sampling further improves generation quality by restricting sampling to the nucleus of the probability distribution. For a given threshold $p \in (0,1)$, only tokens with cumulative probability $\leq p$ (when sorted in descending order by probability) are considered for sampling. This eliminates low-probability tokens that could lead to incoherent text, while preserving diversity within the most likely candidates.
 
 The AdamW optimizer maintains exponential moving averages for all parameters $\theta = \{A_1, B_1, C_1, D_1, ..., W_E, W_1, W_2\}$ with momentum $\beta_1$, second moment $\beta_2$, and weight decay $\lambda$. The learning rate is denoted by $\eta$, $t$ is the current training iteration, and $\epsilon$ is a small constant for numerical stability. For each weight matrix $W$, the update rule is:
 

@@ -812,7 +812,7 @@ void generate_text_slm(SLM* slm, const char* seed_text, int generation_length, f
             }
         }
         
-        // Apply Top-p (nucleus) sampling if top_p < 1.0
+        // Apply nucleus sampling if top_p < 1.0
         if (top_p < 1.0f && top_p > 0.0f) {
             // Create array of indices for sorting
             int* indices = (int*)malloc(gen_slm->vocab_size * sizeof(int));
@@ -842,7 +842,7 @@ void generate_text_slm(SLM* slm, const char* seed_text, int generation_length, f
                 }
             }
             
-            // Zero out probabilities for tokens not in the top-p set
+            // Zero out probabilities for tokens not in the nucleus set
             for (int j = cutoff; j < gen_slm->vocab_size; j++) {
                 h_probs[indices[j]] = 0.0f;
             }
