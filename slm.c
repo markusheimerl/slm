@@ -662,7 +662,7 @@ SLM* load_slm(const char* filename, int custom_batch_size) {
 }
 
 // Text generation function
-void generate_text_slm(SLM* slm, const char* seed_text, int generation_length, float temperature) {
+void generate_text_slm(SLM* slm, const char* seed_text, int generation_length, float temperature, float top_p) {
     int seed_len = strlen(seed_text);
     if (seed_len == 0) {
         printf("Error: Empty seed text\n");
@@ -810,6 +810,55 @@ void generate_text_slm(SLM* slm, const char* seed_text, int generation_length, f
             for (int j = 0; j < gen_slm->vocab_size; j++) {
                 h_probs[j] /= sum;
             }
+        }
+        
+        // Apply Top-p (nucleus) sampling if top_p < 1.0
+        if (top_p < 1.0f && top_p > 0.0f) {
+            // Create array of indices for sorting
+            int* indices = (int*)malloc(gen_slm->vocab_size * sizeof(int));
+            for (int j = 0; j < gen_slm->vocab_size; j++) {
+                indices[j] = j;
+            }
+            
+            // Sort indices by probability (descending order)
+            for (int i = 0; i < gen_slm->vocab_size - 1; i++) {
+                for (int j = i + 1; j < gen_slm->vocab_size; j++) {
+                    if (h_probs[indices[i]] < h_probs[indices[j]]) {
+                        int temp = indices[i];
+                        indices[i] = indices[j];
+                        indices[j] = temp;
+                    }
+                }
+            }
+            
+            // Find the cutoff point where cumulative probability >= top_p
+            float cumulative_prob = 0.0f;
+            int cutoff = 0;
+            for (int j = 0; j < gen_slm->vocab_size; j++) {
+                cumulative_prob += h_probs[indices[j]];
+                if (cumulative_prob >= top_p) {
+                    cutoff = j + 1;
+                    break;
+                }
+            }
+            
+            // Zero out probabilities for tokens not in the top-p set
+            for (int j = cutoff; j < gen_slm->vocab_size; j++) {
+                h_probs[indices[j]] = 0.0f;
+            }
+            
+            // Renormalize the remaining probabilities
+            float sum = 0.0f;
+            for (int j = 0; j < gen_slm->vocab_size; j++) {
+                sum += h_probs[j];
+            }
+            if (sum > 0.0f) {
+                for (int j = 0; j < gen_slm->vocab_size; j++) {
+                    h_probs[j] /= sum;
+                }
+            }
+            
+            free(indices);
         }
         
         // Sample from the distribution
