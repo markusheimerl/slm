@@ -49,6 +49,6 @@ void backward_pass_slm(SLM* slm, unsigned char* d_X);
 void update_weights_slm(SLM* slm, float learning_rate);
 void save_slm(SLM* slm, const char* filename);
 SLM* load_slm(const char* filename, int custom_batch_size);
-void generate_text_slm(SLM* slm, const char* seed_text, int generation_length, float temperature);
+void generate_text_slm(SLM* slm, const char* seed_text, int generation_length, float temperature, float top_p);
 
 #endif
