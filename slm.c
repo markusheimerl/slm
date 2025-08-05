@@ -96,7 +96,7 @@ SLM* init_slm(int embed_dim, int state_dim, int seq_len, int num_layers, int bat
     slm->embed_dim = embed_dim;
     slm->num_layers = num_layers;
 
-    // Initialize SSM layers (embed_dim -> embed_dim)
+    // Initialize layers (embed_dim -> embed_dim)
     slm->ssms = (SSM**)malloc(num_layers * sizeof(SSM*));
     slm->mlps = (MLP**)malloc(num_layers * sizeof(MLP*));
     
@@ -213,7 +213,7 @@ void forward_pass_slm(SLM* slm, unsigned char* d_X) {
         // Reset SSM state for this layer
         reset_state_ssm(slm->ssms[layer]);
         
-        // Forward through timesteps for current SSM layer
+        // Forward SSM through timesteps for current layer
         for (int t = 0; t < seq_len; t++) {
             float* input_t = current_input + t * batch_size * slm->embed_dim;
             // H_t = X_t B^T + H_{t-1} A^T
@@ -222,7 +222,7 @@ void forward_pass_slm(SLM* slm, unsigned char* d_X) {
             forward_pass_ssm(slm->ssms[layer], input_t, t);
         }
         
-        // Forward through MLP for this layer
+        // Forward MLP for this layer
         // Z_t = Y_t W_1, A_t = Z_t σ(Z_t), L_t = A_t W_2
         forward_pass_mlp(slm->mlps[layer], slm->ssms[layer]->d_predictions);
         
@@ -310,7 +310,7 @@ void backward_pass_slm(SLM* slm, unsigned char* d_X) {
         // Get the input that was used for this layer during forward pass
         float* layer_input = (layer == 0) ? slm->d_embedded_input : slm->d_mlp_outputs[layer - 1];
         
-        // Backward pass through current SSM layer
+        // Backward SSM of current layer
         backward_pass_ssm(slm->ssms[layer], layer_input);
         
         // Compute gradients for the input to this layer (except for first layer)

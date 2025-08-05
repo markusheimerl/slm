@@ -1,4 +1,3 @@
-// slm.h
 #ifndef SLM_H
 #define SLM_H
 
@@ -6,9 +5,9 @@
 #include "mlp/gpu/mlp.h"
 
 typedef struct {
-    SSM** ssms;                 // Dynamic array of state space model layers
-    MLP** mlps;                 // Dynamic array of MLPs (one per SSM layer)
-    int num_layers;             // Number of SSM layers (and corresponding MLPs)
+    SSM** ssms;                 // Dynamic array of state space models
+    MLP** mlps;                 // Dynamic array of MLPs
+    int num_layers;             // Number of layers
     
     // Language modeling specific buffers
     float* d_embeddings;        // vocab_size x embed_dim
@@ -18,9 +17,9 @@ typedef struct {
     
     // Working buffers
     float* d_embedded_input;    // seq_len x batch_size x embed_dim
-    float** d_ssm_outputs;      // seq_len x batch_size x embed_dim (intermediate outputs)
-    float** d_mlp_outputs;      // seq_len x batch_size x embed_dim (after MLP processing)
-    float* d_final_output;      // seq_len x batch_size x vocab_size (final layer output)
+    float** d_ssm_outputs;      // seq_len x batch_size x embed_dim
+    float** d_mlp_outputs;      // seq_len x batch_size x embed_dim
+    float* d_final_output;      // seq_len x batch_size x vocab_size
     float* d_softmax;           // seq_len x batch_size x vocab_size
     float* d_input_gradients;   // seq_len x batch_size x embed_dim
     float** d_ssm_gradients;    // seq_len x batch_size x embed_dim
