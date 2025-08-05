@@ -46,14 +46,14 @@ int main(int argc, char* argv[]) {
     }
     
     // Model parameters
-    const int embed_dim = 512;
-    const int state_dim = 128;
-    const int seq_len = 256;
-    const int num_layers = 4;
-    const int batch_size = 16;
-    
+    const int embed_dim = 1024;
+    const int state_dim = 512;
+    const int seq_len = 1024;
+    const int num_layers = 5;
+    const int batch_size = 32;
+
     // Training parameters
-    const int num_batches = 100000;
+    const int num_batches = 200000;
     const float lr_init = 0.0001f;
     const float lr_min = 0.00001f;
     const int acc_steps = 1;
