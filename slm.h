@@ -6,7 +6,7 @@
 
 typedef struct {
     SSM** ssms;                 // Dynamic array of state space model layers
-    MLP* mlp;                   // Multi-layer perceptron for output mapping
+    MLP** mlps;                 // Array of multi-layer perceptrons, one per SSM layer
     int num_layers;             // Number of SSM layers
     
     // Language modeling specific buffers
