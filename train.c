@@ -21,19 +21,18 @@ size_t calculate_model_parameters(SLM* slm) {
     size_t total_params = 0;
     total_params += slm->vocab_size * slm->embed_dim;
     
-    // Count parameters for all SSMs
     for (int i = 0; i < slm->num_layers; i++) {
         SSM* ssm = slm->ssms[i];
         total_params += ssm->state_dim * ssm->state_dim;
         total_params += ssm->state_dim * ssm->input_dim;
         total_params += ssm->output_dim * ssm->state_dim;
         total_params += ssm->output_dim * ssm->input_dim;
+
+        MLP* mlp = slm->mlps[i];
+        total_params += mlp->hidden_dim * mlp->input_dim;
+        total_params += mlp->output_dim * mlp->hidden_dim;
     }
-    
-    // Count parameters for MLP
-    MLP* mlp = slm->mlp;
-    total_params += mlp->hidden_dim * mlp->input_dim;
-    total_params += mlp->output_dim * mlp->hidden_dim;
+
     return total_params;
 }
 
@@ -49,9 +48,9 @@ int main(int argc, char* argv[]) {
     // Model parameters
     const int embed_dim = 512;
     const int state_dim = 128;
-    const int seq_len = 4096;
+    const int seq_len = 256;
     const int num_layers = 4;
-    const int batch_size = 8;
+    const int batch_size = 16;
     
     // Training parameters
     const int num_batches = 100000;
