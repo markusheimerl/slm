@@ -178,11 +178,12 @@ int main(int argc, char* argv[]) {
         }
 
         // Generate sample text every 100 batches
-        if (batch % 100 == 0) {
+        if (batch % 200 == 0) {
             printf("\n--- Sample Generation at Batch %d ---\n", batch);
             generate_text_slm(slm, "The quick brown fox", 128, 0.8f, 0.9f);
             generate_text_slm(slm, "Once upon a time", 128, 0.8f, 0.9f);
             generate_text_slm(slm, "In the beginning", 128, 0.8f, 0.9f);
+            generate_text_slm(slm, "The government announced today that", 128, 0.8f, 0.9f);
             printf("--- End Sample Generation ---\n\n");
         }
     }
