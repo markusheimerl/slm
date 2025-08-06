@@ -87,6 +87,222 @@ __global__ void embedding_gradient_kernel(float* embed_grad, float* input_grad, 
     }
 }
 
+// LayerNorm forward pass kernel: y = γ * (x - μ) / σ + β
+__global__ void layernorm_forward_kernel(float* output, float* input, float* gamma, float* beta,
+                                       float* mean, float* variance, int seq_len, int batch_size, 
+                                       int embed_dim, float epsilon) {
+    int token_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int total_tokens = seq_len * batch_size;
+    
+    if (token_idx >= total_tokens) return;
+    
+    float* input_ptr = input + token_idx * embed_dim;
+    float* output_ptr = output + token_idx * embed_dim;
+    
+    // Compute mean
+    float sum = 0.0f;
+    for (int i = 0; i < embed_dim; i++) {
+        sum += input_ptr[i];
+    }
+    float mean_val = sum / embed_dim;
+    mean[token_idx] = mean_val;
+    
+    // Compute variance
+    sum = 0.0f;
+    for (int i = 0; i < embed_dim; i++) {
+        float diff = input_ptr[i] - mean_val;
+        sum += diff * diff;
+    }
+    float var_val = sum / embed_dim;
+    variance[token_idx] = var_val;
+    
+    // Normalize and scale: y = γ * (x - μ) / σ + β
+    float inv_std = rsqrtf(var_val + epsilon);
+    for (int i = 0; i < embed_dim; i++) {
+        float normalized = (input_ptr[i] - mean_val) * inv_std;
+        output_ptr[i] = gamma[i] * normalized + beta[i];
+    }
+}
+
+// LayerNorm backward pass kernel
+__global__ void layernorm_backward_kernel(float* grad_input, float* grad_gamma, float* grad_beta,
+                                        float* grad_output, float* input, float* gamma, 
+                                        float* mean, float* variance, int seq_len, int batch_size,
+                                        int embed_dim, float epsilon) {
+    int token_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int total_tokens = seq_len * batch_size;
+    
+    if (token_idx >= total_tokens) return;
+    
+    float* grad_out_ptr = grad_output + token_idx * embed_dim;
+    float* grad_in_ptr = grad_input + token_idx * embed_dim;
+    float* input_ptr = input + token_idx * embed_dim;
+    
+    float mean_val = mean[token_idx];
+    float var_val = variance[token_idx];
+    float inv_std = rsqrtf(var_val + epsilon);
+    
+    // Accumulate gradients for gamma and beta
+    for (int i = 0; i < embed_dim; i++) {
+        float normalized = (input_ptr[i] - mean_val) * inv_std;
+        atomicAdd(&grad_gamma[i], grad_out_ptr[i] * normalized);
+        atomicAdd(&grad_beta[i], grad_out_ptr[i]);
+    }
+    
+    // Compute gradients w.r.t. input
+    float sum1 = 0.0f, sum2 = 0.0f;
+    for (int i = 0; i < embed_dim; i++) {
+        float normalized = (input_ptr[i] - mean_val) * inv_std;
+        sum1 += grad_out_ptr[i] * gamma[i];
+        sum2 += grad_out_ptr[i] * gamma[i] * normalized;
+    }
+    
+    for (int i = 0; i < embed_dim; i++) {
+        float normalized = (input_ptr[i] - mean_val) * inv_std;
+        grad_in_ptr[i] = inv_std / embed_dim * (
+            embed_dim * grad_out_ptr[i] * gamma[i] - sum1 - normalized * sum2
+        );
+    }
+}
+
+// AdamW update kernel for LayerNorm parameters
+__global__ void adamw_update_layernorm_kernel(float* param, float* grad, float* m, float* v,
+                                            float beta1, float beta2, float epsilon, float lr,
+                                            float weight_decay, float alpha_t, int size) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= size) return;
+    
+    // Update moments
+    m[idx] = beta1 * m[idx] + (1.0f - beta1) * grad[idx];
+    v[idx] = beta2 * v[idx] + (1.0f - beta2) * grad[idx] * grad[idx];
+    
+    // AdamW update with weight decay
+    param[idx] = (1.0f - weight_decay * lr) * param[idx] - alpha_t * m[idx] / (sqrtf(v[idx]) + epsilon);
+}
+
+// Initialize LayerNorm
+LayerNorm* init_layernorm(int embed_dim, int seq_len, int batch_size) {
+    LayerNorm* ln = (LayerNorm*)malloc(sizeof(LayerNorm));
+    
+    ln->embed_dim = embed_dim;
+    ln->seq_len = seq_len;
+    ln->batch_size = batch_size;
+    ln->epsilon = 1e-5f;
+    
+    // Allocate device memory for parameters
+    CHECK_CUDA(cudaMalloc(&ln->d_gamma, embed_dim * sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&ln->d_beta, embed_dim * sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&ln->d_gamma_grad, embed_dim * sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&ln->d_beta_grad, embed_dim * sizeof(float)));
+    
+    // Allocate device memory for Adam parameters
+    CHECK_CUDA(cudaMalloc(&ln->d_gamma_m, embed_dim * sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&ln->d_gamma_v, embed_dim * sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&ln->d_beta_m, embed_dim * sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&ln->d_beta_v, embed_dim * sizeof(float)));
+    
+    // Allocate working buffers
+    int total_tokens = seq_len * batch_size;
+    CHECK_CUDA(cudaMalloc(&ln->d_normalized, total_tokens * embed_dim * sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&ln->d_mean, total_tokens * sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&ln->d_variance, total_tokens * sizeof(float)));
+    
+    // Initialize gamma to 1, beta to 0 (standard initialization)
+    float* h_gamma = (float*)malloc(embed_dim * sizeof(float));
+    float* h_beta = (float*)malloc(embed_dim * sizeof(float));
+    for (int i = 0; i < embed_dim; i++) {
+        h_gamma[i] = 1.0f;
+        h_beta[i] = 0.0f;
+    }
+    CHECK_CUDA(cudaMemcpy(ln->d_gamma, h_gamma, embed_dim * sizeof(float), cudaMemcpyHostToDevice));
+    CHECK_CUDA(cudaMemcpy(ln->d_beta, h_beta, embed_dim * sizeof(float), cudaMemcpyHostToDevice));
+    free(h_gamma);
+    free(h_beta);
+    
+    // Initialize Adam parameters to zero
+    CHECK_CUDA(cudaMemset(ln->d_gamma_m, 0, embed_dim * sizeof(float)));
+    CHECK_CUDA(cudaMemset(ln->d_gamma_v, 0, embed_dim * sizeof(float)));
+    CHECK_CUDA(cudaMemset(ln->d_beta_m, 0, embed_dim * sizeof(float)));
+    CHECK_CUDA(cudaMemset(ln->d_beta_v, 0, embed_dim * sizeof(float)));
+    
+    return ln;
+}
+
+// Free LayerNorm
+void free_layernorm(LayerNorm* ln) {
+    if (ln) {
+        cudaFree(ln->d_gamma);
+        cudaFree(ln->d_beta);
+        cudaFree(ln->d_gamma_grad);
+        cudaFree(ln->d_beta_grad);
+        cudaFree(ln->d_gamma_m);
+        cudaFree(ln->d_gamma_v);
+        cudaFree(ln->d_beta_m);
+        cudaFree(ln->d_beta_v);
+        cudaFree(ln->d_normalized);
+        cudaFree(ln->d_mean);
+        cudaFree(ln->d_variance);
+        free(ln);
+    }
+}
+
+// LayerNorm forward pass
+void forward_layernorm(LayerNorm* ln, float* d_input, float* d_output) {
+    int total_tokens = ln->seq_len * ln->batch_size;
+    int blocks = (total_tokens + 255) / 256;
+    
+    // Store the input for backward pass
+    CHECK_CUDA(cudaMemcpy(ln->d_normalized, d_input, 
+                         total_tokens * ln->embed_dim * sizeof(float), cudaMemcpyDeviceToDevice));
+    
+    layernorm_forward_kernel<<<blocks, 256>>>(
+        d_output, d_input, ln->d_gamma, ln->d_beta,
+        ln->d_mean, ln->d_variance, ln->seq_len, ln->batch_size,
+        ln->embed_dim, ln->epsilon
+    );
+}
+
+// LayerNorm backward pass
+void backward_layernorm(LayerNorm* ln, float* d_grad_output, float* d_grad_input) {
+    int total_tokens = ln->seq_len * ln->batch_size;
+    int blocks = (total_tokens + 255) / 256;
+    
+    layernorm_backward_kernel<<<blocks, 256>>>(
+        d_grad_input, ln->d_gamma_grad, ln->d_beta_grad,
+        d_grad_output, ln->d_normalized, ln->d_gamma,
+        ln->d_mean, ln->d_variance, ln->seq_len, ln->batch_size,
+        ln->embed_dim, ln->epsilon
+    );
+}
+
+// Zero LayerNorm gradients
+void zero_gradients_layernorm(LayerNorm* ln) {
+    CHECK_CUDA(cudaMemset(ln->d_gamma_grad, 0, ln->embed_dim * sizeof(float)));
+    CHECK_CUDA(cudaMemset(ln->d_beta_grad, 0, ln->embed_dim * sizeof(float)));
+}
+
+// Update LayerNorm weights using AdamW
+void update_weights_layernorm(LayerNorm* ln, float learning_rate, float beta1, float beta2, int timestep) {
+    float beta1_t = powf(beta1, timestep);
+    float beta2_t = powf(beta2, timestep);
+    float alpha_t = learning_rate * sqrtf(1.0f - beta2_t) / (1.0f - beta1_t);
+    float weight_decay = 0.01f; // Standard weight decay for LayerNorm
+    
+    int blocks = (ln->embed_dim + 255) / 256;
+    
+    // Update gamma
+    adamw_update_layernorm_kernel<<<blocks, 256>>>(
+        ln->d_gamma, ln->d_gamma_grad, ln->d_gamma_m, ln->d_gamma_v,
+        beta1, beta2, ln->epsilon, learning_rate, weight_decay, alpha_t, ln->embed_dim
+    );
+    
+    // Update beta
+    adamw_update_layernorm_kernel<<<blocks, 256>>>(
+        ln->d_beta, ln->d_beta_grad, ln->d_beta_m, ln->d_beta_v,
+        beta1, beta2, ln->epsilon, learning_rate, weight_decay, alpha_t, ln->embed_dim
+    );
+}
+
 // Initialize SLM
 SLM* init_slm(int embed_dim, int state_dim, int seq_len, int num_layers, int batch_size) {
     SLM* slm = (SLM*)malloc(sizeof(SLM));
@@ -99,6 +315,10 @@ SLM* init_slm(int embed_dim, int state_dim, int seq_len, int num_layers, int bat
     // Initialize layers (embed_dim -> embed_dim)
     slm->ssms = (SSM**)malloc(num_layers * sizeof(SSM*));
     slm->mlps = (MLP**)malloc(num_layers * sizeof(MLP*));
+    slm->layer_norms = (LayerNorm**)malloc(num_layers * sizeof(LayerNorm*));
+    
+    // Initialize pre-embedding LayerNorm
+    slm->pre_norm = init_layernorm(embed_dim, seq_len, batch_size);
     
     for (int i = 0; i < num_layers; i++) {
         slm->ssms[i] = init_ssm(embed_dim, state_dim, embed_dim, seq_len, batch_size);
@@ -106,6 +326,9 @@ SLM* init_slm(int embed_dim, int state_dim, int seq_len, int num_layers, int bat
         // Create MLP for each layer - last layer outputs to vocab_size, others to embed_dim
         int mlp_output_dim = (i == num_layers - 1) ? slm->vocab_size : embed_dim;
         slm->mlps[i] = init_mlp(embed_dim, 4 * embed_dim, mlp_output_dim, seq_len * batch_size);
+        
+        // Initialize LayerNorm for each layer (applied between SSM and MLP)
+        slm->layer_norms[i] = init_layernorm(embed_dim, seq_len, batch_size);
     }
 
     // Allocate embedding matrices
@@ -116,29 +339,37 @@ SLM* init_slm(int embed_dim, int state_dim, int seq_len, int num_layers, int bat
     
     // Allocate working buffers
     CHECK_CUDA(cudaMalloc(&slm->d_embedded_input, seq_len * batch_size * embed_dim * sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&slm->d_pre_norm_output, seq_len * batch_size * embed_dim * sizeof(float)));
     CHECK_CUDA(cudaMalloc(&slm->d_final_output, seq_len * batch_size * slm->vocab_size * sizeof(float)));
     CHECK_CUDA(cudaMalloc(&slm->d_softmax, seq_len * batch_size * slm->vocab_size * sizeof(float)));
     CHECK_CUDA(cudaMalloc(&slm->d_input_gradients, seq_len * batch_size * embed_dim * sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&slm->d_pre_norm_gradients, seq_len * batch_size * embed_dim * sizeof(float)));
     CHECK_CUDA(cudaMalloc(&slm->d_losses, seq_len * batch_size * sizeof(float)));
     
-    // Allocate arrays for intermediate SSM and MLP outputs and gradients
+    // Allocate arrays for intermediate SSM, MLP, and LayerNorm outputs and gradients
     if (num_layers > 1) {
         slm->d_ssm_outputs = (float**)malloc((num_layers - 1) * sizeof(float*));
         slm->d_mlp_outputs = (float**)malloc((num_layers - 1) * sizeof(float*));
+        slm->d_layernorm_outputs = (float**)malloc((num_layers - 1) * sizeof(float*));
         slm->d_ssm_gradients = (float**)malloc((num_layers - 1) * sizeof(float*));
         slm->d_mlp_gradients = (float**)malloc((num_layers - 1) * sizeof(float*));
+        slm->d_layernorm_gradients = (float**)malloc((num_layers - 1) * sizeof(float*));
         
         for (int i = 0; i < num_layers - 1; i++) {
             CHECK_CUDA(cudaMalloc(&slm->d_ssm_outputs[i], seq_len * batch_size * embed_dim * sizeof(float)));
             CHECK_CUDA(cudaMalloc(&slm->d_mlp_outputs[i], seq_len * batch_size * embed_dim * sizeof(float)));
+            CHECK_CUDA(cudaMalloc(&slm->d_layernorm_outputs[i], seq_len * batch_size * embed_dim * sizeof(float)));
             CHECK_CUDA(cudaMalloc(&slm->d_ssm_gradients[i], seq_len * batch_size * embed_dim * sizeof(float)));
             CHECK_CUDA(cudaMalloc(&slm->d_mlp_gradients[i], seq_len * batch_size * embed_dim * sizeof(float)));
+            CHECK_CUDA(cudaMalloc(&slm->d_layernorm_gradients[i], seq_len * batch_size * embed_dim * sizeof(float)));
         }
     } else {
         slm->d_ssm_outputs = NULL;
         slm->d_mlp_outputs = NULL;
+        slm->d_layernorm_outputs = NULL;
         slm->d_ssm_gradients = NULL;
         slm->d_mlp_gradients = NULL;
+        slm->d_layernorm_gradients = NULL;
     }
     
     // Initialize embeddings with Xavier initialization
@@ -163,31 +394,41 @@ void free_slm(SLM* slm) {
         for (int i = 0; i < slm->num_layers; i++) {
             if (slm->ssms[i]) free_ssm(slm->ssms[i]);
             if (slm->mlps[i]) free_mlp(slm->mlps[i]);
+            if (slm->layer_norms[i]) free_layernorm(slm->layer_norms[i]);
         }
         free(slm->ssms);
         free(slm->mlps);
+        free(slm->layer_norms);
+        
+        if (slm->pre_norm) free_layernorm(slm->pre_norm);
         
         cudaFree(slm->d_embeddings);
         cudaFree(slm->d_embeddings_grad);
         cudaFree(slm->d_embeddings_m);
         cudaFree(slm->d_embeddings_v);
         cudaFree(slm->d_embedded_input);
+        cudaFree(slm->d_pre_norm_output);
         cudaFree(slm->d_final_output);
         cudaFree(slm->d_softmax);
         cudaFree(slm->d_input_gradients);
+        cudaFree(slm->d_pre_norm_gradients);
         cudaFree(slm->d_losses);
         
         if (slm->num_layers > 1) {
             for (int i = 0; i < slm->num_layers - 1; i++) {
                 cudaFree(slm->d_ssm_outputs[i]);
                 cudaFree(slm->d_mlp_outputs[i]);
+                cudaFree(slm->d_layernorm_outputs[i]);
                 cudaFree(slm->d_ssm_gradients[i]);
                 cudaFree(slm->d_mlp_gradients[i]);
+                cudaFree(slm->d_layernorm_gradients[i]);
             }
             free(slm->d_ssm_outputs);
             free(slm->d_mlp_outputs);
+            free(slm->d_layernorm_outputs);
             free(slm->d_ssm_gradients);
             free(slm->d_mlp_gradients);
+            free(slm->d_layernorm_gradients);
         }
         
         free(slm);
@@ -206,8 +447,11 @@ void forward_pass_slm(SLM* slm, unsigned char* d_X) {
         slm->d_embedded_input, slm->d_embeddings, d_X, batch_size, slm->embed_dim
     );
     
-    // Process through all SSM+MLP layers in sequence
-    float* current_input = slm->d_embedded_input;
+    // Apply LayerNorm after embeddings
+    forward_layernorm(slm->pre_norm, slm->d_embedded_input, slm->d_pre_norm_output);
+    
+    // Process through all SSM+LayerNorm+MLP layers in sequence
+    float* current_input = slm->d_pre_norm_output;
     
     for (int layer = 0; layer < slm->num_layers; layer++) {
         // Reset SSM state for this layer
@@ -222,9 +466,19 @@ void forward_pass_slm(SLM* slm, unsigned char* d_X) {
             forward_pass_ssm(slm->ssms[layer], input_t, t);
         }
         
+        // Apply LayerNorm between SSM and MLP
+        float* layernorm_output;
+        if (layer == slm->num_layers - 1) {
+            // For last layer, use a temporary buffer (reuse slm->d_pre_norm_output)
+            layernorm_output = slm->d_pre_norm_output;
+        } else {
+            layernorm_output = slm->d_layernorm_outputs[layer];
+        }
+        forward_layernorm(slm->layer_norms[layer], slm->ssms[layer]->d_predictions, layernorm_output);
+        
         // Forward MLP for this layer
         // Z_t = Y_t W_1, A_t = Z_t σ(Z_t), L_t = A_t W_2
-        forward_pass_mlp(slm->mlps[layer], slm->ssms[layer]->d_predictions);
+        forward_pass_mlp(slm->mlps[layer], layernorm_output);
         
         // For the last layer, store output in final_output buffer
         if (layer == slm->num_layers - 1) {
@@ -278,7 +532,9 @@ void zero_gradients_slm(SLM* slm) {
     for (int i = 0; i < slm->num_layers; i++) {
         zero_gradients_ssm(slm->ssms[i]);
         zero_gradients_mlp(slm->mlps[i]);
+        zero_gradients_layernorm(slm->layer_norms[i]);
     }
+    zero_gradients_layernorm(slm->pre_norm);
     CHECK_CUDA(cudaMemset(slm->d_embeddings_grad, 0, 
                          slm->vocab_size * slm->embed_dim * sizeof(float)));
 }
@@ -377,11 +633,17 @@ void backward_pass_slm(SLM* slm, unsigned char* d_X) {
 
 // Update weights using AdamW
 void update_weights_slm(SLM* slm, float learning_rate) {
-    // Update all SSM and MLP weights
+    // Update all SSM, MLP, and LayerNorm weights
     for (int i = 0; i < slm->num_layers; i++) {
         update_weights_ssm(slm->ssms[i], learning_rate);
         update_weights_mlp(slm->mlps[i], learning_rate);
+        update_weights_layernorm(slm->layer_norms[i], learning_rate, 
+                                slm->ssms[i]->beta1, slm->ssms[i]->beta2, slm->ssms[i]->t);
     }
+    
+    // Update pre-embedding LayerNorm
+    update_weights_layernorm(slm->pre_norm, learning_rate, 
+                            slm->ssms[0]->beta1, slm->ssms[0]->beta2, slm->ssms[0]->t);
     
     // Update embeddings using AdamW
     int embed_size = slm->vocab_size * slm->embed_dim;
