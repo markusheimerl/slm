@@ -547,24 +547,41 @@ void backward_pass_slm(SLM* slm, unsigned char* d_X) {
     // Process layers in reverse order (last → ... → 1 → 0)
     for (int layer = slm->num_layers - 1; layer >= 0; layer--) {
         // Backward through MLP for current layer
+        float* mlp_input;
         if (layer == slm->num_layers - 1) {
-            // For last layer, MLP gradients are already computed from loss
-            backward_pass_mlp(slm->mlps[layer], slm->ssms[layer]->d_predictions);
+            // For last layer, use temporary buffer for LayerNorm output
+            mlp_input = slm->d_pre_norm_output; // Reusing this buffer
         } else {
-            // For intermediate layers, compute MLP error from next layer's gradients
-            backward_pass_mlp(slm->mlps[layer], slm->ssms[layer]->d_predictions);
+            mlp_input = slm->d_layernorm_outputs[layer];
         }
         
-        // Compute gradients w.r.t. MLP input (SSM output)
-        CHECK_CUBLAS(cublasSgemm(slm->mlps[layer]->cublas_handle,
-                                CUBLAS_OP_N, CUBLAS_OP_N,
-                                slm->mlps[layer]->input_dim, slm->mlps[layer]->batch_size, slm->mlps[layer]->hidden_dim,
-                                &alpha, slm->mlps[layer]->d_W1, slm->mlps[layer]->input_dim,
-                                slm->mlps[layer]->d_error_hidden, slm->mlps[layer]->hidden_dim,
-                                &beta, slm->ssms[layer]->d_error, slm->mlps[layer]->input_dim));
+        backward_pass_mlp(slm->mlps[layer], mlp_input);
+        
+        // Backward through LayerNorm between SSM and MLP
+        float* layernorm_grad_input;
+        if (layer == slm->num_layers - 1) {
+            // For last layer, gradients go to SSM error buffer
+            layernorm_grad_input = slm->ssms[layer]->d_error;
+        } else {
+            layernorm_grad_input = slm->d_layernorm_gradients[layer];
+        }
+        
+        backward_layernorm(slm->layer_norms[layer], slm->mlps[layer]->d_error, layernorm_grad_input);
+        
+        // Copy LayerNorm gradients to SSM error buffer
+        if (layer != slm->num_layers - 1) {
+            int total_elements = slm->ssms[layer]->seq_len * slm->ssms[layer]->batch_size;
+            CHECK_CUDA(cudaMemcpy(slm->ssms[layer]->d_error, layernorm_grad_input,
+                                 total_elements * slm->embed_dim * sizeof(float), cudaMemcpyDeviceToDevice));
+        }
         
         // Get the input that was used for this layer during forward pass
-        float* layer_input = (layer == 0) ? slm->d_embedded_input : slm->d_mlp_outputs[layer - 1];
+        float* layer_input;
+        if (layer == 0) {
+            layer_input = slm->d_pre_norm_output; // Pre-normalized embeddings
+        } else {
+            layer_input = slm->d_mlp_outputs[layer - 1];
+        }
         
         // Backward SSM of current layer
         backward_pass_ssm(slm->ssms[layer], layer_input);
@@ -599,28 +616,31 @@ void backward_pass_slm(SLM* slm, unsigned char* d_X) {
         }
     }
     
-    // Compute input gradients from first SSM back to embeddings
+    // Compute gradients from first SSM back to pre-LayerNorm
     int total_elements = slm->ssms[0]->seq_len * slm->ssms[0]->batch_size;
     
-    // Clear embedding gradient buffer
-    CHECK_CUDA(cudaMemset(slm->d_input_gradients, 0, 
+    // Clear gradient buffer for pre-LayerNorm gradients
+    CHECK_CUDA(cudaMemset(slm->d_pre_norm_gradients, 0, 
                          total_elements * slm->ssms[0]->input_dim * sizeof(float)));
     
-    // ∂L/∂E += B1^T (∂L/∂H1) - Gradient from state path
+    // ∂L/∂(pre_norm_output) = B1^T (∂L/∂H1) - Gradient from state path
     CHECK_CUBLAS(cublasSgemm(slm->ssms[0]->cublas_handle,
                             CUBLAS_OP_N, CUBLAS_OP_N,
                             slm->ssms[0]->input_dim, total_elements, slm->ssms[0]->state_dim,
                             &alpha, slm->ssms[0]->d_B, slm->ssms[0]->input_dim,
                             slm->ssms[0]->d_state_error, slm->ssms[0]->state_dim,
-                            &beta, slm->d_input_gradients, slm->ssms[0]->input_dim));
+                            &beta, slm->d_pre_norm_gradients, slm->ssms[0]->input_dim));
     
-    // ∂L/∂E += D1^T (∂L/∂Y1) - Gradient from output path
+    // ∂L/∂(pre_norm_output) += D1^T (∂L/∂Y1) - Gradient from output path
     CHECK_CUBLAS(cublasSgemm(slm->ssms[0]->cublas_handle,
                             CUBLAS_OP_N, CUBLAS_OP_N,
                             slm->ssms[0]->input_dim, total_elements, slm->ssms[0]->output_dim,
                             &alpha, slm->ssms[0]->d_D, slm->ssms[0]->input_dim,
                             slm->ssms[0]->d_error, slm->ssms[0]->output_dim,
-                            &alpha, slm->d_input_gradients, slm->ssms[0]->input_dim));
+                            &alpha, slm->d_pre_norm_gradients, slm->ssms[0]->input_dim));
+    
+    // Backward through pre-embedding LayerNorm
+    backward_layernorm(slm->pre_norm, slm->d_pre_norm_gradients, slm->d_input_gradients);
     
     // Accumulate embedding gradients
     dim3 block(256);
