@@ -1,7 +1,7 @@
 # slm
 A small language model implementation
 
-Consider a character-level language model built on a triple state space model backbone with MLP projection, operating on character sequences of shape (seq_len × batch_size). The architecture combines learned character embeddings with temporal state dynamics through three sequential SSM layers, followed by MLP transformation and softmax normalization for next-character prediction. The forward propagation follows:
+Consider a character-level language model built on a multi-layer state space model backbone with per-layer MLP transformations, operating on character sequences of shape (seq_len × batch_size). The architecture combines learned character embeddings with temporal state dynamics through multiple sequential SSM layers, each followed by MLP transformation, with final softmax normalization for next-character prediction. The forward propagation follows:
 
 $$
 \begin{align*}
@@ -9,23 +9,31 @@ E_t &= W_E[X_t]
 \end{align*}
 $$
 
-The embedding matrix $W_E$ maps discrete character indices to dense vector representations via indexing $W_E[X_t]$. Both SSM layers then process their inputs through the standard state space model formulation:
+The embedding matrix $W_E$ maps discrete character indices to dense vector representations via indexing $W_E[X_t]$. Each SSM layer processes its inputs through the standard state space model formulation:
 
 $$
 \begin{align*}
-H_t &= X_tB^T + H_{t-1}A^T \\
-O_t &= H_t\sigma(H_t) \\
-Y_t &= O_tC^T + X_tD^T
+H_t^{(i)} &= X_t^{(i)}B_i^T + H_{t-1}^{(i)}A_i^T \\
+O_t^{(i)} &= H_t^{(i)}\sigma(H_t^{(i)}) \\
+Y_t^{(i)} &= O_t^{(i)}C_i^T + X_t^{(i)}D_i^T
 \end{align*}
 $$
 
-The state transition matrix $A$ captures temporal dependencies, input matrix $B$ maps current inputs to state updates, output matrix $C$ projects nonlinearly activated states to outputs, and feedthrough matrix $D$ provides direct input-output connections. The first SSM takes embeddings $E_t$ as input $X_t$, the second SSM takes the first SSM's output as its input, and the third SSM takes the second SSM's output as its input. The MLP then transforms the final SSM outputs:
+The state transition matrix $A_i$ captures temporal dependencies, input matrix $B_i$ maps current inputs to state updates, output matrix $C_i$ projects nonlinearly activated states to outputs, and feedthrough matrix $D_i$ provides direct input-output connections. After each SSM layer, an MLP transforms the outputs:
 
 $$
 \begin{align*}
-Z &= YW_1 \\
-A &= Z\sigma(Z) \\
-L &= AW_2 \\
+Z^{(i)} &= Y^{(i)}W_1^{(i)} \\
+A^{(i)} &= Z^{(i)}\sigma(Z^{(i)}) \\
+X^{(i+1)} &= A^{(i)}W_2^{(i)}
+\end{align*}
+$$
+
+For the final layer, the MLP outputs logits over the vocabulary:
+
+$$
+\begin{align*}
+L &= A^{(f)}W_2^{(f)} \\
 P &= \frac{\exp(L)}{\sum_c \exp(L_c)}
 \end{align*}
 $$
@@ -40,30 +48,30 @@ L &= -\frac{1}{T \cdot B}\sum_{t=1}^{T}\sum_{b=1}^{B} \log P_{t,b,y_{t,b}}
 \end{align*}
 $$
 
-The gradient flows backward through the MLP following the chain rule:
+The gradient flows backward through each layer's MLP following the chain rule:
 
 $$
 \begin{align*}
 \frac{\partial L}{\partial L_t} &= P_t - \mathbf{1}_{y_t} \\
-\frac{\partial L}{\partial W_2} &= A_t^T(\frac{\partial L}{\partial L_t}) \\
-\frac{\partial L}{\partial A_t} &= (\frac{\partial L}{\partial L_t})(W_2)^T \\
-\frac{\partial L}{\partial Z_t} &= \frac{\partial L}{\partial A_t} \odot [\sigma(Z_t) + Z_t\sigma(Z_t)(1-\sigma(Z_t))] \\
-\frac{\partial L}{\partial W_1} &= Y_t^T(\frac{\partial L}{\partial Z_t}) \\
-\frac{\partial L}{\partial Y_t} &= (\frac{\partial L}{\partial Z_t})(W_1)^T
+\frac{\partial L}{\partial W_2^{(i)}} &= A_t^{(i)T}(\frac{\partial L}{\partial L_t}) \\
+\frac{\partial L}{\partial A_t^{(i)}} &= (\frac{\partial L}{\partial L_t})(W_2^{(i)})^T \\
+\frac{\partial L}{\partial Z_t^{(i)}} &= \frac{\partial L}{\partial A_t^{(i)}} \odot [\sigma(Z_t^{(i)}) + Z_t^{(i)}\sigma(Z_t^{(i)})(1-\sigma(Z_t^{(i)}))] \\
+\frac{\partial L}{\partial W_1^{(i)}} &= Y_t^{(i)T}(\frac{\partial L}{\partial Z_t^{(i)}}) \\
+\frac{\partial L}{\partial Y_t^{(i)}} &= (\frac{\partial L}{\partial Z_t^{(i)}})(W_1^{(i)})^T
 \end{align*}
 $$
 
-The gradient then flows backward through all three SSM layers following standard BPTT with Swish derivatives:
+The gradient then flows backward through each SSM layer following standard BPTT with Swish derivatives:
 
 $$
 \begin{align*}
-\frac{\partial L}{\partial C} &= \sum_t (\frac{\partial L}{\partial Y_t})^T O_t \\
-\frac{\partial L}{\partial D} &= \sum_t (\frac{\partial L}{\partial Y_t})^T X_t \\
-\frac{\partial L}{\partial O_t} &= (\frac{\partial L}{\partial Y_t})C \\
-\frac{\partial L}{\partial H_t} &= \frac{\partial L}{\partial O_t} \odot [\sigma(H_t) + H_t\sigma(H_t)(1-\sigma(H_t))] + (\frac{\partial L}{\partial H_{t+1}})A \\
-\frac{\partial L}{\partial A} &= \sum_t (\frac{\partial L}{\partial H_t})^T H_{t-1} \\
-\frac{\partial L}{\partial B} &= \sum_t (\frac{\partial L}{\partial H_t})^T X_t \\
-\frac{\partial L}{\partial W_E[c]} &= \sum_{\substack{t,b \\ X_{t,b}=c}} \left(B^T\frac{\partial L}{\partial H_t} + D^T\frac{\partial L}{\partial Y_t}\right)
+\frac{\partial L}{\partial C_i} &= \sum_t (\frac{\partial L}{\partial Y_t^{(i)}})^T O_t^{(i)} \\
+\frac{\partial L}{\partial D_i} &= \sum_t (\frac{\partial L}{\partial Y_t^{(i)}})^T X_t^{(i)} \\
+\frac{\partial L}{\partial O_t^{(i)}} &= (\frac{\partial L}{\partial Y_t^{(i)}})C_i \\
+\frac{\partial L}{\partial H_t^{(i)}} &= \frac{\partial L}{\partial O_t^{(i)}} \odot [\sigma(H_t^{(i)}) + H_t^{(i)}\sigma(H_t^{(i)})(1-\sigma(H_t^{(i)}))] + (\frac{\partial L}{\partial H_{t+1}^{(i)}})A_i \\
+\frac{\partial L}{\partial A_i} &= \sum_t (\frac{\partial L}{\partial H_t^{(i)}})^T H_{t-1}^{(i)} \\
+\frac{\partial L}{\partial B_i} &= \sum_t (\frac{\partial L}{\partial H_t^{(i)}})^T X_t^{(i)} \\
+\frac{\partial L}{\partial W_E[c]} &= \sum_{\substack{t,b \\ X_{t,b}=c}} \left(B_1^T\frac{\partial L}{\partial H_t^{(1)}} + D_1^T\frac{\partial L}{\partial Y_t^{(1)}}\right)
 \end{align*}
 $$
 
@@ -79,7 +87,7 @@ where temperature $\tau$ controls sampling entropy - $\tau \rightarrow 0$ approa
 
 Nucleus sampling further improves generation quality by restricting sampling to the nucleus of the probability distribution. For a given threshold $p \in (0,1)$, only tokens with cumulative probability $\leq p$ (when sorted in descending order by probability) are considered for sampling. This eliminates low-probability tokens that could lead to incoherent text, while preserving diversity within the most likely candidates.
 
-The AdamW optimizer maintains exponential moving averages for all parameters $\theta = \{A_1, B_1, C_1, D_1, ..., W_E, W_1, W_2\}$ with momentum $\beta_1$, second moment $\beta_2$, and weight decay $\lambda$. The learning rate is denoted by $\eta$, $t$ is the current training iteration, and $\epsilon$ is a small constant for numerical stability. For each weight matrix $W$, the update rule is:
+The AdamW optimizer maintains exponential moving averages for all parameters $\theta = \{A_i, B_i, C_i, D_i, W_1^{(i)}, W_2^{(i)}, W_E\}$ with momentum $\beta_1$, second moment $\beta_2$, and weight decay $\lambda$. The learning rate is denoted by $\eta$, $t$ is the current training iteration, and $\epsilon$ is a small constant for numerical stability. For each weight matrix $W$, the update rule is:
 
 $$
 \begin{align*}

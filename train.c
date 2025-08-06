@@ -21,19 +21,18 @@ size_t calculate_model_parameters(SLM* slm) {
     size_t total_params = 0;
     total_params += slm->vocab_size * slm->embed_dim;
     
-    // Count parameters for all SSMs
     for (int i = 0; i < slm->num_layers; i++) {
         SSM* ssm = slm->ssms[i];
         total_params += ssm->state_dim * ssm->state_dim;
         total_params += ssm->state_dim * ssm->input_dim;
         total_params += ssm->output_dim * ssm->state_dim;
         total_params += ssm->output_dim * ssm->input_dim;
+
+        MLP* mlp = slm->mlps[i];
+        total_params += mlp->hidden_dim * mlp->input_dim;
+        total_params += mlp->output_dim * mlp->hidden_dim;
     }
-    
-    // Count parameters for MLP
-    MLP* mlp = slm->mlp;
-    total_params += mlp->hidden_dim * mlp->input_dim;
-    total_params += mlp->output_dim * mlp->hidden_dim;
+
     return total_params;
 }
 
@@ -47,14 +46,14 @@ int main(int argc, char* argv[]) {
     }
     
     // Model parameters
-    const int embed_dim = 512;
-    const int state_dim = 128;
-    const int seq_len = 4096;
+    const int embed_dim = 1024;
+    const int state_dim = 512;
+    const int seq_len = 1024;
     const int num_layers = 4;
-    const int batch_size = 8;
-    
+    const int batch_size = 64;
+
     // Training parameters
-    const int num_batches = 100000;
+    const int num_batches = 200000;
     const float lr_init = 0.0001f;
     const float lr_min = 0.00001f;
     const int acc_steps = 1;
@@ -179,11 +178,12 @@ int main(int argc, char* argv[]) {
         }
 
         // Generate sample text every 100 batches
-        if (batch % 100 == 0) {
+        if (batch % 200 == 0) {
             printf("\n--- Sample Generation at Batch %d ---\n", batch);
             generate_text_slm(slm, "The quick brown fox", 128, 0.8f, 0.9f);
             generate_text_slm(slm, "Once upon a time", 128, 0.8f, 0.9f);
             generate_text_slm(slm, "In the beginning", 128, 0.8f, 0.9f);
+            generate_text_slm(slm, "The government announced today that", 128, 0.8f, 0.9f);
             printf("--- End Sample Generation ---\n\n");
         }
     }

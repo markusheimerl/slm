@@ -96,14 +96,17 @@ SLM* init_slm(int embed_dim, int state_dim, int seq_len, int num_layers, int bat
     slm->embed_dim = embed_dim;
     slm->num_layers = num_layers;
 
-    // Initialize SSM layers (embed_dim -> embed_dim)
+    // Initialize layers (embed_dim -> embed_dim)
     slm->ssms = (SSM**)malloc(num_layers * sizeof(SSM*));
+    slm->mlps = (MLP**)malloc(num_layers * sizeof(MLP*));
+    
     for (int i = 0; i < num_layers; i++) {
         slm->ssms[i] = init_ssm(embed_dim, state_dim, embed_dim, seq_len, batch_size);
+        
+        // Create MLP for each layer - last layer outputs to vocab_size, others to embed_dim
+        int mlp_output_dim = (i == num_layers - 1) ? slm->vocab_size : embed_dim;
+        slm->mlps[i] = init_mlp(embed_dim, 4 * embed_dim, mlp_output_dim, seq_len * batch_size);
     }
-    
-    // Initialize MLP
-    slm->mlp = init_mlp(embed_dim, 4 * embed_dim, slm->vocab_size, seq_len * batch_size);
 
     // Allocate embedding matrices
     CHECK_CUDA(cudaMalloc(&slm->d_embeddings, slm->vocab_size * slm->embed_dim * sizeof(float)));
@@ -113,22 +116,29 @@ SLM* init_slm(int embed_dim, int state_dim, int seq_len, int num_layers, int bat
     
     // Allocate working buffers
     CHECK_CUDA(cudaMalloc(&slm->d_embedded_input, seq_len * batch_size * embed_dim * sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&slm->d_final_output, seq_len * batch_size * slm->vocab_size * sizeof(float)));
     CHECK_CUDA(cudaMalloc(&slm->d_softmax, seq_len * batch_size * slm->vocab_size * sizeof(float)));
     CHECK_CUDA(cudaMalloc(&slm->d_input_gradients, seq_len * batch_size * embed_dim * sizeof(float)));
     CHECK_CUDA(cudaMalloc(&slm->d_losses, seq_len * batch_size * sizeof(float)));
     
-    // Allocate arrays for intermediate SSM outputs and gradients
+    // Allocate arrays for intermediate SSM and MLP outputs and gradients
     if (num_layers > 1) {
         slm->d_ssm_outputs = (float**)malloc((num_layers - 1) * sizeof(float*));
+        slm->d_mlp_outputs = (float**)malloc((num_layers - 1) * sizeof(float*));
         slm->d_ssm_gradients = (float**)malloc((num_layers - 1) * sizeof(float*));
+        slm->d_mlp_gradients = (float**)malloc((num_layers - 1) * sizeof(float*));
         
         for (int i = 0; i < num_layers - 1; i++) {
             CHECK_CUDA(cudaMalloc(&slm->d_ssm_outputs[i], seq_len * batch_size * embed_dim * sizeof(float)));
+            CHECK_CUDA(cudaMalloc(&slm->d_mlp_outputs[i], seq_len * batch_size * embed_dim * sizeof(float)));
             CHECK_CUDA(cudaMalloc(&slm->d_ssm_gradients[i], seq_len * batch_size * embed_dim * sizeof(float)));
+            CHECK_CUDA(cudaMalloc(&slm->d_mlp_gradients[i], seq_len * batch_size * embed_dim * sizeof(float)));
         }
     } else {
         slm->d_ssm_outputs = NULL;
+        slm->d_mlp_outputs = NULL;
         slm->d_ssm_gradients = NULL;
+        slm->d_mlp_gradients = NULL;
     }
     
     // Initialize embeddings with Xavier initialization
@@ -152,16 +162,17 @@ void free_slm(SLM* slm) {
     if (slm) {
         for (int i = 0; i < slm->num_layers; i++) {
             if (slm->ssms[i]) free_ssm(slm->ssms[i]);
+            if (slm->mlps[i]) free_mlp(slm->mlps[i]);
         }
         free(slm->ssms);
-        
-        if (slm->mlp) free_mlp(slm->mlp);
+        free(slm->mlps);
         
         cudaFree(slm->d_embeddings);
         cudaFree(slm->d_embeddings_grad);
         cudaFree(slm->d_embeddings_m);
         cudaFree(slm->d_embeddings_v);
         cudaFree(slm->d_embedded_input);
+        cudaFree(slm->d_final_output);
         cudaFree(slm->d_softmax);
         cudaFree(slm->d_input_gradients);
         cudaFree(slm->d_losses);
@@ -169,10 +180,14 @@ void free_slm(SLM* slm) {
         if (slm->num_layers > 1) {
             for (int i = 0; i < slm->num_layers - 1; i++) {
                 cudaFree(slm->d_ssm_outputs[i]);
+                cudaFree(slm->d_mlp_outputs[i]);
                 cudaFree(slm->d_ssm_gradients[i]);
+                cudaFree(slm->d_mlp_gradients[i]);
             }
             free(slm->d_ssm_outputs);
+            free(slm->d_mlp_outputs);
             free(slm->d_ssm_gradients);
+            free(slm->d_mlp_gradients);
         }
         
         free(slm);
@@ -191,14 +206,14 @@ void forward_pass_slm(SLM* slm, unsigned char* d_X) {
         slm->d_embedded_input, slm->d_embeddings, d_X, batch_size, slm->embed_dim
     );
     
-    // Process through all SSM layers in sequence
+    // Process through all SSM+MLP layers in sequence
     float* current_input = slm->d_embedded_input;
     
     for (int layer = 0; layer < slm->num_layers; layer++) {
         // Reset SSM state for this layer
         reset_state_ssm(slm->ssms[layer]);
         
-        // Forward through timesteps for current layer
+        // Forward SSM through timesteps for current layer
         for (int t = 0; t < seq_len; t++) {
             float* input_t = current_input + t * batch_size * slm->embed_dim;
             // H_t = X_t B^T + H_{t-1} A^T
@@ -207,25 +222,29 @@ void forward_pass_slm(SLM* slm, unsigned char* d_X) {
             forward_pass_ssm(slm->ssms[layer], input_t, t);
         }
         
-        // For all but the last layer, copy output to intermediate buffer and set as next input
-        if (layer < slm->num_layers - 1) {
-            int output_size = seq_len * batch_size * slm->embed_dim;
-            CHECK_CUDA(cudaMemcpy(slm->d_ssm_outputs[layer], slm->ssms[layer]->d_predictions, 
+        // Forward MLP for this layer
+        // Z_t = Y_t W_1, A_t = Z_t σ(Z_t), L_t = A_t W_2
+        forward_pass_mlp(slm->mlps[layer], slm->ssms[layer]->d_predictions);
+        
+        // For the last layer, store output in final_output buffer
+        if (layer == slm->num_layers - 1) {
+            int output_size = seq_len * batch_size * slm->vocab_size;
+            CHECK_CUDA(cudaMemcpy(slm->d_final_output, slm->mlps[layer]->d_predictions, 
                                  output_size * sizeof(float), cudaMemcpyDeviceToDevice));
-            current_input = slm->d_ssm_outputs[layer];
+        } else {
+            // For intermediate layers, copy MLP output to buffer and set as next input
+            int output_size = seq_len * batch_size * slm->embed_dim;
+            CHECK_CUDA(cudaMemcpy(slm->d_mlp_outputs[layer], slm->mlps[layer]->d_predictions, 
+                                 output_size * sizeof(float), cudaMemcpyDeviceToDevice));
+            current_input = slm->d_mlp_outputs[layer];
         }
     }
 
-    // Z_t = Y_last_t W_1
-    // A_t = Z_t σ(Z_t)
-    // L_t = A_t W_2 - Forward through MLP
-    forward_pass_mlp(slm->mlp, slm->ssms[slm->num_layers - 1]->d_predictions);
-    
-    // P_t = softmax(L_t) - Apply softmax for probability distribution
+    // P_t = softmax(L_final_t) - Apply softmax for probability distribution
     int total_tokens = seq_len * batch_size;
     int blocks = (total_tokens + 255) / 256;
     softmax_kernel<<<blocks, 256>>>(
-        slm->d_softmax, slm->mlp->d_predictions, total_tokens, slm->vocab_size
+        slm->d_softmax, slm->d_final_output, total_tokens, slm->vocab_size
     );
 }
 
@@ -238,7 +257,7 @@ float calculate_loss_slm(SLM* slm, unsigned char* d_y) {
     // ∂L/∂L_t = P_t - 1_{y_t} - Compute cross-entropy gradient (softmax - one_hot) for backprop
     int blocks = (total_tokens + 255) / 256;
     cross_entropy_gradient_kernel<<<blocks, 256>>>(
-        slm->mlp->d_error, slm->d_softmax, d_y, total_tokens, slm->vocab_size
+        slm->mlps[slm->num_layers - 1]->d_error, slm->d_softmax, d_y, total_tokens, slm->vocab_size
     );
     
     // L = -log(P_{y_t}) - Calculate actual cross-entropy loss
@@ -258,8 +277,8 @@ float calculate_loss_slm(SLM* slm, unsigned char* d_y) {
 void zero_gradients_slm(SLM* slm) {
     for (int i = 0; i < slm->num_layers; i++) {
         zero_gradients_ssm(slm->ssms[i]);
+        zero_gradients_mlp(slm->mlps[i]);
     }
-    zero_gradients_mlp(slm->mlp);
     CHECK_CUDA(cudaMemset(slm->d_embeddings_grad, 0, 
                          slm->vocab_size * slm->embed_dim * sizeof(float)));
 }
@@ -269,80 +288,69 @@ void backward_pass_slm(SLM* slm, unsigned char* d_X) {
     const float alpha = 1.0f;
     const float beta = 0.0f;
     
-    // Backward through MLP: Compute gradients for MLP weights and hidden layer errors
-    // ∂L/∂W_2 = A_t^T (∂L/∂L_t) - MLP output weight gradients
-    // ∂L/∂A_t = (∂L/∂L_t)(W_2)^T - Gradients w.r.t. MLP hidden activations
-    // ∂L/∂Z_t = ∂L/∂A_t ⊙ [σ(Z_t) + Z_t σ(Z_t)(1-σ(Z_t))] - Swish derivative through hidden layer
-    // ∂L/∂W_1 = Y_last_t^T (∂L/∂Z_t) - MLP input weight gradients
-    backward_pass_mlp(slm->mlp, slm->ssms[slm->num_layers - 1]->d_predictions);
-    
-    // Compute gradients w.r.t. MLP input (which flows back to last SSM output):
-    // ∂L/∂Y_last = ∂L/∂Z * W1^T - Chain rule from MLP hidden errors to last SSM output
-    // This computes: [seq_len*batch_size, embed_dim] = [seq_len*batch_size, hidden_dim] * [hidden_dim, embed_dim]^T
-    CHECK_CUBLAS(cublasSgemm(slm->mlp->cublas_handle,
-                            CUBLAS_OP_N, CUBLAS_OP_N,
-                            slm->mlp->input_dim, slm->mlp->batch_size, slm->mlp->hidden_dim,
-                            &alpha, slm->mlp->d_W1, slm->mlp->input_dim,
-                            slm->mlp->d_error_hidden, slm->mlp->hidden_dim,
-                            &beta, slm->ssms[slm->num_layers - 1]->d_error, slm->mlp->input_dim));
-    
-    // Process SSM layers in reverse order (last → ... → 1 → 0)
+    // Process layers in reverse order (last → ... → 1 → 0)
     for (int layer = slm->num_layers - 1; layer >= 0; layer--) {
-        // Get the input that was used for this layer during forward pass
-        float* layer_input = (layer == 0) ? slm->d_embedded_input : slm->d_ssm_outputs[layer - 1];
+        // Backward through MLP for current layer
+        if (layer == slm->num_layers - 1) {
+            // For last layer, MLP gradients are already computed from loss
+            backward_pass_mlp(slm->mlps[layer], slm->ssms[layer]->d_predictions);
+        } else {
+            // For intermediate layers, compute MLP error from next layer's gradients
+            backward_pass_mlp(slm->mlps[layer], slm->ssms[layer]->d_predictions);
+        }
         
-        // Backward pass through current SSM layer:
-        // ∂L/∂C = Σ_t (∂L/∂Y_t)^T O_t - Output projection weight gradients
-        // ∂L/∂D = Σ_t (∂L/∂Y_t)^T X_t - Feedthrough weight gradients
-        // ∂L/∂O_t = (∂L/∂Y_t)C - Gradients w.r.t. activated states
-        // ∂L/∂H_t = ∂L/∂O_t ⊙ [σ(H_t) + H_t σ(H_t)(1-σ(H_t))] + (∂L/∂H_{t+1})A - Swish derivative + temporal flow
-        // ∂L/∂A = Σ_t (∂L/∂H_t)^T H_{t-1} - State transition weight gradients
-        // ∂L/∂B = Σ_t (∂L/∂H_t)^T X_t - Input-to-state weight gradients
+        // Compute gradients w.r.t. MLP input (SSM output)
+        CHECK_CUBLAS(cublasSgemm(slm->mlps[layer]->cublas_handle,
+                                CUBLAS_OP_N, CUBLAS_OP_N,
+                                slm->mlps[layer]->input_dim, slm->mlps[layer]->batch_size, slm->mlps[layer]->hidden_dim,
+                                &alpha, slm->mlps[layer]->d_W1, slm->mlps[layer]->input_dim,
+                                slm->mlps[layer]->d_error_hidden, slm->mlps[layer]->hidden_dim,
+                                &beta, slm->ssms[layer]->d_error, slm->mlps[layer]->input_dim));
+        
+        // Get the input that was used for this layer during forward pass
+        float* layer_input = (layer == 0) ? slm->d_embedded_input : slm->d_mlp_outputs[layer - 1];
+        
+        // Backward SSM of current layer
         backward_pass_ssm(slm->ssms[layer], layer_input);
         
         // Compute gradients for the input to this layer (except for first layer)
-        // This implements: ∂L/∂X_{layer} = ∂L/∂H_{layer+1} B_{layer+1}^T + ∂L/∂Y_{layer+1} D_{layer+1}^T
         if (layer > 0) {
             int total_elements = slm->ssms[layer]->seq_len * slm->ssms[layer]->batch_size;
             
             // Clear gradient buffer for input gradients
-            CHECK_CUDA(cudaMemset(slm->d_ssm_gradients[layer - 1], 0, 
+            CHECK_CUDA(cudaMemset(slm->d_mlp_gradients[layer - 1], 0, 
                                  total_elements * slm->ssms[layer]->input_dim * sizeof(float)));
             
-            // ∂L/∂X = B^T (∂L/∂H) - Gradient from state path (vectorized across all timesteps)
-            // Computes: [input_dim, seq_len*batch_size] = [input_dim, state_dim] * [state_dim, seq_len*batch_size]
+            // ∂L/∂X = B^T (∂L/∂H) - Gradient from state path
             CHECK_CUBLAS(cublasSgemm(slm->ssms[layer]->cublas_handle,
                                     CUBLAS_OP_N, CUBLAS_OP_N,
                                     slm->ssms[layer]->input_dim, total_elements, slm->ssms[layer]->state_dim,
                                     &alpha, slm->ssms[layer]->d_B, slm->ssms[layer]->input_dim,
                                     slm->ssms[layer]->d_state_error, slm->ssms[layer]->state_dim,
-                                    &beta, slm->d_ssm_gradients[layer - 1], slm->ssms[layer]->input_dim));
+                                    &beta, slm->d_mlp_gradients[layer - 1], slm->ssms[layer]->input_dim));
             
-            // ∂L/∂X += D^T (∂L/∂Y) - Gradient from output path (vectorized across all timesteps)
-            // Computes: [input_dim, seq_len*batch_size] += [input_dim, output_dim] * [output_dim, seq_len*batch_size]
+            // ∂L/∂X += D^T (∂L/∂Y) - Gradient from output path
             CHECK_CUBLAS(cublasSgemm(slm->ssms[layer]->cublas_handle,
                                     CUBLAS_OP_N, CUBLAS_OP_N,
                                     slm->ssms[layer]->input_dim, total_elements, slm->ssms[layer]->output_dim,
                                     &alpha, slm->ssms[layer]->d_D, slm->ssms[layer]->input_dim,
                                     slm->ssms[layer]->d_error, slm->ssms[layer]->output_dim,
-                                    &alpha, slm->d_ssm_gradients[layer - 1], slm->ssms[layer]->input_dim));
+                                    &alpha, slm->d_mlp_gradients[layer - 1], slm->ssms[layer]->input_dim));
             
-            // Copy computed gradients to previous layer's error buffer for next iteration
-            CHECK_CUDA(cudaMemcpy(slm->ssms[layer - 1]->d_error, slm->d_ssm_gradients[layer - 1], 
+            // Copy computed gradients to previous layer's MLP error buffer for next iteration
+            CHECK_CUDA(cudaMemcpy(slm->mlps[layer - 1]->d_error, slm->d_mlp_gradients[layer - 1], 
                                  total_elements * slm->ssms[layer]->input_dim * sizeof(float), cudaMemcpyDeviceToDevice));
         }
     }
     
-    // Compute input gradients from first SSM back to embeddings (vectorized across all timesteps)
-    // ∂L/∂E_t = ∂L/∂H1_t B1^T + ∂L/∂Y1_t D1^T - Chain rule from SSM1 back to character embeddings
+    // Compute input gradients from first SSM back to embeddings
     int total_elements = slm->ssms[0]->seq_len * slm->ssms[0]->batch_size;
     
     // Clear embedding gradient buffer
     CHECK_CUDA(cudaMemset(slm->d_input_gradients, 0, 
                          total_elements * slm->ssms[0]->input_dim * sizeof(float)));
     
-    // ∂L/∂E += B1^T (∂L/∂H1) - Gradient from state path (vectorized across all timesteps)
-    // Computes: [embed_dim, seq_len*batch_size] = [embed_dim, state_dim] * [state_dim, seq_len*batch_size]
+    // ∂L/∂E += B1^T (∂L/∂H1) - Gradient from state path
     CHECK_CUBLAS(cublasSgemm(slm->ssms[0]->cublas_handle,
                             CUBLAS_OP_N, CUBLAS_OP_N,
                             slm->ssms[0]->input_dim, total_elements, slm->ssms[0]->state_dim,
@@ -350,8 +358,7 @@ void backward_pass_slm(SLM* slm, unsigned char* d_X) {
                             slm->ssms[0]->d_state_error, slm->ssms[0]->state_dim,
                             &beta, slm->d_input_gradients, slm->ssms[0]->input_dim));
     
-    // ∂L/∂E += D1^T (∂L/∂Y1) - Gradient from output path (vectorized across all timesteps)
-    // Computes: [embed_dim, seq_len*batch_size] += [embed_dim, output_dim] * [output_dim, seq_len*batch_size]
+    // ∂L/∂E += D1^T (∂L/∂Y1) - Gradient from output path
     CHECK_CUBLAS(cublasSgemm(slm->ssms[0]->cublas_handle,
                             CUBLAS_OP_N, CUBLAS_OP_N,
                             slm->ssms[0]->input_dim, total_elements, slm->ssms[0]->output_dim,
@@ -359,8 +366,7 @@ void backward_pass_slm(SLM* slm, unsigned char* d_X) {
                             slm->ssms[0]->d_error, slm->ssms[0]->output_dim,
                             &alpha, slm->d_input_gradients, slm->ssms[0]->input_dim));
     
-    // Accumulate embedding gradients: ∂L/∂W_E[c] = Σ_{t,b: X_{t,b}=c} ∂L/∂E_t
-    // For each character c, sum gradients from all positions where that character appears
+    // Accumulate embedding gradients
     dim3 block(256);
     dim3 grid((slm->ssms[0]->batch_size + 255) / 256, slm->ssms[0]->seq_len);
     embedding_gradient_kernel<<<grid, block>>>(
@@ -369,15 +375,13 @@ void backward_pass_slm(SLM* slm, unsigned char* d_X) {
     );
 }
 
-// Update weights using AdamW: W = (1-λη)W - η·m̂/√v̂
+// Update weights using AdamW
 void update_weights_slm(SLM* slm, float learning_rate) {
-    // Update all SSM weights
+    // Update all SSM and MLP weights
     for (int i = 0; i < slm->num_layers; i++) {
         update_weights_ssm(slm->ssms[i], learning_rate);
+        update_weights_mlp(slm->mlps[i], learning_rate);
     }
-    
-    // Update MLP weights
-    update_weights_mlp(slm->mlp, learning_rate);
     
     // Update embeddings using AdamW
     int embed_size = slm->vocab_size * slm->embed_dim;
@@ -387,7 +391,6 @@ void update_weights_slm(SLM* slm, float learning_rate) {
     float beta2_t = powf(slm->ssms[0]->beta2, slm->ssms[0]->t);
     float alpha_t = learning_rate * sqrtf(1.0f - beta2_t) / (1.0f - beta1_t);
     
-    // m = β₁m + (1-β₁)g, v = β₂v + (1-β₂)g², W = (1-λη)W - η·m̂/√v̂
     adamw_update_kernel_ssm<<<blocks, 256>>>(
         slm->d_embeddings, slm->d_embeddings_grad,
         slm->d_embeddings_m, slm->d_embeddings_v,
@@ -412,13 +415,17 @@ void save_slm(SLM* slm, const char* filename) {
         save_ssm(slm->ssms[i], ssm_file);
     }
     
-    // Save MLP
-    char mlp_file[256];
-    strcpy(mlp_file, filename);
-    dot = strrchr(mlp_file, '.');
-    if (dot) *dot = '\0';
-    strcat(mlp_file, "_mlp.bin");
-    save_mlp(slm->mlp, mlp_file);
+    // Save MLPs
+    for (int i = 0; i < slm->num_layers; i++) {
+        char mlp_file[256];
+        strcpy(mlp_file, filename);
+        dot = strrchr(mlp_file, '.');
+        if (dot) *dot = '\0';
+        char suffix[16];
+        sprintf(suffix, "_mlp%d.bin", i);
+        strcat(mlp_file, suffix);
+        save_mlp(slm->mlps[i], mlp_file);
+    }
     
     // Save embeddings and metadata
     char embed_file[256];
@@ -524,8 +531,9 @@ SLM* load_slm(const char* filename, int custom_batch_size) {
     free(h_embeddings_m);
     free(h_embeddings_v);
     
-    // Load SSMs directly into the allocated structures
+    // Load SSMs and MLPs
     for (int i = 0; i < num_layers; i++) {
+        // Load SSM
         char ssm_file[256];
         strcpy(ssm_file, filename);
         dot = strrchr(ssm_file, '.');
@@ -541,7 +549,7 @@ SLM* load_slm(const char* filename, int custom_batch_size) {
             return NULL;
         }
         
-        // Read and verify dimensions
+        // Read and verify SSM dimensions
         int input_dim, state_dim_file, output_dim, seq_len_file, stored_batch_size_file;
         fread(&input_dim, sizeof(int), 1, ssm_f);
         fread(&state_dim_file, sizeof(int), 1, ssm_f);
@@ -555,7 +563,7 @@ SLM* load_slm(const char* filename, int custom_batch_size) {
         float* C = (float*)malloc(output_dim * state_dim * sizeof(float));
         float* D = (float*)malloc(output_dim * input_dim * sizeof(float));
         
-        // Read matrices
+        // Read SSM matrices
         fread(A, sizeof(float), state_dim * state_dim, ssm_f);
         fread(B, sizeof(float), state_dim * input_dim, ssm_f);
         fread(C, sizeof(float), output_dim * state_dim, ssm_f);
@@ -563,7 +571,7 @@ SLM* load_slm(const char* filename, int custom_batch_size) {
         
         fread(&slm->ssms[i]->t, sizeof(int), 1, ssm_f);
         
-        // Copy matrices to device
+        // Copy SSM matrices to device
         CHECK_CUDA(cudaMemcpy(slm->ssms[i]->d_A, A, state_dim * state_dim * sizeof(float), cudaMemcpyHostToDevice));
         CHECK_CUDA(cudaMemcpy(slm->ssms[i]->d_B, B, state_dim * input_dim * sizeof(float), cudaMemcpyHostToDevice));
         CHECK_CUDA(cudaMemcpy(slm->ssms[i]->d_C, C, output_dim * state_dim * sizeof(float), cudaMemcpyHostToDevice));
@@ -571,7 +579,7 @@ SLM* load_slm(const char* filename, int custom_batch_size) {
         
         free(A); free(B); free(C); free(D);
         
-        // Load Adam state
+        // Load SSM Adam state
         float* A_m = (float*)malloc(state_dim * state_dim * sizeof(float));
         float* A_v = (float*)malloc(state_dim * state_dim * sizeof(float));
         float* B_m = (float*)malloc(state_dim * input_dim * sizeof(float));
@@ -590,7 +598,7 @@ SLM* load_slm(const char* filename, int custom_batch_size) {
         fread(D_m, sizeof(float), output_dim * input_dim, ssm_f);
         fread(D_v, sizeof(float), output_dim * input_dim, ssm_f);
         
-        // Copy Adam state to device
+        // Copy SSM Adam state to device
         CHECK_CUDA(cudaMemcpy(slm->ssms[i]->d_A_m, A_m, state_dim * state_dim * sizeof(float), cudaMemcpyHostToDevice));
         CHECK_CUDA(cudaMemcpy(slm->ssms[i]->d_A_v, A_v, state_dim * state_dim * sizeof(float), cudaMemcpyHostToDevice));
         CHECK_CUDA(cudaMemcpy(slm->ssms[i]->d_B_m, B_m, state_dim * input_dim * sizeof(float), cudaMemcpyHostToDevice));
@@ -604,64 +612,68 @@ SLM* load_slm(const char* filename, int custom_batch_size) {
         free(C_m); free(C_v); free(D_m); free(D_v);
         
         fclose(ssm_f);
+        
+        // Load MLP
+        char mlp_file[256];
+        strcpy(mlp_file, filename);
+        dot = strrchr(mlp_file, '.');
+        if (dot) *dot = '\0';
+        sprintf(suffix, "_mlp%d.bin", i);
+        strcat(mlp_file, suffix);
+        
+        FILE* mlp_f = fopen(mlp_file, "rb");
+        if (mlp_f) {
+            // Read and verify MLP dimensions
+            int mlp_input_dim, mlp_hidden_dim, mlp_output_dim, mlp_stored_batch_size;
+            fread(&mlp_input_dim, sizeof(int), 1, mlp_f);
+            fread(&mlp_hidden_dim, sizeof(int), 1, mlp_f);
+            fread(&mlp_output_dim, sizeof(int), 1, mlp_f);
+            fread(&mlp_stored_batch_size, sizeof(int), 1, mlp_f);
+            
+            // Allocate temporary host memory for MLP weights
+            float* W1 = (float*)malloc(mlp_hidden_dim * mlp_input_dim * sizeof(float));
+            float* W2 = (float*)malloc(mlp_output_dim * mlp_hidden_dim * sizeof(float));
+            
+            fread(W1, sizeof(float), mlp_hidden_dim * mlp_input_dim, mlp_f);
+            fread(W2, sizeof(float), mlp_output_dim * mlp_hidden_dim, mlp_f);
+            fread(&slm->mlps[i]->t, sizeof(int), 1, mlp_f);
+            
+            // Copy MLP weights to device
+            CHECK_CUDA(cudaMemcpy(slm->mlps[i]->d_W1, W1, mlp_hidden_dim * mlp_input_dim * sizeof(float), cudaMemcpyHostToDevice));
+            CHECK_CUDA(cudaMemcpy(slm->mlps[i]->d_W2, W2, mlp_output_dim * mlp_hidden_dim * sizeof(float), cudaMemcpyHostToDevice));
+            
+            free(W1); free(W2);
+            
+            // Load MLP Adam state
+            float* W1_m = (float*)malloc(mlp_hidden_dim * mlp_input_dim * sizeof(float));
+            float* W1_v = (float*)malloc(mlp_hidden_dim * mlp_input_dim * sizeof(float));
+            float* W2_m = (float*)malloc(mlp_output_dim * mlp_hidden_dim * sizeof(float));
+            float* W2_v = (float*)malloc(mlp_output_dim * mlp_hidden_dim * sizeof(float));
+            
+            fread(W1_m, sizeof(float), mlp_hidden_dim * mlp_input_dim, mlp_f);
+            fread(W1_v, sizeof(float), mlp_hidden_dim * mlp_input_dim, mlp_f);
+            fread(W2_m, sizeof(float), mlp_output_dim * mlp_hidden_dim, mlp_f);
+            fread(W2_v, sizeof(float), mlp_output_dim * mlp_hidden_dim, mlp_f);
+            
+            // Copy MLP Adam state to device
+            CHECK_CUDA(cudaMemcpy(slm->mlps[i]->d_W1_m, W1_m, mlp_hidden_dim * mlp_input_dim * sizeof(float), cudaMemcpyHostToDevice));
+            CHECK_CUDA(cudaMemcpy(slm->mlps[i]->d_W1_v, W1_v, mlp_hidden_dim * mlp_input_dim * sizeof(float), cudaMemcpyHostToDevice));
+            CHECK_CUDA(cudaMemcpy(slm->mlps[i]->d_W2_m, W2_m, mlp_output_dim * mlp_hidden_dim * sizeof(float), cudaMemcpyHostToDevice));
+            CHECK_CUDA(cudaMemcpy(slm->mlps[i]->d_W2_v, W2_v, mlp_output_dim * mlp_hidden_dim * sizeof(float), cudaMemcpyHostToDevice));
+            
+            free(W1_m); free(W1_v); free(W2_m); free(W2_v);
+            
+            fclose(mlp_f);
+        } else {
+            printf("Warning: Could not load MLP file: %s\n", mlp_file);
+        }
     }
     
-    // Load MLP directly
-    char mlp_file[256];
-    strcpy(mlp_file, filename);
-    dot = strrchr(mlp_file, '.');
-    if (dot) *dot = '\0';
-    strcat(mlp_file, "_mlp.bin");
-    
-    FILE* mlp_f = fopen(mlp_file, "rb");
-    if (mlp_f) {
-        // Read and verify MLP dimensions
-        int input_dim, hidden_dim, output_dim, stored_batch_size_mlp;
-        fread(&input_dim, sizeof(int), 1, mlp_f);
-        fread(&hidden_dim, sizeof(int), 1, mlp_f);
-        fread(&output_dim, sizeof(int), 1, mlp_f);
-        fread(&stored_batch_size_mlp, sizeof(int), 1, mlp_f);
-        
-        // Allocate temporary host memory for MLP weights
-        float* W1 = (float*)malloc(hidden_dim * input_dim * sizeof(float));
-        float* W2 = (float*)malloc(output_dim * hidden_dim * sizeof(float));
-        
-        fread(W1, sizeof(float), hidden_dim * input_dim, mlp_f);
-        fread(W2, sizeof(float), output_dim * hidden_dim, mlp_f);
-        fread(&slm->mlp->t, sizeof(int), 1, mlp_f);
-        
-        // Copy MLP weights to device
-        CHECK_CUDA(cudaMemcpy(slm->mlp->d_W1, W1, hidden_dim * input_dim * sizeof(float), cudaMemcpyHostToDevice));
-        CHECK_CUDA(cudaMemcpy(slm->mlp->d_W2, W2, output_dim * hidden_dim * sizeof(float), cudaMemcpyHostToDevice));
-        
-        free(W1); free(W2);
-        
-        // Load MLP Adam state
-        float* W1_m = (float*)malloc(hidden_dim * input_dim * sizeof(float));
-        float* W1_v = (float*)malloc(hidden_dim * input_dim * sizeof(float));
-        float* W2_m = (float*)malloc(output_dim * hidden_dim * sizeof(float));
-        float* W2_v = (float*)malloc(output_dim * hidden_dim * sizeof(float));
-        
-        fread(W1_m, sizeof(float), hidden_dim * input_dim, mlp_f);
-        fread(W1_v, sizeof(float), hidden_dim * input_dim, mlp_f);
-        fread(W2_m, sizeof(float), output_dim * hidden_dim, mlp_f);
-        fread(W2_v, sizeof(float), output_dim * hidden_dim, mlp_f);
-        
-        // Copy MLP Adam state to device
-        CHECK_CUDA(cudaMemcpy(slm->mlp->d_W1_m, W1_m, hidden_dim * input_dim * sizeof(float), cudaMemcpyHostToDevice));
-        CHECK_CUDA(cudaMemcpy(slm->mlp->d_W1_v, W1_v, hidden_dim * input_dim * sizeof(float), cudaMemcpyHostToDevice));
-        CHECK_CUDA(cudaMemcpy(slm->mlp->d_W2_m, W2_m, output_dim * hidden_dim * sizeof(float), cudaMemcpyHostToDevice));
-        CHECK_CUDA(cudaMemcpy(slm->mlp->d_W2_v, W2_v, output_dim * hidden_dim * sizeof(float), cudaMemcpyHostToDevice));
-        
-        free(W1_m); free(W1_v); free(W2_m); free(W2_v);
-        fclose(mlp_f);
-    }
-    
-    printf("Model loaded from %s (with %d SSM layers)\n", filename, num_layers);
+    printf("Model loaded from %s (with %d SSM+MLP layers)\n", filename, num_layers);
     return slm;
 }
 
-// Text generation function
+// Text generation function (updated to handle multiple MLP layers)
 void generate_text_slm(SLM* slm, const char* seed_text, int generation_length, float temperature, float top_p) {
     int seed_len = strlen(seed_text);
     if (seed_len == 0) {
@@ -674,7 +686,7 @@ void generate_text_slm(SLM* slm, const char* seed_text, int generation_length, f
     SLM* gen_slm = init_slm(slm->embed_dim, slm->ssms[0]->state_dim, max_timesteps, slm->num_layers, 1);
     
     // Copy trained weights from main model to generation model
-    // Copy all SSM weights
+    // Copy all SSM and MLP weights
     for (int i = 0; i < slm->num_layers; i++) {
         CHECK_CUDA(cudaMemcpy(gen_slm->ssms[i]->d_A, slm->ssms[i]->d_A, 
                              slm->ssms[i]->state_dim * slm->ssms[i]->state_dim * sizeof(float), 
@@ -688,15 +700,15 @@ void generate_text_slm(SLM* slm, const char* seed_text, int generation_length, f
         CHECK_CUDA(cudaMemcpy(gen_slm->ssms[i]->d_D, slm->ssms[i]->d_D, 
                              slm->ssms[i]->output_dim * slm->ssms[i]->input_dim * sizeof(float), 
                              cudaMemcpyDeviceToDevice));
+        
+        // Copy MLP weights
+        CHECK_CUDA(cudaMemcpy(gen_slm->mlps[i]->d_W1, slm->mlps[i]->d_W1,
+                             slm->mlps[i]->hidden_dim * slm->mlps[i]->input_dim * sizeof(float),
+                             cudaMemcpyDeviceToDevice));
+        CHECK_CUDA(cudaMemcpy(gen_slm->mlps[i]->d_W2, slm->mlps[i]->d_W2,
+                             slm->mlps[i]->output_dim * slm->mlps[i]->hidden_dim * sizeof(float),
+                             cudaMemcpyDeviceToDevice));
     } 
-    
-    // Copy MLP weights
-    CHECK_CUDA(cudaMemcpy(gen_slm->mlp->d_W1, slm->mlp->d_W1,
-                         slm->mlp->hidden_dim * slm->mlp->input_dim * sizeof(float),
-                         cudaMemcpyDeviceToDevice));
-    CHECK_CUDA(cudaMemcpy(gen_slm->mlp->d_W2, slm->mlp->d_W2,
-                         slm->mlp->output_dim * slm->mlp->hidden_dim * sizeof(float),
-                         cudaMemcpyDeviceToDevice));
     
     // Copy embeddings
     CHECK_CUDA(cudaMemcpy(gen_slm->d_embeddings, slm->d_embeddings,
@@ -729,21 +741,22 @@ void generate_text_slm(SLM* slm, const char* seed_text, int generation_length, f
             gen_slm->d_embedded_input, gen_slm->d_embeddings, d_input, 1, gen_slm->embed_dim
         );
         
-        // Forward through all SSM layers using loop
+        // Forward through all SSM+MLP layers
         float* current_input = gen_slm->d_embedded_input;
         for (int layer = 0; layer < gen_slm->num_layers; layer++) {
-            // H_t = X_t B^T + H_{t-1} A^T
-            // O_t = H_t σ(H_t)
-            // Y_t = O_t C^T + X_t D^T
+            // Forward through SSM
             forward_pass_ssm(gen_slm->ssms[layer], current_input, i);
             
-            // For all but the last layer, copy output to intermediate buffer for next layer
+            // Forward through MLP
+            forward_pass_mlp(gen_slm->mlps[layer], gen_slm->ssms[layer]->d_predictions + i * 1 * gen_slm->embed_dim);
+            
+            // For all but the last layer, copy MLP output for next layer
             if (layer < gen_slm->num_layers - 1) {
-                float* d_output_t = gen_slm->ssms[layer]->d_predictions + i * 1 * gen_slm->ssms[layer]->output_dim;
-                float* d_ssm_out_t = gen_slm->d_ssm_outputs[layer] + i * 1 * gen_slm->embed_dim;
-                CHECK_CUDA(cudaMemcpy(d_ssm_out_t, d_output_t, 
+                float* d_mlp_out_t = gen_slm->mlps[layer]->d_predictions;
+                float* d_layer_out_t = gen_slm->d_mlp_outputs[layer] + i * 1 * gen_slm->embed_dim;
+                CHECK_CUDA(cudaMemcpy(d_layer_out_t, d_mlp_out_t, 
                                      gen_slm->embed_dim * sizeof(float), cudaMemcpyDeviceToDevice));
-                current_input = d_ssm_out_t;
+                current_input = d_layer_out_t;
             }
         }
     }
@@ -764,63 +777,55 @@ void generate_text_slm(SLM* slm, const char* seed_text, int generation_length, f
             gen_slm->d_embedded_input, gen_slm->d_embeddings, d_input, 1, gen_slm->embed_dim
         );
         
-        // Forward through all SSM layers using loop
+        // Forward through all SSM+MLP layers
         int timestep = seed_len + i;
         float* current_input = gen_slm->d_embedded_input;
         for (int layer = 0; layer < gen_slm->num_layers; layer++) {
-            // H_t = X_t B^T + H_{t-1} A^T
-            // O_t = H_t σ(H_t)
-            // Y_t = O_t C^T + X_t D^T
+            // Forward through SSM
             forward_pass_ssm(gen_slm->ssms[layer], current_input, timestep);
             
-            // For all but the last layer, copy output to intermediate buffer for next layer
+            // Forward through MLP
+            forward_pass_mlp(gen_slm->mlps[layer], gen_slm->ssms[layer]->d_predictions + timestep * 1 * gen_slm->embed_dim);
+            
+            // For all but the last layer, copy MLP output for next layer
             if (layer < gen_slm->num_layers - 1) {
-                float* d_output_t = gen_slm->ssms[layer]->d_predictions + timestep * 1 * gen_slm->ssms[layer]->output_dim;
-                float* d_ssm_out_t = gen_slm->d_ssm_outputs[layer] + timestep * 1 * gen_slm->embed_dim;
-                CHECK_CUDA(cudaMemcpy(d_ssm_out_t, d_output_t, 
+                float* d_mlp_out_t = gen_slm->mlps[layer]->d_predictions;
+                float* d_layer_out_t = gen_slm->d_mlp_outputs[layer] + timestep * 1 * gen_slm->embed_dim;
+                CHECK_CUDA(cudaMemcpy(d_layer_out_t, d_mlp_out_t, 
                                      gen_slm->embed_dim * sizeof(float), cudaMemcpyDeviceToDevice));
-                current_input = d_ssm_out_t;
+                current_input = d_layer_out_t;
             }
         }
         
-        // Get the last SSM output for this timestep
-        float* d_y_last_t = gen_slm->ssms[gen_slm->num_layers - 1]->d_predictions + timestep * 1 * gen_slm->ssms[gen_slm->num_layers - 1]->output_dim;
-        
-        // Z_t = Y_last_t W_1
-        // A_t = Z_t σ(Z_t)
-        // L_t = A_t W_2 - Forward through MLP
-        forward_pass_mlp(gen_slm->mlp, d_y_last_t);
+        // Get the final MLP output (vocab predictions)
+        float* d_final_logits = gen_slm->mlps[gen_slm->num_layers - 1]->d_predictions;
         
         // P_t = softmax(L_t) - Apply softmax to get probabilities
         softmax_kernel<<<1, 256>>>(
-            gen_slm->d_softmax, gen_slm->mlp->d_predictions, 1, gen_slm->vocab_size
+            gen_slm->d_softmax, d_final_logits, 1, gen_slm->vocab_size
         );
         
         // Copy probabilities to host
         CHECK_CUDA(cudaMemcpy(h_probs, gen_slm->d_softmax, gen_slm->vocab_size * sizeof(float), cudaMemcpyDeviceToHost));
         
-        // P_τ(c) = exp(L_c / τ) / Σ_{c'} exp(L_{c'} / τ) - Apply temperature scaling
+        // Apply temperature scaling and nucleus sampling (same as before)
         if (temperature != 1.0f) {
             float sum = 0.0f;
             for (int j = 0; j < gen_slm->vocab_size; j++) {
                 h_probs[j] = expf(logf(h_probs[j] + 1e-15f) / temperature);
                 sum += h_probs[j];
             }
-            // Renormalize
             for (int j = 0; j < gen_slm->vocab_size; j++) {
                 h_probs[j] /= sum;
             }
         }
         
-        // Apply nucleus sampling if top_p < 1.0
         if (top_p < 1.0f && top_p > 0.0f) {
-            // Create array of indices for sorting
             int* indices = (int*)malloc(gen_slm->vocab_size * sizeof(int));
             for (int j = 0; j < gen_slm->vocab_size; j++) {
                 indices[j] = j;
             }
             
-            // Sort indices by probability (descending order)
             for (int i = 0; i < gen_slm->vocab_size - 1; i++) {
                 for (int j = i + 1; j < gen_slm->vocab_size; j++) {
                     if (h_probs[indices[i]] < h_probs[indices[j]]) {
@@ -831,7 +836,6 @@ void generate_text_slm(SLM* slm, const char* seed_text, int generation_length, f
                 }
             }
             
-            // Find the cutoff point where cumulative probability >= top_p
             float cumulative_prob = 0.0f;
             int cutoff = 0;
             for (int j = 0; j < gen_slm->vocab_size; j++) {
@@ -842,12 +846,10 @@ void generate_text_slm(SLM* slm, const char* seed_text, int generation_length, f
                 }
             }
             
-            // Zero out probabilities for tokens not in the nucleus set
             for (int j = cutoff; j < gen_slm->vocab_size; j++) {
                 h_probs[indices[j]] = 0.0f;
             }
             
-            // Renormalize the remaining probabilities
             float sum = 0.0f;
             for (int j = 0; j < gen_slm->vocab_size; j++) {
                 sum += h_probs[j];
