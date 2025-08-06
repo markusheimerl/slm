@@ -673,7 +673,7 @@ SLM* load_slm(const char* filename, int custom_batch_size) {
     return slm;
 }
 
-// Text generation function (updated to handle multiple MLP layers)
+// Text generation function
 void generate_text_slm(SLM* slm, const char* seed_text, int generation_length, float temperature, float top_p) {
     int seed_len = strlen(seed_text);
     if (seed_len == 0) {
@@ -701,12 +701,15 @@ void generate_text_slm(SLM* slm, const char* seed_text, int generation_length, f
                              slm->ssms[i]->output_dim * slm->ssms[i]->input_dim * sizeof(float), 
                              cudaMemcpyDeviceToDevice));
         
-        // Copy MLP weights
+        // Copy MLP weights (including W3 learned residual connection)
         CHECK_CUDA(cudaMemcpy(gen_slm->mlps[i]->d_W1, slm->mlps[i]->d_W1,
                              slm->mlps[i]->hidden_dim * slm->mlps[i]->input_dim * sizeof(float),
                              cudaMemcpyDeviceToDevice));
         CHECK_CUDA(cudaMemcpy(gen_slm->mlps[i]->d_W2, slm->mlps[i]->d_W2,
                              slm->mlps[i]->output_dim * slm->mlps[i]->hidden_dim * sizeof(float),
+                             cudaMemcpyDeviceToDevice));
+        CHECK_CUDA(cudaMemcpy(gen_slm->mlps[i]->d_W3, slm->mlps[i]->d_W3,
+                             slm->mlps[i]->output_dim * slm->mlps[i]->input_dim * sizeof(float),
                              cudaMemcpyDeviceToDevice));
     } 
     
@@ -741,7 +744,7 @@ void generate_text_slm(SLM* slm, const char* seed_text, int generation_length, f
             gen_slm->d_embedded_input, gen_slm->d_embeddings, d_input, 1, gen_slm->embed_dim
         );
         
-        // Forward through all SSM+MLP layers
+        // Forward through all layers
         float* current_input = gen_slm->d_embedded_input;
         for (int layer = 0; layer < gen_slm->num_layers; layer++) {
             // Forward through SSM
@@ -808,7 +811,7 @@ void generate_text_slm(SLM* slm, const char* seed_text, int generation_length, f
         // Copy probabilities to host
         CHECK_CUDA(cudaMemcpy(h_probs, gen_slm->d_softmax, gen_slm->vocab_size * sizeof(float), cudaMemcpyDeviceToHost));
         
-        // Apply temperature scaling and nucleus sampling (same as before)
+        // Apply temperature scaling and nucleus sampling
         if (temperature != 1.0f) {
             float sum = 0.0f;
             for (int j = 0; j < gen_slm->vocab_size; j++) {
