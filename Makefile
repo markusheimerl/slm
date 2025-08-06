@@ -38,5 +38,5 @@ cont: train.out
 
 clean:
 	rm -f *.out *.o *.csv *.bin
-	$(MAKE) -C ssm/gpu clean
-	$(MAKE) -C mlp/gpu clean
+	$(MAKE) -C ssm clean
+	$(MAKE) -C mlp clean
