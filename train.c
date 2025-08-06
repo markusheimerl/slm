@@ -31,6 +31,7 @@ size_t calculate_model_parameters(SLM* slm) {
         MLP* mlp = slm->mlps[i];
         total_params += mlp->hidden_dim * mlp->input_dim;
         total_params += mlp->output_dim * mlp->hidden_dim;
+        total_params += mlp->output_dim * mlp->input_dim;
     }
 
     return total_params;
