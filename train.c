@@ -54,7 +54,7 @@ int main(int argc, char* argv[]) {
     const int batch_size = 64;
 
     // Training parameters
-    const int num_batches = 200000;
+    const int num_batches = 1000000;
     const float lr_init = 0.0001f;
     const float lr_min = 0.00001f;
     const int acc_steps = 1;
