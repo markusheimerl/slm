@@ -1,6 +1,3 @@
 [submodule "ssm"]
 	path = ssm
 	url = https://github.com/markusheimerl/ssm
-[submodule "mlp"]
-	path = mlp
-	url = https://github.com/markusheimerl/mlp

@@ -481,7 +481,7 @@ SLM* load_slm(const char* filename, int custom_batch_size) {
     free(h_embeddings_m);
     free(h_embeddings_v);
     
-    // Load SSMs and MLPs
+    // Load SSMs
     for (int i = 0; i < num_layers; i++) {
         // Load SSM
         char ssm_file[256];
