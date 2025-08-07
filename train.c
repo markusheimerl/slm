@@ -27,6 +27,11 @@ size_t calculate_model_parameters(SLM* slm) {
         total_params += ssm->state_dim * ssm->input_dim;
         total_params += ssm->output_dim * ssm->state_dim;
         total_params += ssm->output_dim * ssm->input_dim;
+
+        MLP* mlp = slm->mlps[i];
+        total_params += mlp->hidden_dim * mlp->input_dim;
+        total_params += mlp->output_dim * mlp->hidden_dim;
+        total_params += mlp->output_dim * mlp->input_dim;
     }
 
     return total_params;
