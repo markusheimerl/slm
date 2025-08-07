@@ -27,11 +27,6 @@ size_t calculate_model_parameters(SLM* slm) {
         total_params += ssm->state_dim * ssm->input_dim;
         total_params += ssm->output_dim * ssm->state_dim;
         total_params += ssm->output_dim * ssm->input_dim;
-
-        MLP* mlp = slm->mlps[i];
-        total_params += mlp->hidden_dim * mlp->input_dim;
-        total_params += mlp->output_dim * mlp->hidden_dim;
-        total_params += mlp->output_dim * mlp->input_dim;
     }
 
     return total_params;
@@ -47,11 +42,11 @@ int main(int argc, char* argv[]) {
     }
     
     // Model parameters
-    const int embed_dim = 1024;
-    const int state_dim = 512;
+    const int embed_dim = 512;
+    const int state_dim = 256;
     const int seq_len = 1024;
-    const int num_layers = 4;
-    const int batch_size = 64;
+    const int num_layers = 8;
+    const int batch_size = 32;
 
     // Training parameters
     const int num_batches = 1000000;
