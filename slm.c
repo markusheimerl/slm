@@ -180,7 +180,7 @@ void free_slm(SLM* slm) {
     }
 }
 
-// Forward pass
+// Forward pass with ZERO extra arrays and NO loops - pure cuBLAS normalization
 void forward_pass_slm(SLM* slm, unsigned char* d_X) {
     int seq_len = slm->ssms[0]->seq_len;
     int batch_size = slm->ssms[0]->batch_size;
@@ -196,15 +196,27 @@ void forward_pass_slm(SLM* slm, unsigned char* d_X) {
     float* current_input = slm->d_embedded_input;
     
     for (int layer = 0; layer < slm->num_layers; layer++) {
+        int total_elements = seq_len * batch_size * slm->embed_dim;
+        
+        // L2 normalize the entire tensor to unit length using pure cuBLAS
+        float norm;
+        CHECK_CUBLAS(cublasSnrm2(slm->ssms[0]->cublas_handle,
+                                total_elements,
+                                current_input, 1, &norm));
+        
+        // Scale to unit norm (in-place normalization)
+        const float inv_norm = sqrtf((float)total_elements) / (norm + 1e-8f);
+        CHECK_CUBLAS(cublasSscal(slm->ssms[0]->cublas_handle,
+                                total_elements,
+                                &inv_norm,
+                                current_input, 1));
+        
         // Reset SSM state for this layer
         reset_state_ssm(slm->ssms[layer]);
         
         // Forward SSM through timesteps for current layer
         for (int t = 0; t < seq_len; t++) {
             float* input_t = current_input + t * batch_size * slm->embed_dim;
-            // H_t = X_t B^T + H_{t-1} A^T
-            // O_t = H_t σ(H_t)  
-            // Y_t = O_t C^T + X_t D^T
             forward_pass_ssm(slm->ssms[layer], input_t, t);
         }
         
@@ -264,7 +276,7 @@ void zero_gradients_slm(SLM* slm) {
                          slm->vocab_size * slm->embed_dim * sizeof(float)));
 }
 
-// Backward pass
+// Backward pass with ZERO extra arrays and NO loops - pure cuBLAS normalization
 void backward_pass_slm(SLM* slm, unsigned char* d_X) {
     const float alpha = 1.0f;
     const float beta = 0.0f;
@@ -309,6 +321,44 @@ void backward_pass_slm(SLM* slm, unsigned char* d_X) {
                                     &alpha, slm->ssms[layer]->d_D, slm->ssms[layer]->input_dim,
                                     slm->ssms[layer]->d_error, slm->ssms[layer]->output_dim,
                                     &alpha, slm->d_ssm_gradients[layer - 1], slm->ssms[layer]->input_dim));
+            
+            // **PURE cuBLAS NORMALIZATION BACKWARD PASS**
+            // Get the forward pass normalized input for this layer
+            float* normalized_input = (layer == 1) ? slm->d_embedded_input : slm->d_ssm_outputs[layer - 2];
+            float* input_gradients = slm->d_ssm_gradients[layer - 1];
+            int norm_elements = total_elements * slm->ssms[layer]->input_dim;
+            
+            // Step 1: Compute <g, x_norm> using cuBLAS dot product  
+            float grad_input_dot;
+            CHECK_CUBLAS(cublasSdot(slm->ssms[layer]->cublas_handle,
+                                   norm_elements,
+                                   input_gradients, 1,
+                                   normalized_input, 1,
+                                   &grad_input_dot));
+            
+            // Step 2: Scale normalized input by <g, x_norm> and subtract from gradients using cuBLAS
+            const float scale_factor = -grad_input_dot / norm_elements;
+            CHECK_CUBLAS(cublasSaxpy(slm->ssms[layer]->cublas_handle,
+                                    norm_elements,
+                                    &scale_factor,
+                                    normalized_input, 1,
+                                    input_gradients, 1));
+            
+            // Step 3: Scale entire gradient by 1/||x|| using cuBLAS
+            // We need the original input norm - recompute from normalized version
+            float input_norm;
+            CHECK_CUBLAS(cublasSnrm2(slm->ssms[layer]->cublas_handle,
+                                    norm_elements,
+                                    normalized_input, 1, &input_norm));
+            
+            // The original norm was sqrt(norm_elements) / current_norm
+            const float original_scale = sqrtf((float)norm_elements) / (input_norm + 1e-8f);
+            const float inv_original_norm = 1.0f / original_scale;
+            
+            CHECK_CUBLAS(cublasSscal(slm->ssms[layer]->cublas_handle,
+                                    norm_elements,
+                                    &inv_original_norm,
+                                    input_gradients, 1));
         }
     }
     
@@ -334,6 +384,41 @@ void backward_pass_slm(SLM* slm, unsigned char* d_X) {
                             &alpha, slm->ssms[0]->d_D, slm->ssms[0]->input_dim,
                             slm->ssms[0]->d_error, slm->ssms[0]->output_dim,
                             &alpha, slm->d_input_gradients, slm->ssms[0]->input_dim));
+    
+    // **PURE cuBLAS NORMALIZATION BACKWARD PASS for embeddings**
+    float* normalized_embeddings = slm->d_embedded_input;  // This was normalized in forward pass
+    float* embedding_gradients = slm->d_input_gradients;
+    int embed_elements = total_elements * slm->embed_dim;
+    
+    // Step 1: Compute <g, x_norm> using cuBLAS dot product
+    float embed_grad_input_dot;
+    CHECK_CUBLAS(cublasSdot(slm->ssms[0]->cublas_handle,
+                           embed_elements,
+                           embedding_gradients, 1,
+                           normalized_embeddings, 1,
+                           &embed_grad_input_dot));
+    
+    // Step 2: Scale normalized embeddings by <g, x_norm> and subtract from gradients
+    const float embed_scale_factor = -embed_grad_input_dot / embed_elements;
+    CHECK_CUBLAS(cublasSaxpy(slm->ssms[0]->cublas_handle,
+                            embed_elements,
+                            &embed_scale_factor,
+                            normalized_embeddings, 1,
+                            embedding_gradients, 1));
+    
+    // Step 3: Scale entire gradient by 1/||x_original|| 
+    float embed_norm;
+    CHECK_CUBLAS(cublasSnrm2(slm->ssms[0]->cublas_handle,
+                            embed_elements,
+                            normalized_embeddings, 1, &embed_norm));
+    
+    const float embed_original_scale = sqrtf((float)embed_elements) / (embed_norm + 1e-8f);
+    const float embed_inv_original_norm = 1.0f / embed_original_scale;
+    
+    CHECK_CUBLAS(cublasSscal(slm->ssms[0]->cublas_handle,
+                            embed_elements,
+                            &embed_inv_original_norm,
+                            embedding_gradients, 1));
     
     // Accumulate embedding gradients
     dim3 block(256);
@@ -633,6 +718,19 @@ void generate_text_slm(SLM* slm, const char* seed_text, int generation_length, f
             gen_slm->d_embedded_input, gen_slm->d_embeddings, d_input, 1, gen_slm->embed_dim
         );
         
+        // Apply normalization to embeddings for consistency with training
+        int embed_elements = 1 * gen_slm->embed_dim;
+        float norm;
+        CHECK_CUBLAS(cublasSnrm2(gen_slm->ssms[0]->cublas_handle,
+                                embed_elements,
+                                gen_slm->d_embedded_input, 1, &norm));
+        
+        const float inv_norm = sqrtf((float)embed_elements) / (norm + 1e-8f);
+        CHECK_CUBLAS(cublasSscal(gen_slm->ssms[0]->cublas_handle,
+                                embed_elements,
+                                &inv_norm,
+                                gen_slm->d_embedded_input, 1));
+        
         // Forward through all layers
         float* current_input = gen_slm->d_embedded_input;
         for (int layer = 0; layer < gen_slm->num_layers; layer++) {
@@ -645,6 +743,19 @@ void generate_text_slm(SLM* slm, const char* seed_text, int generation_length, f
                 float* d_layer_out_t = gen_slm->d_ssm_outputs[layer] + i * 1 * gen_slm->embed_dim;
                 CHECK_CUDA(cudaMemcpy(d_layer_out_t, d_ssm_out_t, 
                                      gen_slm->embed_dim * sizeof(float), cudaMemcpyDeviceToDevice));
+                
+                // Apply normalization between layers for consistency
+                float layer_norm;
+                CHECK_CUBLAS(cublasSnrm2(gen_slm->ssms[0]->cublas_handle,
+                                        gen_slm->embed_dim,
+                                        d_layer_out_t, 1, &layer_norm));
+                
+                const float layer_inv_norm = sqrtf((float)gen_slm->embed_dim) / (layer_norm + 1e-8f);
+                CHECK_CUBLAS(cublasSscal(gen_slm->ssms[0]->cublas_handle,
+                                        gen_slm->embed_dim,
+                                        &layer_inv_norm,
+                                        d_layer_out_t, 1));
+                
                 current_input = d_layer_out_t;
             }
         }
@@ -666,6 +777,19 @@ void generate_text_slm(SLM* slm, const char* seed_text, int generation_length, f
             gen_slm->d_embedded_input, gen_slm->d_embeddings, d_input, 1, gen_slm->embed_dim
         );
         
+        // Apply normalization to embeddings for consistency with training
+        int embed_elements = 1 * gen_slm->embed_dim;
+        float norm;
+        CHECK_CUBLAS(cublasSnrm2(gen_slm->ssms[0]->cublas_handle,
+                                embed_elements,
+                                gen_slm->d_embedded_input, 1, &norm));
+        
+        const float inv_norm = sqrtf((float)embed_elements) / (norm + 1e-8f);
+        CHECK_CUBLAS(cublasSscal(gen_slm->ssms[0]->cublas_handle,
+                                embed_elements,
+                                &inv_norm,
+                                gen_slm->d_embedded_input, 1));
+        
         // Forward through all SSM layers
         int timestep = seed_len + i;
         float* current_input = gen_slm->d_embedded_input;
@@ -679,6 +803,19 @@ void generate_text_slm(SLM* slm, const char* seed_text, int generation_length, f
                 float* d_layer_out_t = gen_slm->d_ssm_outputs[layer] + timestep * 1 * gen_slm->embed_dim;
                 CHECK_CUDA(cudaMemcpy(d_layer_out_t, d_ssm_out_t, 
                                      gen_slm->embed_dim * sizeof(float), cudaMemcpyDeviceToDevice));
+                
+                // Apply normalization between layers for consistency
+                float layer_norm;
+                CHECK_CUBLAS(cublasSnrm2(gen_slm->ssms[0]->cublas_handle,
+                                        gen_slm->embed_dim,
+                                        d_layer_out_t, 1, &layer_norm));
+                
+                const float layer_inv_norm = sqrtf((float)gen_slm->embed_dim) / (layer_norm + 1e-8f);
+                CHECK_CUBLAS(cublasSscal(gen_slm->ssms[0]->cublas_handle,
+                                        gen_slm->embed_dim,
+                                        &layer_inv_norm,
+                                        d_layer_out_t, 1));
+                
                 current_input = d_layer_out_t;
             }
         }
