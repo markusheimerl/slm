@@ -46,7 +46,7 @@ int main(int argc, char* argv[]) {
     const int state_dim = embed_dim * 4;
     const int seq_len = 1024;
     const int num_layers = 16;
-    const int batch_size = 64;
+    const int batch_size = 32;
 
     // Training parameters
     const int num_batches = 1000000;
