@@ -198,17 +198,20 @@ void forward_pass_slm(SLM* slm, unsigned char* d_X) {
     for (int layer = 0; layer < slm->num_layers; layer++) {
         int total_elements = seq_len * batch_size * slm->embed_dim;
         
-        // L2 normalize the entire tensor to unit length using pure cuBLAS
-        float norm;
-        CHECK_CUBLAS(cublasSnrm2(slm->ssms[0]->cublas_handle,
-                                total_elements,
-                                current_input, 1, &norm));
+        // **GENTLE** normalization - normalize to RMS = 1.0 instead of L2 = 1.0
+        float norm_squared;
+        CHECK_CUBLAS(cublasSdot(slm->ssms[0]->cublas_handle,
+                               total_elements,
+                               current_input, 1,
+                               current_input, 1,
+                               &norm_squared));
         
-        // Scale to unit norm (in-place normalization)
-        const float inv_norm = sqrtf((float)total_elements) / (norm + 1e-8f);
+        // RMS normalization: scale by 1/sqrt(mean(x²)) instead of 1/||x||
+        const float rms = sqrtf(norm_squared / total_elements);
+        const float scale_factor = 1.0f / (rms + 1e-6f);  // Gentler epsilon
         CHECK_CUBLAS(cublasSscal(slm->ssms[0]->cublas_handle,
                                 total_elements,
-                                &inv_norm,
+                                &scale_factor,
                                 current_input, 1));
         
         // Reset SSM state for this layer
@@ -276,7 +279,7 @@ void zero_gradients_slm(SLM* slm) {
                          slm->vocab_size * slm->embed_dim * sizeof(float)));
 }
 
-// Backward pass with ZERO extra arrays and NO loops - pure cuBLAS normalization
+// Backward pass with gentle RMS normalization gradients
 void backward_pass_slm(SLM* slm, unsigned char* d_X) {
     const float alpha = 1.0f;
     const float beta = 0.0f;
@@ -286,23 +289,21 @@ void backward_pass_slm(SLM* slm, unsigned char* d_X) {
         // Get the input that was used for this layer during forward pass
         float* layer_input = (layer == 0) ? slm->d_embedded_input : slm->d_ssm_outputs[layer - 1];
         
-        // For non-last layers, we need to set the error from the next layer
+        // For non-last layers, copy gradients from next layer
         if (layer < slm->num_layers - 1) {
-            // Copy gradients from next layer to current layer's error buffer
             int total_elements = slm->ssms[layer]->seq_len * slm->ssms[layer]->batch_size;
             CHECK_CUDA(cudaMemcpy(slm->ssms[layer]->d_error, slm->d_ssm_gradients[layer], 
                                  total_elements * slm->ssms[layer]->output_dim * sizeof(float), cudaMemcpyDeviceToDevice));
         }
-        // Note: For the last layer, the error is already set in calculate_loss_slm()
         
         // Backward SSM of current layer
         backward_pass_ssm(slm->ssms[layer], layer_input);
         
-        // Compute gradients for the input to this layer (except for first layer)
+        // Compute gradients for input to this layer (except first layer)
         if (layer > 0) {
             int total_elements = slm->ssms[layer]->seq_len * slm->ssms[layer]->batch_size;
             
-            // Clear gradient buffer for input gradients
+            // Clear gradient buffer
             CHECK_CUDA(cudaMemset(slm->d_ssm_gradients[layer - 1], 0, 
                                  total_elements * slm->ssms[layer]->input_dim * sizeof(float)));
             
@@ -322,13 +323,12 @@ void backward_pass_slm(SLM* slm, unsigned char* d_X) {
                                     slm->ssms[layer]->d_error, slm->ssms[layer]->output_dim,
                                     &alpha, slm->d_ssm_gradients[layer - 1], slm->ssms[layer]->input_dim));
             
-            // **PURE cuBLAS NORMALIZATION BACKWARD PASS**
-            // Get the forward pass normalized input for this layer
+            // **GENTLE RMS NORMALIZATION BACKWARD PASS**
             float* normalized_input = (layer == 1) ? slm->d_embedded_input : slm->d_ssm_outputs[layer - 2];
             float* input_gradients = slm->d_ssm_gradients[layer - 1];
             int norm_elements = total_elements * slm->ssms[layer]->input_dim;
             
-            // Step 1: Compute <g, x_norm> using cuBLAS dot product  
+            // Step 1: Compute mean(g * x) for RMS gradient
             float grad_input_dot;
             CHECK_CUBLAS(cublasSdot(slm->ssms[layer]->cublas_handle,
                                    norm_elements,
@@ -336,28 +336,28 @@ void backward_pass_slm(SLM* slm, unsigned char* d_X) {
                                    normalized_input, 1,
                                    &grad_input_dot));
             
-            // Step 2: Scale normalized input by <g, x_norm> and subtract from gradients using cuBLAS
-            const float scale_factor = -grad_input_dot / norm_elements;
+            // Step 2: RMS backward: g' = g - mean(g*x)*x for gentle normalization  
+            const float mean_grad_input = grad_input_dot / norm_elements;
+            const float neg_mean = -mean_grad_input;
             CHECK_CUBLAS(cublasSaxpy(slm->ssms[layer]->cublas_handle,
                                     norm_elements,
-                                    &scale_factor,
+                                    &neg_mean,
                                     normalized_input, 1,
                                     input_gradients, 1));
             
-            // Step 3: Scale entire gradient by 1/||x|| using cuBLAS
-            // We need the original input norm - recompute from normalized version
-            float input_norm;
-            CHECK_CUBLAS(cublasSnrm2(slm->ssms[layer]->cublas_handle,
-                                    norm_elements,
-                                    normalized_input, 1, &input_norm));
+            // Step 3: Scale by RMS factor (much gentler than L2)
+            float input_norm_squared;
+            CHECK_CUBLAS(cublasSdot(slm->ssms[layer]->cublas_handle,
+                                   norm_elements,
+                                   normalized_input, 1,
+                                   normalized_input, 1,
+                                   &input_norm_squared));
             
-            // The original norm was sqrt(norm_elements) / current_norm
-            const float original_scale = sqrtf((float)norm_elements) / (input_norm + 1e-8f);
-            const float inv_original_norm = 1.0f / original_scale;
-            
+            const float rms = sqrtf(input_norm_squared / norm_elements);
+            const float rms_scale = 1.0f / (rms + 1e-6f);
             CHECK_CUBLAS(cublasSscal(slm->ssms[layer]->cublas_handle,
                                     norm_elements,
-                                    &inv_original_norm,
+                                    &rms_scale,
                                     input_gradients, 1));
         }
     }
@@ -385,12 +385,12 @@ void backward_pass_slm(SLM* slm, unsigned char* d_X) {
                             slm->ssms[0]->d_error, slm->ssms[0]->output_dim,
                             &alpha, slm->d_input_gradients, slm->ssms[0]->input_dim));
     
-    // **PURE cuBLAS NORMALIZATION BACKWARD PASS for embeddings**
-    float* normalized_embeddings = slm->d_embedded_input;  // This was normalized in forward pass
+    // **GENTLE RMS NORMALIZATION BACKWARD PASS for embeddings**
+    float* normalized_embeddings = slm->d_embedded_input;
     float* embedding_gradients = slm->d_input_gradients;
     int embed_elements = total_elements * slm->embed_dim;
     
-    // Step 1: Compute <g, x_norm> using cuBLAS dot product
+    // Step 1: Compute mean(g * x) 
     float embed_grad_input_dot;
     CHECK_CUBLAS(cublasSdot(slm->ssms[0]->cublas_handle,
                            embed_elements,
@@ -398,26 +398,28 @@ void backward_pass_slm(SLM* slm, unsigned char* d_X) {
                            normalized_embeddings, 1,
                            &embed_grad_input_dot));
     
-    // Step 2: Scale normalized embeddings by <g, x_norm> and subtract from gradients
-    const float embed_scale_factor = -embed_grad_input_dot / embed_elements;
+    // Step 2: RMS backward: g' = g - mean(g*x)*x
+    const float embed_mean_grad_input = embed_grad_input_dot / embed_elements;
+    const float embed_neg_mean = -embed_mean_grad_input;
     CHECK_CUBLAS(cublasSaxpy(slm->ssms[0]->cublas_handle,
                             embed_elements,
-                            &embed_scale_factor,
+                            &embed_neg_mean,
                             normalized_embeddings, 1,
                             embedding_gradients, 1));
     
-    // Step 3: Scale entire gradient by 1/||x_original|| 
-    float embed_norm;
-    CHECK_CUBLAS(cublasSnrm2(slm->ssms[0]->cublas_handle,
-                            embed_elements,
-                            normalized_embeddings, 1, &embed_norm));
+    // Step 3: Scale by RMS factor
+    float embed_norm_squared;
+    CHECK_CUBLAS(cublasSdot(slm->ssms[0]->cublas_handle,
+                           embed_elements,
+                           normalized_embeddings, 1,
+                           normalized_embeddings, 1,
+                           &embed_norm_squared));
     
-    const float embed_original_scale = sqrtf((float)embed_elements) / (embed_norm + 1e-8f);
-    const float embed_inv_original_norm = 1.0f / embed_original_scale;
-    
+    const float embed_rms = sqrtf(embed_norm_squared / embed_elements);
+    const float embed_rms_scale = 1.0f / (embed_rms + 1e-6f);
     CHECK_CUBLAS(cublasSscal(slm->ssms[0]->cublas_handle,
                             embed_elements,
-                            &embed_inv_original_norm,
+                            &embed_rms_scale,
                             embedding_gradients, 1));
     
     // Accumulate embedding gradients
