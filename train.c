@@ -120,7 +120,7 @@ int main(int argc, char* argv[]) {
         // Calculate loss
         float loss = calculate_loss_slm(slm, d_target_chars);
 
-        if(loss >= 5.6) {
+        if(loss >= 7.6) {
             printf("Loss too high: %.6f, stopping training\n", loss);
             return -1;
         }

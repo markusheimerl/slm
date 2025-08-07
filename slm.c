@@ -87,6 +87,91 @@ __global__ void embedding_gradient_kernel(float* embed_grad, float* input_grad, 
     }
 }
 
+// CUDA kernel for layer normalization forward pass
+__global__ void layer_norm_forward_kernel(float* output, float* input, float* gamma, float* beta,
+                                         float* mean, float* var, int batch_size, int feature_dim, float eps) {
+    int batch_idx = blockIdx.x;
+    int feature_idx = threadIdx.x;
+    
+    if (batch_idx >= batch_size || feature_idx >= feature_dim) return;
+    
+    // Calculate mean and variance for this batch element
+    if (feature_idx == 0) {
+        float sum = 0.0f;
+        float sum_sq = 0.0f;
+        
+        for (int i = 0; i < feature_dim; i++) {
+            float val = input[batch_idx * feature_dim + i];
+            sum += val;
+            sum_sq += val * val;
+        }
+        
+        mean[batch_idx] = sum / feature_dim;
+        var[batch_idx] = (sum_sq / feature_dim) - (mean[batch_idx] * mean[batch_idx]);
+    }
+    
+    __syncthreads();
+    
+    // Apply layer normalization
+    float x = input[batch_idx * feature_dim + feature_idx];
+    float norm_x = (x - mean[batch_idx]) / sqrtf(var[batch_idx] + eps);
+    output[batch_idx * feature_dim + feature_idx] = gamma[feature_idx] * norm_x + beta[feature_idx];
+}
+
+// CUDA kernel for layer normalization backward pass
+__global__ void layer_norm_backward_kernel(float* input_grad, float* gamma_grad, float* beta_grad,
+                                          float* output_grad, float* input, float* gamma,
+                                          float* mean, float* var, int batch_size, int feature_dim, float eps) {
+    int batch_idx = blockIdx.x;
+    int feature_idx = threadIdx.x;
+    
+    if (batch_idx >= batch_size || feature_idx >= feature_dim) return;
+    
+    float inv_std = 1.0f / sqrtf(var[batch_idx] + eps);
+    float x_norm = (input[batch_idx * feature_dim + feature_idx] - mean[batch_idx]) * inv_std;
+    float dy = output_grad[batch_idx * feature_dim + feature_idx];
+    
+    // Accumulate gradients for gamma and beta
+    atomicAdd(&gamma_grad[feature_idx], dy * x_norm);
+    atomicAdd(&beta_grad[feature_idx], dy);
+    
+    // Calculate input gradient
+    float sum_dy = 0.0f;
+    float sum_dy_xnorm = 0.0f;
+    
+    // Sum across features for this batch
+    for (int i = 0; i < feature_dim; i++) {
+        float dy_i = output_grad[batch_idx * feature_dim + i];
+        float x_norm_i = (input[batch_idx * feature_dim + i] - mean[batch_idx]) * inv_std;
+        sum_dy += dy_i;
+        sum_dy_xnorm += dy_i * x_norm_i;
+    }
+    
+    float dx_norm = dy * gamma[feature_idx];
+    float dx = inv_std * (dx_norm - (sum_dy / feature_dim) - (x_norm * sum_dy_xnorm / feature_dim));
+    
+    input_grad[batch_idx * feature_dim + feature_idx] = dx;
+}
+
+// CUDA kernel for AdamW update
+__global__ void adamw_update_kernel_slm(float* weight, float* grad, float* m, float* v,
+                                        float beta1, float beta2, float epsilon, float learning_rate,
+                                        float weight_decay, float alpha_t, int size, int batch_size) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < size) {
+        float g = grad[idx] / batch_size;
+        
+        // m = β₁m + (1-β₁)g
+        m[idx] = beta1 * m[idx] + (1.0f - beta1) * g;
+        // v = β₂v + (1-β₂)g²
+        v[idx] = beta2 * v[idx] + (1.0f - beta2) * g * g;
+        
+        float update = alpha_t * m[idx] / (sqrtf(v[idx]) + epsilon);
+        // W = (1-λη)W - η·m̂/√v̂
+        weight[idx] = weight[idx] * (1.0f - learning_rate * weight_decay) - update;
+    }
+}
+
 // Initialize SLM
 SLM* init_slm(int embed_dim, int state_dim, int seq_len, int num_layers, int batch_size) {
     SLM* slm = (SLM*)malloc(sizeof(SLM));
@@ -104,6 +189,63 @@ SLM* init_slm(int embed_dim, int state_dim, int seq_len, int num_layers, int bat
         // Last layer: embed_dim -> vocab_size
         int output_dim = (i == num_layers - 1) ? slm->vocab_size : embed_dim;
         slm->ssms[i] = init_ssm(embed_dim, state_dim, output_dim, seq_len, batch_size);
+    }
+
+    // Allocate layer normalization parameters
+    slm->d_ln_gamma = (float**)malloc(num_layers * sizeof(float*));
+    slm->d_ln_beta = (float**)malloc(num_layers * sizeof(float*));
+    slm->d_ln_gamma_grad = (float**)malloc(num_layers * sizeof(float*));
+    slm->d_ln_beta_grad = (float**)malloc(num_layers * sizeof(float*));
+    slm->d_ln_gamma_m = (float**)malloc(num_layers * sizeof(float*));
+    slm->d_ln_gamma_v = (float**)malloc(num_layers * sizeof(float*));
+    slm->d_ln_beta_m = (float**)malloc(num_layers * sizeof(float*));
+    slm->d_ln_beta_v = (float**)malloc(num_layers * sizeof(float*));
+    
+    // Allocate layer normalization working buffers
+    slm->d_ln_mean = (float**)malloc(num_layers * sizeof(float*));
+    slm->d_ln_var = (float**)malloc(num_layers * sizeof(float*));
+    slm->d_ln_output = (float**)malloc(num_layers * sizeof(float*));
+    slm->d_ln_input_grad = (float**)malloc(num_layers * sizeof(float*));
+    
+    for (int i = 0; i < num_layers; i++) {
+        int layer_dim = (i == num_layers - 1) ? slm->vocab_size : embed_dim;
+        
+        // Allocate layer norm parameters
+        CHECK_CUDA(cudaMalloc(&slm->d_ln_gamma[i], layer_dim * sizeof(float)));
+        CHECK_CUDA(cudaMalloc(&slm->d_ln_beta[i], layer_dim * sizeof(float)));
+        CHECK_CUDA(cudaMalloc(&slm->d_ln_gamma_grad[i], layer_dim * sizeof(float)));
+        CHECK_CUDA(cudaMalloc(&slm->d_ln_beta_grad[i], layer_dim * sizeof(float)));
+        CHECK_CUDA(cudaMalloc(&slm->d_ln_gamma_m[i], layer_dim * sizeof(float)));
+        CHECK_CUDA(cudaMalloc(&slm->d_ln_gamma_v[i], layer_dim * sizeof(float)));
+        CHECK_CUDA(cudaMalloc(&slm->d_ln_beta_m[i], layer_dim * sizeof(float)));
+        CHECK_CUDA(cudaMalloc(&slm->d_ln_beta_v[i], layer_dim * sizeof(float)));
+        
+        // Allocate layer norm working buffers
+        CHECK_CUDA(cudaMalloc(&slm->d_ln_mean[i], seq_len * batch_size * sizeof(float)));
+        CHECK_CUDA(cudaMalloc(&slm->d_ln_var[i], seq_len * batch_size * sizeof(float)));
+        CHECK_CUDA(cudaMalloc(&slm->d_ln_output[i], seq_len * batch_size * layer_dim * sizeof(float)));
+        CHECK_CUDA(cudaMalloc(&slm->d_ln_input_grad[i], seq_len * batch_size * layer_dim * sizeof(float)));
+        
+        // Initialize layer norm parameters
+        float* h_gamma = (float*)malloc(layer_dim * sizeof(float));
+        float* h_beta = (float*)malloc(layer_dim * sizeof(float));
+        
+        for (int j = 0; j < layer_dim; j++) {
+            h_gamma[j] = 1.0f;  // Initialize gamma to 1
+            h_beta[j] = 0.0f;   // Initialize beta to 0
+        }
+        
+        CHECK_CUDA(cudaMemcpy(slm->d_ln_gamma[i], h_gamma, layer_dim * sizeof(float), cudaMemcpyHostToDevice));
+        CHECK_CUDA(cudaMemcpy(slm->d_ln_beta[i], h_beta, layer_dim * sizeof(float), cudaMemcpyHostToDevice));
+        
+        // Initialize Adam parameters to zero
+        CHECK_CUDA(cudaMemset(slm->d_ln_gamma_m[i], 0, layer_dim * sizeof(float)));
+        CHECK_CUDA(cudaMemset(slm->d_ln_gamma_v[i], 0, layer_dim * sizeof(float)));
+        CHECK_CUDA(cudaMemset(slm->d_ln_beta_m[i], 0, layer_dim * sizeof(float)));
+        CHECK_CUDA(cudaMemset(slm->d_ln_beta_v[i], 0, layer_dim * sizeof(float)));
+        
+        free(h_gamma);
+        free(h_beta);
     }
 
     // Allocate embedding matrices
@@ -154,8 +296,37 @@ void free_slm(SLM* slm) {
     if (slm) {
         for (int i = 0; i < slm->num_layers; i++) {
             if (slm->ssms[i]) free_ssm(slm->ssms[i]);
+            
+            // Free layer norm parameters
+            cudaFree(slm->d_ln_gamma[i]);
+            cudaFree(slm->d_ln_beta[i]);
+            cudaFree(slm->d_ln_gamma_grad[i]);
+            cudaFree(slm->d_ln_beta_grad[i]);
+            cudaFree(slm->d_ln_gamma_m[i]);
+            cudaFree(slm->d_ln_gamma_v[i]);
+            cudaFree(slm->d_ln_beta_m[i]);
+            cudaFree(slm->d_ln_beta_v[i]);
+            
+            // Free layer norm working buffers
+            cudaFree(slm->d_ln_mean[i]);
+            cudaFree(slm->d_ln_var[i]);
+            cudaFree(slm->d_ln_output[i]);
+            cudaFree(slm->d_ln_input_grad[i]);
         }
+        
         free(slm->ssms);
+        free(slm->d_ln_gamma);
+        free(slm->d_ln_beta);
+        free(slm->d_ln_gamma_grad);
+        free(slm->d_ln_beta_grad);
+        free(slm->d_ln_gamma_m);
+        free(slm->d_ln_gamma_v);
+        free(slm->d_ln_beta_m);
+        free(slm->d_ln_beta_v);
+        free(slm->d_ln_mean);
+        free(slm->d_ln_var);
+        free(slm->d_ln_output);
+        free(slm->d_ln_input_grad);
         
         cudaFree(slm->d_embeddings);
         cudaFree(slm->d_embeddings_grad);
@@ -223,15 +394,29 @@ void forward_pass_slm(SLM* slm, unsigned char* d_X) {
             forward_pass_ssm(slm->ssms[layer], input_t, t);
         }
         
+        // Apply layer normalization after SSM
+        int layer_dim = (layer == slm->num_layers - 1) ? slm->vocab_size : slm->embed_dim;
+        int total_elements = seq_len * batch_size;
+        
+        dim3 ln_block(layer_dim);
+        dim3 ln_grid(total_elements);
+        
+        layer_norm_forward_kernel<<<ln_grid, ln_block>>>(
+            slm->d_ln_output[layer], slm->ssms[layer]->d_predictions,
+            slm->d_ln_gamma[layer], slm->d_ln_beta[layer],
+            slm->d_ln_mean[layer], slm->d_ln_var[layer],
+            total_elements, layer_dim, 1e-5f
+        );
+        
         // For the last layer, store output in final_output buffer
         if (layer == slm->num_layers - 1) {
             int output_size = seq_len * batch_size * slm->vocab_size;
-            CHECK_CUDA(cudaMemcpy(slm->d_final_output, slm->ssms[layer]->d_predictions, 
+            CHECK_CUDA(cudaMemcpy(slm->d_final_output, slm->d_ln_output[layer], 
                                  output_size * sizeof(float), cudaMemcpyDeviceToDevice));
         } else {
-            // For intermediate layers, copy SSM output to buffer and set as next input
+            // For intermediate layers, copy layer norm output to buffer and set as next input
             int output_size = seq_len * batch_size * slm->embed_dim;
-            CHECK_CUDA(cudaMemcpy(slm->d_ssm_outputs[layer], slm->ssms[layer]->d_predictions, 
+            CHECK_CUDA(cudaMemcpy(slm->d_ssm_outputs[layer], slm->d_ln_output[layer], 
                                  output_size * sizeof(float), cudaMemcpyDeviceToDevice));
             current_input = slm->d_ssm_outputs[layer];
         }
@@ -254,7 +439,7 @@ float calculate_loss_slm(SLM* slm, unsigned char* d_y) {
     // ∂L/∂L_t = P_t - 1_{y_t} - Compute cross-entropy gradient (softmax - one_hot) for backprop
     int blocks = (total_tokens + 255) / 256;
     cross_entropy_gradient_kernel<<<blocks, 256>>>(
-        slm->ssms[slm->num_layers - 1]->d_error, slm->d_softmax, d_y, total_tokens, slm->vocab_size
+        slm->d_ln_input_grad[slm->num_layers - 1], slm->d_softmax, d_y, total_tokens, slm->vocab_size
     );
     
     // L = -log(P_{y_t}) - Calculate actual cross-entropy loss
@@ -274,6 +459,11 @@ float calculate_loss_slm(SLM* slm, unsigned char* d_y) {
 void zero_gradients_slm(SLM* slm) {
     for (int i = 0; i < slm->num_layers; i++) {
         zero_gradients_ssm(slm->ssms[i]);
+        
+        // Zero layer norm gradients
+        int layer_dim = (i == slm->num_layers - 1) ? slm->vocab_size : slm->embed_dim;
+        CHECK_CUDA(cudaMemset(slm->d_ln_gamma_grad[i], 0, layer_dim * sizeof(float)));
+        CHECK_CUDA(cudaMemset(slm->d_ln_beta_grad[i], 0, layer_dim * sizeof(float)));
     }
     CHECK_CUDA(cudaMemset(slm->d_embeddings_grad, 0, 
                          slm->vocab_size * slm->embed_dim * sizeof(float)));
@@ -286,24 +476,37 @@ void backward_pass_slm(SLM* slm, unsigned char* d_X) {
     
     // Process layers in reverse order (last → ... → 1 → 0)
     for (int layer = slm->num_layers - 1; layer >= 0; layer--) {
-        // Get the input that was used for this layer during forward pass
-        float* layer_input = (layer == 0) ? slm->d_embedded_input : slm->d_ssm_outputs[layer - 1];
+        int layer_dim = (layer == slm->num_layers - 1) ? slm->vocab_size : slm->embed_dim;
+        int total_elements = slm->ssms[layer]->seq_len * slm->ssms[layer]->batch_size;
         
         // For non-last layers, copy gradients from next layer
         if (layer < slm->num_layers - 1) {
-            int total_elements = slm->ssms[layer]->seq_len * slm->ssms[layer]->batch_size;
-            CHECK_CUDA(cudaMemcpy(slm->ssms[layer]->d_error, slm->d_ssm_gradients[layer], 
-                                 total_elements * slm->ssms[layer]->output_dim * sizeof(float), cudaMemcpyDeviceToDevice));
+            // Copy gradients from next layer to current layer's input grad buffer
+            CHECK_CUDA(cudaMemcpy(slm->d_ln_input_grad[layer], slm->d_ssm_gradients[layer], 
+                                 total_elements * layer_dim * sizeof(float), cudaMemcpyDeviceToDevice));
         }
+        // Note: For the last layer, the input grad is already set in calculate_loss_slm()
+        
+        // Backward through layer normalization
+        dim3 ln_block(layer_dim);
+        dim3 ln_grid(total_elements);
+        
+        layer_norm_backward_kernel<<<ln_grid, ln_block>>>(
+            slm->ssms[layer]->d_error, slm->d_ln_gamma_grad[layer], slm->d_ln_beta_grad[layer],
+            slm->d_ln_input_grad[layer], slm->ssms[layer]->d_predictions, slm->d_ln_gamma[layer],
+            slm->d_ln_mean[layer], slm->d_ln_var[layer],
+            total_elements, layer_dim, 1e-5f
+        );
+        
+        // Get the input that was used for this layer during forward pass
+        float* layer_input = (layer == 0) ? slm->d_embedded_input : slm->d_ssm_outputs[layer - 1];
         
         // Backward SSM of current layer
         backward_pass_ssm(slm->ssms[layer], layer_input);
         
         // Compute gradients for input to this layer (except first layer)
         if (layer > 0) {
-            int total_elements = slm->ssms[layer]->seq_len * slm->ssms[layer]->batch_size;
-            
-            // Clear gradient buffer
+            // Clear gradient buffer for input gradients
             CHECK_CUDA(cudaMemset(slm->d_ssm_gradients[layer - 1], 0, 
                                  total_elements * slm->ssms[layer]->input_dim * sizeof(float)));
             
@@ -436,6 +639,32 @@ void update_weights_slm(SLM* slm, float learning_rate) {
     // Update all SSM weights
     for (int i = 0; i < slm->num_layers; i++) {
         update_weights_ssm(slm->ssms[i], learning_rate);
+        
+        // Update layer norm parameters
+        int layer_dim = (i == slm->num_layers - 1) ? slm->vocab_size : slm->embed_dim;
+        int blocks = (layer_dim + 255) / 256;
+        
+        float beta1_t = powf(slm->ssms[0]->beta1, slm->ssms[0]->t);
+        float beta2_t = powf(slm->ssms[0]->beta2, slm->ssms[0]->t);
+        float alpha_t = learning_rate * sqrtf(1.0f - beta2_t) / (1.0f - beta1_t);
+        
+        // Update gamma
+        adamw_update_kernel_slm<<<blocks, 256>>>(
+            slm->d_ln_gamma[i], slm->d_ln_gamma_grad[i],
+            slm->d_ln_gamma_m[i], slm->d_ln_gamma_v[i],
+            slm->ssms[0]->beta1, slm->ssms[0]->beta2, slm->ssms[0]->epsilon,
+            learning_rate, slm->ssms[0]->weight_decay, alpha_t,
+            layer_dim, slm->ssms[0]->batch_size
+        );
+        
+        // Update beta
+        adamw_update_kernel_slm<<<blocks, 256>>>(
+            slm->d_ln_beta[i], slm->d_ln_beta_grad[i],
+            slm->d_ln_beta_m[i], slm->d_ln_beta_v[i],
+            slm->ssms[0]->beta1, slm->ssms[0]->beta2, slm->ssms[0]->epsilon,
+            learning_rate, slm->ssms[0]->weight_decay, alpha_t,
+            layer_dim, slm->ssms[0]->batch_size
+        );
     }
     
     // Update embeddings using AdamW
@@ -446,7 +675,7 @@ void update_weights_slm(SLM* slm, float learning_rate) {
     float beta2_t = powf(slm->ssms[0]->beta2, slm->ssms[0]->t);
     float alpha_t = learning_rate * sqrtf(1.0f - beta2_t) / (1.0f - beta1_t);
     
-    adamw_update_kernel_ssm<<<blocks, 256>>>(
+    adamw_update_kernel_slm<<<blocks, 256>>>(
         slm->d_embeddings, slm->d_embeddings_grad,
         slm->d_embeddings_m, slm->d_embeddings_v,
         slm->ssms[0]->beta1, slm->ssms[0]->beta2, slm->ssms[0]->epsilon,
@@ -468,6 +697,51 @@ void save_slm(SLM* slm, const char* filename) {
         sprintf(suffix, "_ssm%d.bin", i);
         strcat(ssm_file, suffix);
         save_ssm(slm->ssms[i], ssm_file);
+    }
+    
+    // Save layer norm parameters
+    for (int i = 0; i < slm->num_layers; i++) {
+        char ln_file[256];
+        strcpy(ln_file, filename);
+        dot = strrchr(ln_file, '.');
+        if (dot) *dot = '\0';
+        char suffix[16];
+        sprintf(suffix, "_ln%d.bin", i);
+        strcat(ln_file, suffix);
+        
+        int layer_dim = (i == slm->num_layers - 1) ? slm->vocab_size : slm->embed_dim;
+        
+        // Allocate temporary host memory
+        float* h_gamma = (float*)malloc(layer_dim * sizeof(float));
+        float* h_beta = (float*)malloc(layer_dim * sizeof(float));
+        float* h_gamma_m = (float*)malloc(layer_dim * sizeof(float));
+        float* h_gamma_v = (float*)malloc(layer_dim * sizeof(float));
+        float* h_beta_m = (float*)malloc(layer_dim * sizeof(float));
+        float* h_beta_v = (float*)malloc(layer_dim * sizeof(float));
+        
+        // Copy from device to host
+        CHECK_CUDA(cudaMemcpy(h_gamma, slm->d_ln_gamma[i], layer_dim * sizeof(float), cudaMemcpyDeviceToHost));
+        CHECK_CUDA(cudaMemcpy(h_beta, slm->d_ln_beta[i], layer_dim * sizeof(float), cudaMemcpyDeviceToHost));
+        CHECK_CUDA(cudaMemcpy(h_gamma_m, slm->d_ln_gamma_m[i], layer_dim * sizeof(float), cudaMemcpyDeviceToHost));
+        CHECK_CUDA(cudaMemcpy(h_gamma_v, slm->d_ln_gamma_v[i], layer_dim * sizeof(float), cudaMemcpyDeviceToHost));
+        CHECK_CUDA(cudaMemcpy(h_beta_m, slm->d_ln_beta_m[i], layer_dim * sizeof(float), cudaMemcpyDeviceToHost));
+        CHECK_CUDA(cudaMemcpy(h_beta_v, slm->d_ln_beta_v[i], layer_dim * sizeof(float), cudaMemcpyDeviceToHost));
+        
+        FILE* f = fopen(ln_file, "wb");
+        if (f) {
+            fwrite(&layer_dim, sizeof(int), 1, f);
+            fwrite(h_gamma, sizeof(float), layer_dim, f);
+            fwrite(h_beta, sizeof(float), layer_dim, f);
+            fwrite(h_gamma_m, sizeof(float), layer_dim, f);
+            fwrite(h_gamma_v, sizeof(float), layer_dim, f);
+            fwrite(h_beta_m, sizeof(float), layer_dim, f);
+            fwrite(h_beta_v, sizeof(float), layer_dim, f);
+            fclose(f);
+        }
+        
+        free(h_gamma); free(h_beta);
+        free(h_gamma_m); free(h_gamma_v);
+        free(h_beta_m); free(h_beta_v);
     }
     
     // Save embeddings and metadata
@@ -574,6 +848,53 @@ SLM* load_slm(const char* filename, int custom_batch_size) {
     free(h_embeddings_m);
     free(h_embeddings_v);
     
+    // Load layer norm parameters
+    for (int i = 0; i < num_layers; i++) {
+        char ln_file[256];
+        strcpy(ln_file, filename);
+        dot = strrchr(ln_file, '.');
+        if (dot) *dot = '\0';
+        char suffix[16];
+        sprintf(suffix, "_ln%d.bin", i);
+        strcat(ln_file, suffix);
+        
+        FILE* ln_f = fopen(ln_file, "rb");
+        if (ln_f) {
+            int layer_dim;
+            fread(&layer_dim, sizeof(int), 1, ln_f);
+            
+            // Allocate temporary host memory
+            float* h_gamma = (float*)malloc(layer_dim * sizeof(float));
+            float* h_beta = (float*)malloc(layer_dim * sizeof(float));
+            float* h_gamma_m = (float*)malloc(layer_dim * sizeof(float));
+            float* h_gamma_v = (float*)malloc(layer_dim * sizeof(float));
+            float* h_beta_m = (float*)malloc(layer_dim * sizeof(float));
+            float* h_beta_v = (float*)malloc(layer_dim * sizeof(float));
+            
+            // Read layer norm parameters
+            fread(h_gamma, sizeof(float), layer_dim, ln_f);
+            fread(h_beta, sizeof(float), layer_dim, ln_f);
+            fread(h_gamma_m, sizeof(float), layer_dim, ln_f);
+            fread(h_gamma_v, sizeof(float), layer_dim, ln_f);
+            fread(h_beta_m, sizeof(float), layer_dim, ln_f);
+            fread(h_beta_v, sizeof(float), layer_dim, ln_f);
+            
+            // Copy to device
+            CHECK_CUDA(cudaMemcpy(slm->d_ln_gamma[i], h_gamma, layer_dim * sizeof(float), cudaMemcpyHostToDevice));
+            CHECK_CUDA(cudaMemcpy(slm->d_ln_beta[i], h_beta, layer_dim * sizeof(float), cudaMemcpyHostToDevice));
+            CHECK_CUDA(cudaMemcpy(slm->d_ln_gamma_m[i], h_gamma_m, layer_dim * sizeof(float), cudaMemcpyHostToDevice));
+            CHECK_CUDA(cudaMemcpy(slm->d_ln_gamma_v[i], h_gamma_v, layer_dim * sizeof(float), cudaMemcpyHostToDevice));
+            CHECK_CUDA(cudaMemcpy(slm->d_ln_beta_m[i], h_beta_m, layer_dim * sizeof(float), cudaMemcpyHostToDevice));
+            CHECK_CUDA(cudaMemcpy(slm->d_ln_beta_v[i], h_beta_v, layer_dim * sizeof(float), cudaMemcpyHostToDevice));
+            
+            free(h_gamma); free(h_beta);
+            free(h_gamma_m); free(h_gamma_v);
+            free(h_beta_m); free(h_beta_v);
+            
+            fclose(ln_f);
+        }
+    }
+    
     // Load SSMs
     for (int i = 0; i < num_layers; i++) {
         char ssm_file[256];
@@ -656,7 +977,7 @@ SLM* load_slm(const char* filename, int custom_batch_size) {
         fclose(ssm_f);
     }
     
-    printf("Model loaded from %s (with %d SSM layers)\n", filename, num_layers);
+    printf("Model loaded from %s (with %d SSM layers + LayerNorm)\n", filename, num_layers);
     return slm;
 }
 
@@ -687,6 +1008,13 @@ void generate_text_slm(SLM* slm, const char* seed_text, int generation_length, f
         CHECK_CUDA(cudaMemcpy(gen_slm->ssms[i]->d_D, slm->ssms[i]->d_D, 
                              slm->ssms[i]->output_dim * slm->ssms[i]->input_dim * sizeof(float), 
                              cudaMemcpyDeviceToDevice));
+        
+        // Copy layer norm parameters
+        int layer_dim = (i == slm->num_layers - 1) ? slm->vocab_size : slm->embed_dim;
+        CHECK_CUDA(cudaMemcpy(gen_slm->d_ln_gamma[i], slm->d_ln_gamma[i], 
+                             layer_dim * sizeof(float), cudaMemcpyDeviceToDevice));
+        CHECK_CUDA(cudaMemcpy(gen_slm->d_ln_beta[i], slm->d_ln_beta[i], 
+                             layer_dim * sizeof(float), cudaMemcpyDeviceToDevice));
     }
     
     // Copy embeddings
@@ -739,11 +1067,25 @@ void generate_text_slm(SLM* slm, const char* seed_text, int generation_length, f
             // Forward through SSM
             forward_pass_ssm(gen_slm->ssms[layer], current_input, i);
             
-            // For all but the last layer, copy SSM output for next layer
+            // Apply layer norm
+            int layer_dim = (layer == gen_slm->num_layers - 1) ? gen_slm->vocab_size : gen_slm->embed_dim;
+            
+            dim3 ln_block(layer_dim);
+            dim3 ln_grid(1);
+            
+            layer_norm_forward_kernel<<<ln_grid, ln_block>>>(
+                gen_slm->d_ln_output[layer] + i * 1 * layer_dim, 
+                gen_slm->ssms[layer]->d_predictions + i * 1 * layer_dim,
+                gen_slm->d_ln_gamma[layer], gen_slm->d_ln_beta[layer],
+                gen_slm->d_ln_mean[layer] + i, gen_slm->d_ln_var[layer] + i,
+                1, layer_dim, 1e-5f
+            );
+            
+            // For all but the last layer, copy layer norm output for next layer
             if (layer < gen_slm->num_layers - 1) {
-                float* d_ssm_out_t = gen_slm->ssms[layer]->d_predictions + i * 1 * gen_slm->embed_dim;
+                float* d_ln_out_t = gen_slm->d_ln_output[layer] + i * 1 * gen_slm->embed_dim;
                 float* d_layer_out_t = gen_slm->d_ssm_outputs[layer] + i * 1 * gen_slm->embed_dim;
-                CHECK_CUDA(cudaMemcpy(d_layer_out_t, d_ssm_out_t, 
+                CHECK_CUDA(cudaMemcpy(d_layer_out_t, d_ln_out_t, 
                                      gen_slm->embed_dim * sizeof(float), cudaMemcpyDeviceToDevice));
                 
                 // Apply normalization between layers for consistency
@@ -799,11 +1141,25 @@ void generate_text_slm(SLM* slm, const char* seed_text, int generation_length, f
             // Forward through SSM
             forward_pass_ssm(gen_slm->ssms[layer], current_input, timestep);
             
-            // For all but the last layer, copy SSM output for next layer
+            // Apply layer norm
+            int layer_dim = (layer == gen_slm->num_layers - 1) ? gen_slm->vocab_size : gen_slm->embed_dim;
+            
+            dim3 ln_block(layer_dim);
+            dim3 ln_grid(1);
+            
+            layer_norm_forward_kernel<<<ln_grid, ln_block>>>(
+                gen_slm->d_ln_output[layer] + timestep * 1 * layer_dim, 
+                gen_slm->ssms[layer]->d_predictions + timestep * 1 * layer_dim,
+                gen_slm->d_ln_gamma[layer], gen_slm->d_ln_beta[layer],
+                gen_slm->d_ln_mean[layer] + timestep, gen_slm->d_ln_var[layer] + timestep,
+                1, layer_dim, 1e-5f
+            );
+            
+            // For all but the last layer, copy layer norm output for next layer
             if (layer < gen_slm->num_layers - 1) {
-                float* d_ssm_out_t = gen_slm->ssms[layer]->d_predictions + timestep * 1 * gen_slm->embed_dim;
+                float* d_ln_out_t = gen_slm->d_ln_output[layer] + timestep * 1 * gen_slm->embed_dim;
                 float* d_layer_out_t = gen_slm->d_ssm_outputs[layer] + timestep * 1 * gen_slm->embed_dim;
-                CHECK_CUDA(cudaMemcpy(d_layer_out_t, d_ssm_out_t, 
+                CHECK_CUDA(cudaMemcpy(d_layer_out_t, d_ln_out_t, 
                                      gen_slm->embed_dim * sizeof(float), cudaMemcpyDeviceToDevice));
                 
                 // Apply normalization between layers for consistency
@@ -822,8 +1178,8 @@ void generate_text_slm(SLM* slm, const char* seed_text, int generation_length, f
             }
         }
         
-        // Get the final SSM output (vocab predictions)
-        float* d_final_logits = gen_slm->ssms[gen_slm->num_layers - 1]->d_predictions + timestep * 1 * gen_slm->vocab_size;
+        // Get the final layer norm output (vocab predictions)
+        float* d_final_logits = gen_slm->d_ln_output[gen_slm->num_layers - 1] + timestep * 1 * gen_slm->vocab_size;
         
         // P_t = softmax(L_t) - Apply softmax to get probabilities
         softmax_kernel<<<1, 256>>>(
