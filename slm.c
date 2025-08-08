@@ -221,14 +221,10 @@ void forward_pass_slm(SLM* slm, unsigned char* d_X) {
         // Forward SSM through timesteps for current layer
         for (int t = 0; t < seq_len; t++) {
             float* input_t = current_input + t * batch_size * slm->embed_dim;
-            // H_t = X_t B^T + H_{t-1} A^T
-            // O_t = H_t σ(H_t)  
-            // Y_t = O_t C^T + X_t D^T
             forward_pass_ssm(slm->ssms[layer], input_t, t);
         }
         
         // Forward MLP for this layer
-        // Z_t = Y_t W_1, A_t = Z_t σ(Z_t), L_t = A_t W_2 + Y_t W_3
         forward_pass_mlp(slm->mlps[layer], slm->ssms[layer]->d_layer2_output);
         
         // For the last layer, store output in final_output buffer
