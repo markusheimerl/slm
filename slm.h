@@ -12,8 +12,8 @@
 
 typedef struct {
     // Device pointers for layers
-    SSM** ssms;                 // Dynamic array of state space models
-    MLP** mlps;                 // Dynamic array of MLPs
+    SSM** ssms;                 // Array of state space models
+    MLP** mlps;                 // Array of multi-layer perceptrons
     int num_layers;             // Number of layers
     
     // Device pointers for embeddings
