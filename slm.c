@@ -214,7 +214,7 @@ void forward_pass_slm(SLM* slm, unsigned char* d_X) {
         slm->d_embedded_input, slm->d_embeddings, d_X, batch_size, slm->embed_dim
     );
     
-    // Process through all SSM+MLP layers in sequence
+    // Process through all layers in sequence
     float* current_input = slm->d_embedded_input;
     
     for (int layer = 0; layer < slm->num_layers; layer++) {
@@ -578,7 +578,7 @@ SLM* load_slm(const char* filename, int custom_batch_size) {
         }
     }
     
-    printf("Model loaded from %s (with %d SSM+MLP layers)\n", filename, num_layers);
+    printf("Model loaded from %s (with %d layers)\n", filename, num_layers);
     return slm;
 }
 
@@ -689,7 +689,7 @@ void generate_text_slm(SLM* slm, const char* seed_text, int generation_length, f
             gen_slm->d_embedded_input, gen_slm->d_embeddings, d_input, 1, gen_slm->embed_dim
         );
         
-        // Forward through all SSM+MLP layers
+        // Forward through all layers
         int timestep = seed_len + i;
         float* current_input = gen_slm->d_embedded_input;
         for (int layer = 0; layer < gen_slm->num_layers; layer++) {
