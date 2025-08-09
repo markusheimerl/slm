@@ -117,7 +117,8 @@ void free_slm(SLM* slm) {
 }
 
 // CUDA kernel for embedding lookup
-__global__ void embedding_lookup_kernel(float* output, float* embeddings, unsigned char* chars, int batch_size, int embed_dim) {
+__global__ void embedding_lookup_kernel(float* output, float* embeddings, unsigned char* chars, 
+                                       int batch_size, int embed_dim) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     int total = blockIdx.y * batch_size;
     
@@ -157,7 +158,8 @@ __global__ void softmax_kernel(float* output, float* input, int batch_size, int 
 }
 
 // CUDA kernel for cross-entropy gradient
-__global__ void cross_entropy_gradient_kernel(float* grad, float* softmax, unsigned char* targets, int batch_size, int vocab_size) {
+__global__ void cross_entropy_gradient_kernel(float* grad, float* softmax, unsigned char* targets, 
+                                             int batch_size, int vocab_size) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= batch_size) return;
     
@@ -173,7 +175,8 @@ __global__ void cross_entropy_gradient_kernel(float* grad, float* softmax, unsig
 }
 
 // CUDA kernel for cross-entropy loss
-__global__ void cross_entropy_loss_kernel(float* losses, float* softmax, unsigned char* targets, int batch_size, int vocab_size) {
+__global__ void cross_entropy_loss_kernel(float* losses, float* softmax, unsigned char* targets, 
+                                         int batch_size, int vocab_size) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= batch_size) return;
     
@@ -186,7 +189,8 @@ __global__ void cross_entropy_loss_kernel(float* losses, float* softmax, unsigne
 }
 
 // CUDA kernel for embedding gradient accumulation
-__global__ void embedding_gradient_kernel(float* embed_grad, float* input_grad, unsigned char* chars, int batch_size, int embed_dim) {
+__global__ void embedding_gradient_kernel(float* embed_grad, float* input_grad, unsigned char* chars,
+                                         int batch_size, int embed_dim) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     int total = blockIdx.y * batch_size;
     
