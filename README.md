@@ -1,7 +1,7 @@
 # slm
 A small language model implementation
 
-Consider a character-level language model built on a multi-layer state space model backbone with per-layer MLP transformations, operating on character sequences of shape (seq_len × batch_size). The architecture combines learned character embeddings with temporal state dynamics through multiple sequential SSM layers, each followed by MLP transformation, with final softmax normalization for next-character prediction. The forward propagation follows:
+Consider a character-level language model built on a multi-layer state space model backbone, operating on character sequences of shape (seq_len × batch_size). The architecture combines learned character embeddings with temporal state dynamics through multiple sequential SSM layers, with final softmax normalization for next-character prediction. The forward propagation follows:
 
 $$
 \begin{align*}
@@ -9,9 +9,9 @@ E_t &= W_E[X_t]
 \end{align*}
 $$
 
-The embedding matrix $W_E$ maps discrete character indices to dense vector representations via indexing $W_E[X_t]$. Each SSM layer processes its inputs through the standard state space model formulation detailed in the SSM repository. After each SSM layer, an MLP transforms the outputs following the formulation detailed in the MLP repository.
+The embedding matrix $W_E$ maps discrete character indices to dense vector representations via indexing $W_E[X_t]$. Each SSM layer processes its inputs through the standard state space model formulation detailed in the SSM repository.
 
-For the final layer, the MLP outputs logits over the vocabulary, followed by softmax normalization to produce probability distributions over the character vocabulary:
+For the final layer, the SSM outputs logits over the vocabulary, followed by softmax normalization to produce probability distributions over the character vocabulary:
 
 $$
 \begin{align*}
