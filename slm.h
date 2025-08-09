@@ -37,8 +37,7 @@ typedef struct {
 // CUDA kernel prototypes
 __global__ void embedding_lookup_kernel(float* output, float* embeddings, unsigned char* chars, int batch_size, int embed_dim);
 __global__ void softmax_kernel(float* output, float* input, int batch_size, int vocab_size);
-__global__ void cross_entropy_gradient_kernel(float* grad, float* softmax, unsigned char* targets, int batch_size, int vocab_size);
-__global__ void cross_entropy_loss_kernel(float* losses, float* softmax, unsigned char* targets, int batch_size, int vocab_size);
+__global__ void cross_entropy_loss_kernel(float* losses, float* grad, float* softmax, unsigned char* targets, int batch_size, int vocab_size);
 __global__ void embedding_gradient_kernel(float* embed_grad, float* input_grad, unsigned char* chars, int batch_size, int embed_dim);
 
 // Function prototypes

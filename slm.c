@@ -199,7 +199,7 @@ float calculate_loss_slm(SLM* slm, unsigned char* d_y) {
     int batch_size = slm->ssms[0]->batch_size;
     int total_tokens = seq_len * batch_size;
     
-    // Compute both cross-entropy loss
+    // Compute both cross-entropy loss and logits gradient
     int blocks = (total_tokens + 255) / 256;
     cross_entropy_loss_kernel<<<blocks, 256>>>(
         slm->d_losses, 
@@ -306,7 +306,7 @@ void update_weights_slm(SLM* slm, float learning_rate) {
         slm->d_embeddings_m, slm->d_embeddings_v,
         slm->ssms[0]->beta1, slm->ssms[0]->beta2, slm->ssms[0]->epsilon,
         learning_rate, slm->ssms[0]->weight_decay, alpha_t,
-        embed_size, slm->ssms[0]->batch_size
+        embed_size, slm->ssms[0]->seq_len * slm->ssms[0]->batch_size
     );
 }
 
