@@ -271,8 +271,7 @@ float calculate_loss_slm(SLM* slm, unsigned char* d_y) {
     
     // Sum all losses
     float total_loss;
-    CHECK_CUBLAS(cublasSasum(slm->cublas_handle, total_tokens, 
-                            slm->d_losses, 1, &total_loss));
+    CHECK_CUBLAS(cublasSasum(slm->cublas_handle, total_tokens, slm->d_losses, 1, &total_loss));
     
     return total_loss / total_tokens;
 }
@@ -283,8 +282,7 @@ void zero_gradients_slm(SLM* slm) {
         zero_gradients_ssm(slm->ssms[i]);
         zero_gradients_mlp(slm->mlps[i]);
     }
-    CHECK_CUDA(cudaMemset(slm->d_embeddings_grad, 0, 
-                         slm->vocab_size * slm->embed_dim * sizeof(float)));
+    CHECK_CUDA(cudaMemset(slm->d_embeddings_grad, 0, slm->vocab_size * slm->embed_dim * sizeof(float)));
 }
 
 // Backward pass
@@ -455,12 +453,9 @@ void save_slm(SLM* slm, const char* filename) {
     float* h_embeddings_v = (float*)malloc(slm->vocab_size * slm->embed_dim * sizeof(float));
     
     // Copy embeddings from device to host
-    CHECK_CUDA(cudaMemcpy(h_embeddings, slm->d_embeddings, 
-                         slm->vocab_size * slm->embed_dim * sizeof(float), cudaMemcpyDeviceToHost));
-    CHECK_CUDA(cudaMemcpy(h_embeddings_m, slm->d_embeddings_m, 
-                         slm->vocab_size * slm->embed_dim * sizeof(float), cudaMemcpyDeviceToHost));
-    CHECK_CUDA(cudaMemcpy(h_embeddings_v, slm->d_embeddings_v, 
-                         slm->vocab_size * slm->embed_dim * sizeof(float), cudaMemcpyDeviceToHost));
+    CHECK_CUDA(cudaMemcpy(h_embeddings, slm->d_embeddings, slm->vocab_size * slm->embed_dim * sizeof(float), cudaMemcpyDeviceToHost));
+    CHECK_CUDA(cudaMemcpy(h_embeddings_m, slm->d_embeddings_m, slm->vocab_size * slm->embed_dim * sizeof(float), cudaMemcpyDeviceToHost));
+    CHECK_CUDA(cudaMemcpy(h_embeddings_v, slm->d_embeddings_v, slm->vocab_size * slm->embed_dim * sizeof(float), cudaMemcpyDeviceToHost));
     
     FILE* file = fopen(embed_file, "wb");
     if (!file) {
@@ -535,12 +530,9 @@ SLM* load_slm(const char* filename, int custom_batch_size) {
     SLM* slm = init_slm(embed_dim, state_dim, seq_len, num_layers, batch_size);
     
     // Copy embeddings to device
-    CHECK_CUDA(cudaMemcpy(slm->d_embeddings, h_embeddings, 
-                         vocab_size * embed_dim * sizeof(float), cudaMemcpyHostToDevice));
-    CHECK_CUDA(cudaMemcpy(slm->d_embeddings_m, h_embeddings_m, 
-                         vocab_size * embed_dim * sizeof(float), cudaMemcpyHostToDevice));
-    CHECK_CUDA(cudaMemcpy(slm->d_embeddings_v, h_embeddings_v, 
-                         vocab_size * embed_dim * sizeof(float), cudaMemcpyHostToDevice));
+    CHECK_CUDA(cudaMemcpy(slm->d_embeddings, h_embeddings, vocab_size * embed_dim * sizeof(float), cudaMemcpyHostToDevice));
+    CHECK_CUDA(cudaMemcpy(slm->d_embeddings_m, h_embeddings_m, vocab_size * embed_dim * sizeof(float), cudaMemcpyHostToDevice));
+    CHECK_CUDA(cudaMemcpy(slm->d_embeddings_v, h_embeddings_v, vocab_size * embed_dim * sizeof(float), cudaMemcpyHostToDevice));
     
     free(h_embeddings);
     free(h_embeddings_m);
@@ -595,37 +587,18 @@ void generate_text_slm(SLM* slm, const char* seed_text, int generation_length, f
     SLM* gen_slm = init_slm(slm->embed_dim, slm->ssms[0]->state_dim, max_timesteps, slm->num_layers, 1);
     
     // Copy trained weights from main model to generation model
-    // Copy all SSM and MLP weights
     for (int i = 0; i < slm->num_layers; i++) {
-        CHECK_CUDA(cudaMemcpy(gen_slm->ssms[i]->d_A, slm->ssms[i]->d_A, 
-                             slm->ssms[i]->state_dim * slm->ssms[i]->state_dim * sizeof(float), 
-                             cudaMemcpyDeviceToDevice));
-        CHECK_CUDA(cudaMemcpy(gen_slm->ssms[i]->d_B, slm->ssms[i]->d_B, 
-                             slm->ssms[i]->state_dim * slm->ssms[i]->input_dim * sizeof(float), 
-                             cudaMemcpyDeviceToDevice));
-        CHECK_CUDA(cudaMemcpy(gen_slm->ssms[i]->d_C, slm->ssms[i]->d_C, 
-                             slm->ssms[i]->output_dim * slm->ssms[i]->state_dim * sizeof(float), 
-                             cudaMemcpyDeviceToDevice));
-        CHECK_CUDA(cudaMemcpy(gen_slm->ssms[i]->d_D, slm->ssms[i]->d_D, 
-                             slm->ssms[i]->output_dim * slm->ssms[i]->input_dim * sizeof(float), 
-                             cudaMemcpyDeviceToDevice));
-        
-        // Copy MLP weights (including W3 learned residual connection)
-        CHECK_CUDA(cudaMemcpy(gen_slm->mlps[i]->d_W1, slm->mlps[i]->d_W1,
-                             slm->mlps[i]->hidden_dim * slm->mlps[i]->input_dim * sizeof(float),
-                             cudaMemcpyDeviceToDevice));
-        CHECK_CUDA(cudaMemcpy(gen_slm->mlps[i]->d_W2, slm->mlps[i]->d_W2,
-                             slm->mlps[i]->output_dim * slm->mlps[i]->hidden_dim * sizeof(float),
-                             cudaMemcpyDeviceToDevice));
-        CHECK_CUDA(cudaMemcpy(gen_slm->mlps[i]->d_W3, slm->mlps[i]->d_W3,
-                             slm->mlps[i]->output_dim * slm->mlps[i]->input_dim * sizeof(float),
-                             cudaMemcpyDeviceToDevice));
+        CHECK_CUDA(cudaMemcpy(gen_slm->ssms[i]->d_A, slm->ssms[i]->d_A, slm->ssms[i]->state_dim * slm->ssms[i]->state_dim * sizeof(float), cudaMemcpyDeviceToDevice));
+        CHECK_CUDA(cudaMemcpy(gen_slm->ssms[i]->d_B, slm->ssms[i]->d_B, slm->ssms[i]->state_dim * slm->ssms[i]->input_dim * sizeof(float), cudaMemcpyDeviceToDevice));
+        CHECK_CUDA(cudaMemcpy(gen_slm->ssms[i]->d_C, slm->ssms[i]->d_C, slm->ssms[i]->output_dim * slm->ssms[i]->state_dim * sizeof(float), cudaMemcpyDeviceToDevice));
+        CHECK_CUDA(cudaMemcpy(gen_slm->ssms[i]->d_D, slm->ssms[i]->d_D, slm->ssms[i]->output_dim * slm->ssms[i]->input_dim * sizeof(float), cudaMemcpyDeviceToDevice));
+        CHECK_CUDA(cudaMemcpy(gen_slm->mlps[i]->d_W1, slm->mlps[i]->d_W1, slm->mlps[i]->hidden_dim * slm->mlps[i]->input_dim * sizeof(float), cudaMemcpyDeviceToDevice));
+        CHECK_CUDA(cudaMemcpy(gen_slm->mlps[i]->d_W2, slm->mlps[i]->d_W2, slm->mlps[i]->output_dim * slm->mlps[i]->hidden_dim * sizeof(float), cudaMemcpyDeviceToDevice));
+        CHECK_CUDA(cudaMemcpy(gen_slm->mlps[i]->d_W3, slm->mlps[i]->d_W3, slm->mlps[i]->output_dim * slm->mlps[i]->input_dim * sizeof(float), cudaMemcpyDeviceToDevice));
     } 
     
     // Copy embeddings
-    CHECK_CUDA(cudaMemcpy(gen_slm->d_embeddings, slm->d_embeddings,
-                         slm->vocab_size * slm->embed_dim * sizeof(float),
-                         cudaMemcpyDeviceToDevice));
+    CHECK_CUDA(cudaMemcpy(gen_slm->d_embeddings, slm->d_embeddings, slm->vocab_size * slm->embed_dim * sizeof(float), cudaMemcpyDeviceToDevice));
     
     // Allocate temporary buffers for generation
     unsigned char* h_input = (unsigned char*)malloc(sizeof(unsigned char));
@@ -703,8 +676,7 @@ void generate_text_slm(SLM* slm, const char* seed_text, int generation_length, f
             if (layer < gen_slm->num_layers - 1) {
                 float* d_mlp_out_t = gen_slm->mlps[layer]->d_layer2_output;
                 float* d_layer_out_t = gen_slm->d_mlp_outputs[layer] + timestep * 1 * gen_slm->embed_dim;
-                CHECK_CUDA(cudaMemcpy(d_layer_out_t, d_mlp_out_t, 
-                                     gen_slm->embed_dim * sizeof(float), cudaMemcpyDeviceToDevice));
+                CHECK_CUDA(cudaMemcpy(d_layer_out_t, d_mlp_out_t, gen_slm->embed_dim * sizeof(float), cudaMemcpyDeviceToDevice));
                 current_input = d_layer_out_t;
             }
         }
