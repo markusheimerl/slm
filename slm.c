@@ -29,7 +29,7 @@ SLM* init_slm(int embed_dim, int state_dim, int seq_len, int num_layers, int bat
     float* h_embeddings = (float*)malloc(slm->vocab_size * slm->embed_dim * sizeof(float));
 
     // Initialize embeddings on host
-    float scale_embeddings = sqrtf(6.0f / (slm->embed_dim + slm->embed_dim));
+    float scale_embeddings = 1.0f / sqrtf(1.0f);
 
     for (int i = 0; i < slm->vocab_size * slm->embed_dim; i++) {
         h_embeddings[i] = ((float)rand() / (float)RAND_MAX * 2.0f - 1.0f) * scale_embeddings;
