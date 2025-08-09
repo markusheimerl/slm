@@ -30,11 +30,11 @@ int main(int argc, char* argv[]) {
     if (argc > 1) model_file = argv[1];
     
     // Model parameters
-    const int embed_dim = 512;
-    const int state_dim = embed_dim * 4;
-    const int seq_len = 2048;
+    const int embed_dim = 256;
+    const int state_dim = 512;
+    const int seq_len = 1024;
     const int num_layers = 11;
-    const int batch_size = 32;
+    const int batch_size = 256;
 
     // Training parameters
     const int num_batches = 1000000;
