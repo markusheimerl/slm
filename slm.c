@@ -25,9 +25,21 @@ SLM* init_slm(int embed_dim, int state_dim, int seq_len, int num_layers, int bat
         slm->mlps[i] = init_mlp(embed_dim, 4 * embed_dim, mlp_output_dim, seq_len * batch_size, slm->cublas_handle);
     }
 
+    // Allocate host memory for embeddings
+    float* h_embeddings = (float*)malloc(slm->vocab_size * slm->embed_dim * sizeof(float));
+
+    // Initialize embeddings on host
+    float scale_embeddings = sqrtf(6.0f / (slm->embed_dim + slm->embed_dim));
+
+    for (int i = 0; i < slm->vocab_size * slm->embed_dim; i++) {
+        h_embeddings[i] = ((float)rand() / (float)RAND_MAX * 2.0f - 1.0f) * scale_embeddings;
+    }
+
     // Allocate device memory for embeddings
     CHECK_CUDA(cudaMalloc(&slm->d_embeddings, slm->vocab_size * slm->embed_dim * sizeof(float)));
     CHECK_CUDA(cudaMalloc(&slm->d_embeddings_grad, slm->vocab_size * slm->embed_dim * sizeof(float)));
+
+    // Allocate device memory for Adam parameters
     CHECK_CUDA(cudaMalloc(&slm->d_embeddings_m, slm->vocab_size * slm->embed_dim * sizeof(float)));
     CHECK_CUDA(cudaMalloc(&slm->d_embeddings_v, slm->vocab_size * slm->embed_dim * sizeof(float)));
     
@@ -38,7 +50,6 @@ SLM* init_slm(int embed_dim, int state_dim, int seq_len, int num_layers, int bat
     CHECK_CUDA(cudaMalloc(&slm->d_input_gradients, seq_len * batch_size * embed_dim * sizeof(float)));
     CHECK_CUDA(cudaMalloc(&slm->d_losses, seq_len * batch_size * sizeof(float)));
     
-    // Allocate arrays for intermediate SSM and MLP outputs and gradients
     if (num_layers > 1) {
         slm->d_ssm_outputs = (float**)malloc((num_layers - 1) * sizeof(float*));
         slm->d_mlp_outputs = (float**)malloc((num_layers - 1) * sizeof(float*));
@@ -56,13 +67,6 @@ SLM* init_slm(int embed_dim, int state_dim, int seq_len, int num_layers, int bat
         slm->d_mlp_outputs = NULL;
         slm->d_ssm_gradients = NULL;
         slm->d_mlp_gradients = NULL;
-    }
-    
-    // Initialize embeddings with Xavier initialization
-    float* h_embeddings = (float*)malloc(slm->vocab_size * slm->embed_dim * sizeof(float));
-    float scale = sqrtf(2.0f / slm->embed_dim);
-    for (int i = 0; i < slm->vocab_size * slm->embed_dim; i++) {
-        h_embeddings[i] = ((float)rand() / (float)RAND_MAX * 2.0f - 1.0f) * scale;
     }
     
     // Initialize device memory
