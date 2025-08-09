@@ -26,6 +26,9 @@ typedef struct {
     float** d_mlp_gradients;    // seq_len x batch_size x embed_dim
     float* d_losses;            // seq_len x batch_size
     
+    // cuBLAS handle
+    cublasHandle_t cublas_handle;
+    
     // Dimensions
     int vocab_size;
     int embed_dim;

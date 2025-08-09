@@ -32,6 +32,7 @@ size_t calculate_model_parameters(SLM* slm) {
         total_params += mlp->hidden_dim * mlp->input_dim;
         total_params += mlp->output_dim * mlp->hidden_dim;
         total_params += mlp->output_dim * mlp->input_dim;
+        total_params += mlp->output_dim * mlp->input_dim;
     }
 
     return total_params;
@@ -178,7 +179,7 @@ int main(int argc, char* argv[]) {
             }
         }
 
-        // Generate sample text every 100 batches
+        // Generate sample text
         if (batch % 200 == 0) {
             printf("\n--- Sample Generation at Batch %d ---\n", batch);
             generate_text_slm(slm, "The quick brown fox", 128, 0.8f, 0.9f);
