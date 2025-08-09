@@ -1,104 +1,17 @@
 #include "slm.h"
 
-// CUDA kernel for embedding lookup: E_t = W_E[X_t]
-__global__ void embedding_lookup_kernel(float* output, float* embeddings, unsigned char* chars, 
-                                       int batch_size, int embed_dim) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int total = blockIdx.y * batch_size;
-    
-    if (idx < batch_size) {
-        int char_idx = chars[total + idx];
-        for (int i = 0; i < embed_dim; i++) {
-            output[(total + idx) * embed_dim + i] = embeddings[char_idx * embed_dim + i];
-        }
-    }
-}
-
-// CUDA kernel for softmax: P_t = exp(L_t) / Σ_c exp(L_{t,c})
-__global__ void softmax_kernel(float* output, float* input, int batch_size, int vocab_size) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= batch_size) return;
-    
-    float* in = input + idx * vocab_size;
-    float* out = output + idx * vocab_size;
-    
-    // Find max for numerical stability
-    float max_val = in[0];
-    for (int i = 1; i < vocab_size; i++) {
-        max_val = fmaxf(max_val, in[i]);
-    }
-    
-    // Compute exp and sum
-    float sum = 0.0f;
-    for (int i = 0; i < vocab_size; i++) {
-        out[i] = expf(in[i] - max_val);
-        sum += out[i];
-    }
-    
-    // Normalize
-    for (int i = 0; i < vocab_size; i++) {
-        out[i] /= sum;
-    }
-}
-
-// CUDA kernel for cross-entropy gradient: ∂L/∂L_t = P_t - 1_{y_t}
-__global__ void cross_entropy_gradient_kernel(float* grad, float* softmax, unsigned char* targets, 
-                                             int batch_size, int vocab_size) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= batch_size) return;
-    
-    float* grad_ptr = grad + idx * vocab_size;
-    float* softmax_ptr = softmax + idx * vocab_size;
-    int target = targets[idx];
-    
-    // Gradient is softmax - one_hot(target)
-    for (int i = 0; i < vocab_size; i++) {
-        grad_ptr[i] = softmax_ptr[i];
-    }
-    grad_ptr[target] -= 1.0f;
-}
-
-// CUDA kernel for cross-entropy loss: L = -log(P_{y_t})
-__global__ void cross_entropy_loss_kernel(float* losses, float* softmax, unsigned char* targets, 
-                                         int batch_size, int vocab_size) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= batch_size) return;
-    
-    float* softmax_ptr = softmax + idx * vocab_size;
-    int target = targets[idx];
-    
-    // Loss = -log(softmax[target])
-    float prob = fmaxf(softmax_ptr[target], 1e-15f); // Avoid log(0)
-    losses[idx] = -logf(prob);
-}
-
-// CUDA kernel for embedding gradient accumulation: ∂L/∂W_E[c] = Σ_{t,b: X_{t,b}=c} ∂L/∂E_t
-__global__ void embedding_gradient_kernel(float* embed_grad, float* input_grad, unsigned char* chars,
-                                         int batch_size, int embed_dim) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int total = blockIdx.y * batch_size;
-    
-    if (idx < batch_size) {
-        int char_idx = chars[total + idx];
-        for (int i = 0; i < embed_dim; i++) {
-            atomicAdd(&embed_grad[char_idx * embed_dim + i], 
-                     input_grad[(total + idx) * embed_dim + i]);
-        }
-    }
-}
-
 // Initialize SLM
 SLM* init_slm(int embed_dim, int state_dim, int seq_len, int num_layers, int batch_size) {
     SLM* slm = (SLM*)malloc(sizeof(SLM));
-        
-    // Initialize cuBLAS
-    CHECK_CUBLAS(cublasCreate(&slm->cublas_handle));
-    CHECK_CUBLAS(cublasSetMathMode(slm->cublas_handle, CUBLAS_TENSOR_OP_MATH));
     
-    // Set dimensions
+    // Store dimensions
     slm->vocab_size = 256;
     slm->embed_dim = embed_dim;
     slm->num_layers = num_layers;
+    
+    // Initialize cuBLAS
+    CHECK_CUBLAS(cublasCreate(&slm->cublas_handle));
+    CHECK_CUBLAS(cublasSetMathMode(slm->cublas_handle, CUBLAS_TENSOR_OP_MATH));
 
     // Initialize layers (embed_dim -> embed_dim)
     slm->ssms = (SSM**)malloc(num_layers * sizeof(SSM*));
@@ -112,13 +25,13 @@ SLM* init_slm(int embed_dim, int state_dim, int seq_len, int num_layers, int bat
         slm->mlps[i] = init_mlp(embed_dim, 4 * embed_dim, mlp_output_dim, seq_len * batch_size, slm->cublas_handle);
     }
 
-    // Allocate embedding matrices
+    // Allocate device memory for embeddings
     CHECK_CUDA(cudaMalloc(&slm->d_embeddings, slm->vocab_size * slm->embed_dim * sizeof(float)));
     CHECK_CUDA(cudaMalloc(&slm->d_embeddings_grad, slm->vocab_size * slm->embed_dim * sizeof(float)));
     CHECK_CUDA(cudaMalloc(&slm->d_embeddings_m, slm->vocab_size * slm->embed_dim * sizeof(float)));
     CHECK_CUDA(cudaMalloc(&slm->d_embeddings_v, slm->vocab_size * slm->embed_dim * sizeof(float)));
     
-    // Allocate working buffers
+    // Allocate device memory for working buffers
     CHECK_CUDA(cudaMalloc(&slm->d_embedded_input, seq_len * batch_size * embed_dim * sizeof(float)));
     CHECK_CUDA(cudaMalloc(&slm->d_final_output, seq_len * batch_size * slm->vocab_size * sizeof(float)));
     CHECK_CUDA(cudaMalloc(&slm->d_softmax, seq_len * batch_size * slm->vocab_size * sizeof(float)));
@@ -152,18 +65,21 @@ SLM* init_slm(int embed_dim, int state_dim, int seq_len, int num_layers, int bat
         h_embeddings[i] = ((float)rand() / (float)RAND_MAX * 2.0f - 1.0f) * scale;
     }
     
-    CHECK_CUDA(cudaMemcpy(slm->d_embeddings, h_embeddings, 
-                         slm->vocab_size * slm->embed_dim * sizeof(float), cudaMemcpyHostToDevice));
+    // Initialize device memory
+    CHECK_CUDA(cudaMemcpy(slm->d_embeddings, h_embeddings, slm->vocab_size * slm->embed_dim * sizeof(float), cudaMemcpyHostToDevice));
     CHECK_CUDA(cudaMemset(slm->d_embeddings_m, 0, slm->vocab_size * slm->embed_dim * sizeof(float)));
     CHECK_CUDA(cudaMemset(slm->d_embeddings_v, 0, slm->vocab_size * slm->embed_dim * sizeof(float)));
     
+    // Free local host memory
     free(h_embeddings);
+    
     return slm;
 }
 
-// Free SLM
+// Free SLM memory
 void free_slm(SLM* slm) {
     if (slm) {
+        // Free layers
         for (int i = 0; i < slm->num_layers; i++) {
             if (slm->ssms[i]) free_ssm(slm->ssms[i]);
             if (slm->mlps[i]) free_mlp(slm->mlps[i]);
@@ -171,6 +87,7 @@ void free_slm(SLM* slm) {
         free(slm->ssms);
         free(slm->mlps);
         
+        // Free device memory
         cudaFree(slm->d_embeddings);
         cudaFree(slm->d_embeddings_grad);
         cudaFree(slm->d_embeddings_m);
@@ -196,6 +113,88 @@ void free_slm(SLM* slm) {
         
         CHECK_CUBLAS(cublasDestroy(slm->cublas_handle));
         free(slm);
+    }
+}
+
+// CUDA kernel for embedding lookup
+__global__ void embedding_lookup_kernel(float* output, float* embeddings, unsigned char* chars, int batch_size, int embed_dim) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int total = blockIdx.y * batch_size;
+    
+    if (idx < batch_size) {
+        int char_idx = chars[total + idx];
+        for (int i = 0; i < embed_dim; i++) {
+            output[(total + idx) * embed_dim + i] = embeddings[char_idx * embed_dim + i];
+        }
+    }
+}
+
+// CUDA kernel for softmax
+__global__ void softmax_kernel(float* output, float* input, int batch_size, int vocab_size) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= batch_size) return;
+    
+    float* in = input + idx * vocab_size;
+    float* out = output + idx * vocab_size;
+    
+    // Find max for numerical stability
+    float max_val = in[0];
+    for (int i = 1; i < vocab_size; i++) {
+        max_val = fmaxf(max_val, in[i]);
+    }
+    
+    // Compute exp and sum
+    float sum = 0.0f;
+    for (int i = 0; i < vocab_size; i++) {
+        out[i] = expf(in[i] - max_val);
+        sum += out[i];
+    }
+    
+    // Normalize
+    for (int i = 0; i < vocab_size; i++) {
+        out[i] /= sum;
+    }
+}
+
+// CUDA kernel for cross-entropy gradient
+__global__ void cross_entropy_gradient_kernel(float* grad, float* softmax, unsigned char* targets, int batch_size, int vocab_size) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= batch_size) return;
+    
+    float* grad_ptr = grad + idx * vocab_size;
+    float* softmax_ptr = softmax + idx * vocab_size;
+    int target = targets[idx];
+    
+    // Gradient is softmax - one_hot(target)
+    for (int i = 0; i < vocab_size; i++) {
+        grad_ptr[i] = softmax_ptr[i];
+    }
+    grad_ptr[target] -= 1.0f;
+}
+
+// CUDA kernel for cross-entropy loss
+__global__ void cross_entropy_loss_kernel(float* losses, float* softmax, unsigned char* targets, int batch_size, int vocab_size) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= batch_size) return;
+    
+    float* softmax_ptr = softmax + idx * vocab_size;
+    int target = targets[idx];
+    
+    // Loss = -log(softmax[target])
+    float prob = fmaxf(softmax_ptr[target], 1e-15f); // Avoid log(0)
+    losses[idx] = -logf(prob);
+}
+
+// CUDA kernel for embedding gradient accumulation
+__global__ void embedding_gradient_kernel(float* embed_grad, float* input_grad, unsigned char* chars, int batch_size, int embed_dim) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int total = blockIdx.y * batch_size;
+    
+    if (idx < batch_size) {
+        int char_idx = chars[total + idx];
+        for (int i = 0; i < embed_dim; i++) {
+            atomicAdd(&embed_grad[char_idx * embed_dim + i], input_grad[(total + idx) * embed_dim + i]);
+        }
     }
 }
 
@@ -249,13 +248,13 @@ void forward_pass_slm(SLM* slm, unsigned char* d_X) {
     );
 }
 
-// Calculate loss: L = -1/(T·B) Σ_t Σ_b log P_{t,b,y_{t,b}}
+// Calculate loss
 float calculate_loss_slm(SLM* slm, unsigned char* d_y) {
     int seq_len = slm->ssms[0]->seq_len;
     int batch_size = slm->ssms[0]->batch_size;
     int total_tokens = seq_len * batch_size;
     
-    // ∂L/∂L_t = P_t - 1_{y_t} - Compute cross-entropy gradient (softmax - one_hot) for backprop
+    // ∂L/∂L_t = P_t - 1_{y_t} - Compute cross-entropy gradient for backprop
     int blocks = (total_tokens + 255) / 256;
     cross_entropy_gradient_kernel<<<blocks, 256>>>(
         slm->mlps[slm->num_layers - 1]->d_error_output, slm->d_softmax, d_y, total_tokens, slm->vocab_size
@@ -412,7 +411,7 @@ void update_weights_slm(SLM* slm, float learning_rate) {
     );
 }
 
-// Save model
+// Save model to binary file
 void save_slm(SLM* slm, const char* filename) {
     // Save SSMs
     char* dot;
@@ -459,8 +458,8 @@ void save_slm(SLM* slm, const char* filename) {
     CHECK_CUDA(cudaMemcpy(h_embeddings_v, slm->d_embeddings_v, 
                          slm->vocab_size * slm->embed_dim * sizeof(float), cudaMemcpyDeviceToHost));
     
-    FILE* f = fopen(embed_file, "wb");
-    if (!f) {
+    FILE* file = fopen(embed_file, "wb");
+    if (!file) {
         printf("Error opening file for writing: %s\n", embed_file);
         free(h_embeddings);
         free(h_embeddings_m);
@@ -469,28 +468,28 @@ void save_slm(SLM* slm, const char* filename) {
     }
     
     // Save dimensions and metadata
-    fwrite(&slm->vocab_size, sizeof(int), 1, f);
-    fwrite(&slm->embed_dim, sizeof(int), 1, f);
-    fwrite(&slm->num_layers, sizeof(int), 1, f);
-    fwrite(&slm->ssms[0]->seq_len, sizeof(int), 1, f);
-    fwrite(&slm->ssms[0]->state_dim, sizeof(int), 1, f);
-    fwrite(&slm->ssms[0]->batch_size, sizeof(int), 1, f);
+    fwrite(&slm->vocab_size, sizeof(int), 1, file);
+    fwrite(&slm->embed_dim, sizeof(int), 1, file);
+    fwrite(&slm->num_layers, sizeof(int), 1, file);
+    fwrite(&slm->ssms[0]->seq_len, sizeof(int), 1, file);
+    fwrite(&slm->ssms[0]->state_dim, sizeof(int), 1, file);
+    fwrite(&slm->ssms[0]->batch_size, sizeof(int), 1, file);
     
     // Save embeddings and Adam state
-    fwrite(h_embeddings, sizeof(float), slm->vocab_size * slm->embed_dim, f);
-    fwrite(h_embeddings_m, sizeof(float), slm->vocab_size * slm->embed_dim, f);
-    fwrite(h_embeddings_v, sizeof(float), slm->vocab_size * slm->embed_dim, f);
+    fwrite(h_embeddings, sizeof(float), slm->vocab_size * slm->embed_dim, file);
+    fwrite(h_embeddings_m, sizeof(float), slm->vocab_size * slm->embed_dim, file);
+    fwrite(h_embeddings_v, sizeof(float), slm->vocab_size * slm->embed_dim, file);
     
     // Free temporary host memory
     free(h_embeddings);
     free(h_embeddings_m);
     free(h_embeddings_v);
     
-    fclose(f);
+    fclose(file);
     printf("Embeddings saved to %s\n", embed_file);
 }
 
-// Load model
+// Load model from binary file
 SLM* load_slm(const char* filename, int custom_batch_size) {
     // Load embeddings and metadata first
     char embed_file[256];
@@ -499,20 +498,20 @@ SLM* load_slm(const char* filename, int custom_batch_size) {
     if (dot) *dot = '\0';
     strcat(embed_file, "_embeddings.bin");
     
-    FILE* f = fopen(embed_file, "rb");
-    if (!f) {
+    FILE* file = fopen(embed_file, "rb");
+    if (!file) {
         printf("Error opening file for reading: %s\n", embed_file);
         return NULL;
     }
     
     // Read dimensions and metadata
     int vocab_size, embed_dim, num_layers, seq_len, state_dim, stored_batch_size;
-    fread(&vocab_size, sizeof(int), 1, f);
-    fread(&embed_dim, sizeof(int), 1, f);
-    fread(&num_layers, sizeof(int), 1, f);
-    fread(&seq_len, sizeof(int), 1, f);
-    fread(&state_dim, sizeof(int), 1, f);
-    fread(&stored_batch_size, sizeof(int), 1, f);
+    fread(&vocab_size, sizeof(int), 1, file);
+    fread(&embed_dim, sizeof(int), 1, file);
+    fread(&num_layers, sizeof(int), 1, file);
+    fread(&seq_len, sizeof(int), 1, file);
+    fread(&state_dim, sizeof(int), 1, file);
+    fread(&stored_batch_size, sizeof(int), 1, file);
     
     // Use custom_batch_size if provided, otherwise use stored value
     int batch_size = (custom_batch_size > 0) ? custom_batch_size : stored_batch_size;
@@ -523,10 +522,10 @@ SLM* load_slm(const char* filename, int custom_batch_size) {
     float* h_embeddings_v = (float*)malloc(vocab_size * embed_dim * sizeof(float));
     
     // Read embeddings and Adam state
-    fread(h_embeddings, sizeof(float), vocab_size * embed_dim, f);
-    fread(h_embeddings_m, sizeof(float), vocab_size * embed_dim, f);
-    fread(h_embeddings_v, sizeof(float), vocab_size * embed_dim, f);
-    fclose(f);
+    fread(h_embeddings, sizeof(float), vocab_size * embed_dim, file);
+    fread(h_embeddings_m, sizeof(float), vocab_size * embed_dim, file);
+    fread(h_embeddings_v, sizeof(float), vocab_size * embed_dim, file);
+    fclose(file);
     
     // Initialize SLM with loaded parameters
     SLM* slm = init_slm(embed_dim, state_dim, seq_len, num_layers, batch_size);

@@ -1,21 +1,28 @@
 #ifndef SLM_H
 #define SLM_H
 
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <math.h>
+#include <cublas_v2.h>
+#include <cuda_runtime.h>
 #include "ssm/gpu/ssm.h"
 #include "mlp/gpu/mlp.h"
 
 typedef struct {
+    // Device pointers for layers
     SSM** ssms;                 // Dynamic array of state space models
     MLP** mlps;                 // Dynamic array of MLPs
     int num_layers;             // Number of layers
     
-    // Language modeling specific buffers
+    // Device pointers for embeddings
     float* d_embeddings;        // vocab_size x embed_dim
     float* d_embeddings_grad;   // vocab_size x embed_dim
     float* d_embeddings_m;      // vocab_size x embed_dim
     float* d_embeddings_v;      // vocab_size x embed_dim
     
-    // Working buffers
+    // Device pointers for working buffers
     float* d_embedded_input;    // seq_len x batch_size x embed_dim
     float** d_ssm_outputs;      // seq_len x batch_size x embed_dim
     float** d_mlp_outputs;      // seq_len x batch_size x embed_dim
@@ -35,15 +42,11 @@ typedef struct {
 } SLM;
 
 // CUDA kernel prototypes
-__global__ void embedding_lookup_kernel(float* output, float* embeddings, unsigned char* chars, 
-                                       int batch_size, int embed_dim);
+__global__ void embedding_lookup_kernel(float* output, float* embeddings, unsigned char* chars, int batch_size, int embed_dim);
 __global__ void softmax_kernel(float* output, float* input, int batch_size, int vocab_size);
-__global__ void cross_entropy_gradient_kernel(float* grad, float* softmax, unsigned char* targets, 
-                                             int batch_size, int vocab_size);
-__global__ void cross_entropy_loss_kernel(float* losses, float* softmax, unsigned char* targets, 
-                                         int batch_size, int vocab_size);
-__global__ void embedding_gradient_kernel(float* embed_grad, float* input_grad, unsigned char* chars,
-                                         int batch_size, int embed_dim);
+__global__ void cross_entropy_gradient_kernel(float* grad, float* softmax, unsigned char* targets, int batch_size, int vocab_size);
+__global__ void cross_entropy_loss_kernel(float* losses, float* softmax, unsigned char* targets, int batch_size, int vocab_size);
+__global__ void embedding_gradient_kernel(float* embed_grad, float* input_grad, unsigned char* chars, int batch_size, int embed_dim);
 
 // Function prototypes
 SLM* init_slm(int embed_dim, int state_dim, int seq_len, int num_layers, int batch_size);
