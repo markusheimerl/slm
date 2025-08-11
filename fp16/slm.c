@@ -503,11 +503,10 @@ void generate_text_slm(SLM* slm, const char* seed_text, int generation_length, f
     // Allocate temporary buffers for generation
     unsigned char* h_char = (unsigned char*)malloc(sizeof(unsigned char));
     float* h_probs = (float*)malloc(slm->vocab_size * sizeof(float));
+    __half* h_probs_fp16 = (__half*)malloc(slm->vocab_size * sizeof(__half));
     int* indices = (int*)malloc(slm->vocab_size * sizeof(int));
     unsigned char* d_char;
-    __half* d_probs_fp16 = NULL;
     CHECK_CUDA(cudaMalloc(&d_char, sizeof(unsigned char)));
-    CHECK_CUDA(cudaMalloc(&d_probs_fp16, gen_slm->vocab_size * sizeof(__half)));
     
     // Reset state for generation
     reset_state_slm(gen_slm);
@@ -530,9 +529,9 @@ void generate_text_slm(SLM* slm, const char* seed_text, int generation_length, f
             __half* d_probs = gen_slm->d_softmax + i * gen_slm->vocab_size;
             
             // Copy probabilities to host and convert to FP32
-            CHECK_CUDA(cudaMemcpy(d_probs_fp16, d_probs, gen_slm->vocab_size * sizeof(__half), cudaMemcpyDeviceToHost));
+            CHECK_CUDA(cudaMemcpy(h_probs_fp16, d_probs, gen_slm->vocab_size * sizeof(__half), cudaMemcpyDeviceToHost));
             for (int j = 0; j < gen_slm->vocab_size; j++) {
-                h_probs[j] = __half2float(d_probs_fp16[j]);
+                h_probs[j] = __half2float(h_probs_fp16[j]);
             }
             
             // Apply temperature scaling
@@ -624,8 +623,8 @@ void generate_text_slm(SLM* slm, const char* seed_text, int generation_length, f
     // Cleanup
     free(h_char);
     free(h_probs);
+    free(h_probs_fp16);
     free(indices);
     cudaFree(d_char);
-    cudaFree(d_probs_fp16);
     free_slm(gen_slm);
 }
