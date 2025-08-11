@@ -238,8 +238,7 @@ float calculate_loss_slm(SLM* slm, unsigned char* d_y) {
         slm->vocab_size
     );
     
-    // Sum losses (using cublas for FP32 sum)
-    float alpha = 1.0f;
+    // Sum losses
     CHECK_CUBLAS(cublasSasum(slm->cublas_handle, total_tokens, slm->d_losses, 1, &loss));
     
     return loss / total_tokens;
@@ -503,7 +502,7 @@ void generate_text_slm(SLM* slm, const char* seed_text, int generation_length, f
     // Allocate temporary buffers for generation
     unsigned char* h_char = (unsigned char*)malloc(sizeof(unsigned char));
     float* h_probs = (float*)malloc(slm->vocab_size * sizeof(float));
-    __half* h_probs = (__half*)malloc(slm->vocab_size * sizeof(__half));
+    __half* h_probs_h = (__half*)malloc(slm->vocab_size * sizeof(__half));
     int* indices = (int*)malloc(slm->vocab_size * sizeof(int));
     unsigned char* d_char;
     CHECK_CUDA(cudaMalloc(&d_char, sizeof(unsigned char)));
@@ -529,9 +528,9 @@ void generate_text_slm(SLM* slm, const char* seed_text, int generation_length, f
             __half* d_probs = gen_slm->d_softmax + i * gen_slm->vocab_size;
             
             // Copy probabilities to host
-            CHECK_CUDA(cudaMemcpy(h_probs, d_probs, gen_slm->vocab_size * sizeof(__half), cudaMemcpyDeviceToHost));
+            CHECK_CUDA(cudaMemcpy(h_probs_h, d_probs, gen_slm->vocab_size * sizeof(__half), cudaMemcpyDeviceToHost));
             for (int j = 0; j < gen_slm->vocab_size; j++) {
-                h_probs[j] = __half2float(h_probs[j]);
+                h_probs[j] = __half2float(h_probs_h[j]);
             }
             
             // Apply temperature scaling
@@ -623,7 +622,7 @@ void generate_text_slm(SLM* slm, const char* seed_text, int generation_length, f
     // Cleanup
     free(h_char);
     free(h_probs);
-    free(h_probs);
+    free(h_probs_h);
     free(indices);
     cudaFree(d_char);
     free_slm(gen_slm);
