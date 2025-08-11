@@ -86,8 +86,8 @@ void reset_state_slm(SLM* slm) {
     }
 }
 
-// CUDA kernel for embedding lookup (FP16)
-__global__ void embedding_lookup_kernel_fp16(__half* output, __half* embeddings, unsigned char* chars, 
+// CUDA kernel for embedding lookup
+__global__ void embedding_lookup_kernel(__half* output, __half* embeddings, unsigned char* chars, 
                                              int batch_size, int embed_dim) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     
@@ -99,8 +99,8 @@ __global__ void embedding_lookup_kernel_fp16(__half* output, __half* embeddings,
     }
 }
 
-// CUDA kernel for softmax (FP16)
-__global__ void softmax_kernel_fp16(__half* output, __half* input, int batch_size, int vocab_size) {
+// CUDA kernel for softmax
+__global__ void softmax_kernel(__half* output, __half* input, int batch_size, int vocab_size) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= batch_size) return;
     
@@ -126,8 +126,8 @@ __global__ void softmax_kernel_fp16(__half* output, __half* input, int batch_siz
     }
 }
 
-// CUDA kernel for cross-entropy loss (FP16 input, FP32 loss)
-__global__ void cross_entropy_loss_kernel_fp16(float* losses, __half* grad, __half* softmax, unsigned char* targets, 
+// CUDA kernel for cross-entropy loss
+__global__ void cross_entropy_loss_kernel(float* losses, __half* grad, __half* softmax, unsigned char* targets, 
                                                int batch_size, int vocab_size) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= batch_size) return;
@@ -147,21 +147,21 @@ __global__ void cross_entropy_loss_kernel_fp16(float* losses, __half* grad, __ha
     grad_ptr[target] = __hsub(grad_ptr[target], __float2half(1.0f));
 }
 
-// CUDA kernel for embedding gradient accumulation (FP16)
-__global__ void embedding_gradient_kernel_fp16(__half* embed_grad, __half* input_grad, unsigned char* chars,
+// CUDA kernel for embedding gradient accumulation
+__global__ void embedding_gradient_kernel(__half* embed_grad, __half* input_grad, unsigned char* chars,
                                                int batch_size, int embed_dim) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     
     if (idx < batch_size) {
         int char_idx = chars[idx];
         for (int i = 0; i < embed_dim; i++) {
-            // Atomic add for FP16
+            // Atomic add
             atomicAdd(&embed_grad[char_idx * embed_dim + i], input_grad[idx * embed_dim + i]);
         }
     }
 }
 
-// CUDA kernel for AdamW update (FP16)
+// CUDA kernel for AdamW update
 __global__ void adamw_update_kernel_slm(__half* weight, __half* grad, __half* m, __half* v,
                                         __half beta1, __half beta2, __half epsilon, __half learning_rate,
                                         __half weight_decay, __half alpha_t, int size, int total_samples) {
@@ -196,7 +196,7 @@ void forward_pass_slm(SLM* slm, unsigned char* d_X_t, int timestep) {
     
     dim3 block(256);
     dim3 grid((batch_size + 255) / 256);
-    embedding_lookup_kernel_fp16<<<grid, block>>>(d_embedded_t, slm->d_embeddings, d_X_t, batch_size, slm->embed_dim);
+    embedding_lookup_kernel<<<grid, block>>>(d_embedded_t, slm->d_embeddings, d_X_t, batch_size, slm->embed_dim);
     
     __half* current_input = d_embedded_t;
     
@@ -212,7 +212,7 @@ void forward_pass_slm(SLM* slm, unsigned char* d_X_t, int timestep) {
     // P_t = softmax(logits_t)
     __half* d_softmax_t = slm->d_softmax + timestep * batch_size * slm->vocab_size;
     int blocks = (batch_size + 255) / 256;
-    softmax_kernel_fp16<<<blocks, 256>>>(
+    softmax_kernel<<<blocks, 256>>>(
         d_softmax_t,
         slm->ssms[slm->num_layers - 1]->d_layer2_output + timestep * batch_size * slm->vocab_size,
         batch_size,
@@ -229,7 +229,7 @@ float calculate_loss_slm(SLM* slm, unsigned char* d_y) {
     
     // Compute both cross-entropy loss and logits gradient
     int blocks = (total_tokens + 255) / 256;
-    cross_entropy_loss_kernel_fp16<<<blocks, 256>>>(
+    cross_entropy_loss_kernel<<<blocks, 256>>>(
         slm->d_losses, 
         slm->ssms[slm->num_layers - 1]->d_error_output, 
         slm->d_softmax, 
@@ -313,7 +313,7 @@ void backward_pass_slm(SLM* slm, unsigned char* d_X_t, int timestep) {
     
     // Accumulate embedding gradients
     dim3 block(256), grid((batch_size + 255) / 256);
-    embedding_gradient_kernel_fp16<<<grid, block>>>(
+    embedding_gradient_kernel<<<grid, block>>>(
         slm->d_embeddings_grad, embed_grad_t, d_X_t, batch_size, slm->embed_dim
     );
 }
@@ -503,7 +503,7 @@ void generate_text_slm(SLM* slm, const char* seed_text, int generation_length, f
     // Allocate temporary buffers for generation
     unsigned char* h_char = (unsigned char*)malloc(sizeof(unsigned char));
     float* h_probs = (float*)malloc(slm->vocab_size * sizeof(float));
-    __half* h_probs_fp16 = (__half*)malloc(slm->vocab_size * sizeof(__half));
+    __half* h_probs = (__half*)malloc(slm->vocab_size * sizeof(__half));
     int* indices = (int*)malloc(slm->vocab_size * sizeof(int));
     unsigned char* d_char;
     CHECK_CUDA(cudaMalloc(&d_char, sizeof(unsigned char)));
@@ -525,13 +525,13 @@ void generate_text_slm(SLM* slm, const char* seed_text, int generation_length, f
         
         // Only do sampling during generation phase
         if (i >= seed_len) {
-            // Get the final logits from the softmax buffer (FP16)
+            // Get the final logits from the softmax buffer
             __half* d_probs = gen_slm->d_softmax + i * gen_slm->vocab_size;
             
-            // Copy probabilities to host and convert to FP32
-            CHECK_CUDA(cudaMemcpy(h_probs_fp16, d_probs, gen_slm->vocab_size * sizeof(__half), cudaMemcpyDeviceToHost));
+            // Copy probabilities to host
+            CHECK_CUDA(cudaMemcpy(h_probs, d_probs, gen_slm->vocab_size * sizeof(__half), cudaMemcpyDeviceToHost));
             for (int j = 0; j < gen_slm->vocab_size; j++) {
-                h_probs[j] = __half2float(h_probs_fp16[j]);
+                h_probs[j] = __half2float(h_probs[j]);
             }
             
             // Apply temperature scaling
@@ -623,7 +623,7 @@ void generate_text_slm(SLM* slm, const char* seed_text, int generation_length, f
     // Cleanup
     free(h_char);
     free(h_probs);
-    free(h_probs_fp16);
+    free(h_probs);
     free(indices);
     cudaFree(d_char);
     free_slm(gen_slm);

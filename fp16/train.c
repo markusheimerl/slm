@@ -14,7 +14,7 @@ void handle_sigint(int signum) {
     if (slm) {
         char model_filename[64];
         time_t now = time(NULL);
-        strftime(model_filename, sizeof(model_filename), "%Y%m%d_%H%M%S_fp16_model.bin", localtime(&now));
+        strftime(model_filename, sizeof(model_filename), "%Y%m%d_%H%M%S_model.bin", localtime(&now));
         save_slm(slm, model_filename);
     }
     exit(128 + signum);
@@ -77,12 +77,12 @@ int main(int argc, char* argv[]) {
         }
         printf("Continuing training from loaded model\n");
     } else {
-        printf("Initializing new FP16 model\n");
+        printf("Initializing new model\n");
         slm = init_slm(embed_dim, state_dim, seq_len, num_layers, batch_size);
     }
 
     int model_size = calculate_model_parameters(slm);
-    printf("FP16 Model initialized with %d parameters\n", model_size);
+    printf("Model initialized with %d parameters\n", model_size);
     
     // Load training corpus
     size_t corpus_size;
@@ -141,7 +141,7 @@ int main(int argc, char* argv[]) {
 
         // Generate sample text
         if (batch % 200 == 0) {
-            printf("\n--- Sample Generation at Batch %d (FP16) ---\n", batch);
+            printf("\n--- Sample Generation at Batch %d ---\n", batch);
             generate_text_slm(slm, "The quick brown fox jumps over the lazy dog and then sits beside the river to watch ", 128, 0.8f, 0.9f);
             generate_text_slm(slm, "Once upon a time, in a distant kingdom, there lived a wise old king who loved to ", 128, 0.8f, 0.9f);
             generate_text_slm(slm, "Scientists at the university have discovered a new method for producing ", 128, 0.8f, 0.9f);
@@ -153,7 +153,7 @@ int main(int argc, char* argv[]) {
     // Save model
     char model_filename[64];
     time_t now = time(NULL);
-    strftime(model_filename, sizeof(model_filename), "%Y%m%d_%H%M%S_fp16_model.bin", localtime(&now));
+    strftime(model_filename, sizeof(model_filename), "%Y%m%d_%H%M%S_model.bin", localtime(&now));
     save_slm(slm, model_filename);
     
     // Cleanup

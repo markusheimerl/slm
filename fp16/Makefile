@@ -25,7 +25,7 @@ run: train.out
 	@time ./train.out
 
 cont: train.out
-	@time ./train.out $(shell ls -t *_fp16_model_embeddings.bin 2>/dev/null | head -1 | sed 's/_embeddings\.bin/.bin/')
+	@time ./train.out $(shell ls -t *_model_embeddings.bin 2>/dev/null | head -1 | sed 's/_embeddings\.bin/.bin/')
 
 clean:
 	rm -f *.out *.o *.csv *.bin
