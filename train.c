@@ -45,15 +45,15 @@ int main(int argc, char* argv[]) {
     if (argc > 1) model_file = argv[1];
     
     // Model parameters
-    const int embed_dim = 256;
-    const int state_dim = 512;
-    const int seq_len = 1024;
+    const int embed_dim = 512;
+    const int state_dim = 2048;
+    const int seq_len = 2048;
     const int num_layers = 11;
-    const int batch_size = 256;
+    const int batch_size = 32;
 
     // Training parameters
     const int num_batches = 1000000;
-    const float learning_rate = 0.0001f;
+    const float learning_rate = 0.00002f;
     const int acc_steps = 1;
     
     // Pre-allocate memory for sequences
@@ -119,7 +119,7 @@ int main(int argc, char* argv[]) {
 
         if(loss >= 5.6) {
             printf("Loss too high: %.6f, stopping training\n", loss);
-            return -1;
+            raise(SIGINT);
         }
 
         if (batch == num_batches) break;
