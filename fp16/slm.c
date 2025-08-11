@@ -34,9 +34,9 @@ SLM* init_slm(int embed_dim, int state_dim, int seq_len, int num_layers, int bat
 
     // Allocate device memory for embeddings
     CHECK_CUDA(cudaMalloc(&slm->d_embeddings, slm->vocab_size * slm->embed_dim * sizeof(__half)));
-    CHECK_CUDA(cudaMalloc(&slm->d_embeddings_grad, slm->vocab_size * slm->embed_dim * sizeof(__half)));
-    CHECK_CUDA(cudaMalloc(&slm->d_embeddings_m, slm->vocab_size * slm->embed_dim * sizeof(__half)));
-    CHECK_CUDA(cudaMalloc(&slm->d_embeddings_v, slm->vocab_size * slm->embed_dim * sizeof(__half)));
+    CHECK_CUDA(cudaMalloc(&slm->d_embeddings_grad, slm->vocab_size * slm->embed_dim * sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&slm->d_embeddings_m, slm->vocab_size * slm->embed_dim * sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&slm->d_embeddings_v, slm->vocab_size * slm->embed_dim * sizeof(float)));
     
     // Allocate device memory for working buffers
     CHECK_CUDA(cudaMalloc(&slm->d_embedded_input, seq_len * batch_size * embed_dim * sizeof(__half)));
@@ -46,8 +46,8 @@ SLM* init_slm(int embed_dim, int state_dim, int seq_len, int num_layers, int bat
     
     // Initialize device memory
     CHECK_CUDA(cudaMemcpy(slm->d_embeddings, h_embeddings, slm->vocab_size * slm->embed_dim * sizeof(__half), cudaMemcpyHostToDevice));
-    CHECK_CUDA(cudaMemset(slm->d_embeddings_m, 0, slm->vocab_size * slm->embed_dim * sizeof(__half)));
-    CHECK_CUDA(cudaMemset(slm->d_embeddings_v, 0, slm->vocab_size * slm->embed_dim * sizeof(__half)));
+    CHECK_CUDA(cudaMemset(slm->d_embeddings_m, 0, slm->vocab_size * slm->embed_dim * sizeof(float)));
+    CHECK_CUDA(cudaMemset(slm->d_embeddings_v, 0, slm->vocab_size * slm->embed_dim * sizeof(float)));
     
     // Free local host memory
     free(h_embeddings);
@@ -148,7 +148,7 @@ __global__ void cross_entropy_loss_kernel(float* losses, __half* grad, __half* s
 }
 
 // CUDA kernel for embedding gradient accumulation
-__global__ void embedding_gradient_kernel(__half* embed_grad, __half* input_grad, unsigned char* chars,
+__global__ void embedding_gradient_kernel(float* embed_grad, __half* input_grad, unsigned char* chars,
                                                int batch_size, int embed_dim) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     
@@ -156,34 +156,8 @@ __global__ void embedding_gradient_kernel(__half* embed_grad, __half* input_grad
         int char_idx = chars[idx];
         for (int i = 0; i < embed_dim; i++) {
             // Atomic add
-            atomicAdd(&embed_grad[char_idx * embed_dim + i], input_grad[idx * embed_dim + i]);
+            atomicAdd(&embed_grad[char_idx * embed_dim + i], __half2float(input_grad[idx * embed_dim + i]));
         }
-    }
-}
-
-// CUDA kernel for AdamW update
-__global__ void adamw_update_kernel_slm(__half* weight, __half* grad, __half* m, __half* v,
-                                        __half beta1, __half beta2, __half epsilon, __half learning_rate,
-                                        __half weight_decay, __half alpha_t, int size, int total_samples) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < size) {
-        __half g = __hdiv(grad[idx], __float2half((float)total_samples));
-        __half one = __float2half(1.0f);
-        
-        // m = β₁m + (1-β₁)(∂L/∂W)
-        __half one_minus_beta1 = __hsub(one, beta1);
-        m[idx] = __hadd(__hmul(beta1, m[idx]), __hmul(one_minus_beta1, g));
-        
-        // v = β₂v + (1-β₂)(∂L/∂W)²
-        __half one_minus_beta2 = __hsub(one, beta2);
-        __half g_squared = __hmul(g, g);
-        v[idx] = __hadd(__hmul(beta2, v[idx]), __hmul(one_minus_beta2, g_squared));
-        
-        __half update = __hdiv(__hmul(alpha_t, m[idx]), __hadd(hsqrt(v[idx]), epsilon));
-        
-        // W = (1-λη)W - update
-        __half decay_factor = __hsub(one, __hmul(learning_rate, weight_decay));
-        weight[idx] = __hsub(__hmul(weight[idx], decay_factor), update);
     }
 }
 
@@ -249,13 +223,12 @@ void zero_gradients_slm(SLM* slm) {
     for (int i = 0; i < slm->num_layers; i++) {
         zero_gradients_ssm(slm->ssms[i]);
     }
-    CHECK_CUDA(cudaMemset(slm->d_embeddings_grad, 0, slm->vocab_size * slm->embed_dim * sizeof(__half)));
+    CHECK_CUDA(cudaMemset(slm->d_embeddings_grad, 0, slm->vocab_size * slm->embed_dim * sizeof(float)));
 }
 
 // Backward pass for single timestep
 void backward_pass_slm(SLM* slm, unsigned char* d_X_t, int timestep) {
-    const __half alpha = __float2half(1.0f);
-    const __half beta = __float2half(0.0f);
+    const float alpha_f = 1.0f;
     int batch_size = slm->ssms[0]->batch_size;
     
     for (int layer = slm->num_layers - 1; layer >= 1; layer--) {
@@ -271,17 +244,25 @@ void backward_pass_slm(SLM* slm, unsigned char* d_X_t, int timestep) {
         __half* error_output_t = slm->ssms[layer]->d_error_output + timestep * batch_size * slm->ssms[layer]->output_dim;
         
         // ∂L/∂X = B^T (∂L/∂H) + D^T (∂L/∂Y)
-        CHECK_CUBLAS(cublasHgemm(slm->cublas_handle, CUBLAS_OP_N, CUBLAS_OP_N,
-                                slm->embed_dim, batch_size, slm->ssms[layer]->state_dim,
-                                &alpha, slm->ssms[layer]->d_B, slm->embed_dim,
-                                error_hidden_t, slm->ssms[layer]->state_dim,
-                                &beta, input_grad_t, slm->embed_dim));
+        CHECK_CUBLAS(cublasGemmEx(slm->cublas_handle,
+                                 CUBLAS_OP_N, CUBLAS_OP_N,
+                                 slm->embed_dim, batch_size, slm->ssms[layer]->state_dim,
+                                 &alpha_f,
+                                 slm->ssms[layer]->d_B, CUDA_R_16F, slm->embed_dim,
+                                 error_hidden_t, CUDA_R_16F, slm->ssms[layer]->state_dim,
+                                 &alpha_f,
+                                 input_grad_t, CUDA_R_16F, slm->embed_dim,
+                                 CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT));
         
-        CHECK_CUBLAS(cublasHgemm(slm->cublas_handle, CUBLAS_OP_N, CUBLAS_OP_N,
-                                slm->embed_dim, batch_size, slm->ssms[layer]->output_dim,
-                                &alpha, slm->ssms[layer]->d_D, slm->embed_dim,
-                                error_output_t, slm->ssms[layer]->output_dim,
-                                &alpha, input_grad_t, slm->embed_dim));
+        CHECK_CUBLAS(cublasGemmEx(slm->cublas_handle,
+                                 CUBLAS_OP_N, CUBLAS_OP_N,
+                                 slm->embed_dim, batch_size, slm->ssms[layer]->output_dim,
+                                 &alpha_f,
+                                 slm->ssms[layer]->d_D, CUDA_R_16F, slm->embed_dim,
+                                 error_output_t, CUDA_R_16F, slm->ssms[layer]->output_dim,
+                                 &alpha_f,
+                                 input_grad_t, CUDA_R_16F, slm->embed_dim,
+                                 CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT));
         
         // Copy to previous layer's error buffer
         __half* prev_error_output_t = slm->ssms[layer - 1]->d_error_output + timestep * batch_size * slm->embed_dim;
@@ -298,17 +279,25 @@ void backward_pass_slm(SLM* slm, unsigned char* d_X_t, int timestep) {
     __half* error_output_t = slm->ssms[0]->d_error_output + timestep * batch_size * slm->ssms[0]->output_dim;
     
     // ∂L/∂E = B₀^T (∂L/∂H₀) + D₀^T (∂L/∂Y₀)
-    CHECK_CUBLAS(cublasHgemm(slm->cublas_handle, CUBLAS_OP_N, CUBLAS_OP_N,
-                            slm->embed_dim, batch_size, slm->ssms[0]->state_dim,
-                            &alpha, slm->ssms[0]->d_B, slm->embed_dim,
-                            error_hidden_t, slm->ssms[0]->state_dim,
-                            &beta, embed_grad_t, slm->embed_dim));
+    CHECK_CUBLAS(cublasGemmEx(slm->cublas_handle,
+                             CUBLAS_OP_N, CUBLAS_OP_N,
+                             slm->embed_dim, batch_size, slm->ssms[0]->state_dim,
+                             &alpha_f,
+                             slm->ssms[0]->d_B, CUDA_R_16F, slm->embed_dim,
+                             error_hidden_t, CUDA_R_16F, slm->ssms[0]->state_dim,
+                             &alpha_f,
+                             embed_grad_t, CUDA_R_16F, slm->embed_dim,
+                             CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT));
     
-    CHECK_CUBLAS(cublasHgemm(slm->cublas_handle, CUBLAS_OP_N, CUBLAS_OP_N,
-                            slm->embed_dim, batch_size, slm->ssms[0]->output_dim,
-                            &alpha, slm->ssms[0]->d_D, slm->embed_dim,
-                            error_output_t, slm->ssms[0]->output_dim,
-                            &alpha, embed_grad_t, slm->embed_dim));
+    CHECK_CUBLAS(cublasGemmEx(slm->cublas_handle,
+                             CUBLAS_OP_N, CUBLAS_OP_N,
+                             slm->embed_dim, batch_size, slm->ssms[0]->output_dim,
+                             &alpha_f,
+                             slm->ssms[0]->d_D, CUDA_R_16F, slm->embed_dim,
+                             error_output_t, CUDA_R_16F, slm->ssms[0]->output_dim,
+                             &alpha_f,
+                             embed_grad_t, CUDA_R_16F, slm->embed_dim,
+                             CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT));
     
     // Accumulate embedding gradients
     dim3 block(256), grid((batch_size + 255) / 256);
@@ -318,7 +307,7 @@ void backward_pass_slm(SLM* slm, unsigned char* d_X_t, int timestep) {
 }
 
 // Update weights using AdamW
-void update_weights_slm(SLM* slm, __half learning_rate) {
+void update_weights_slm(SLM* slm, float learning_rate) {
     // Update all SSM weights
     for (int i = 0; i < slm->num_layers; i++) {
         update_weights_ssm(slm->ssms[i], learning_rate);
@@ -328,12 +317,11 @@ void update_weights_slm(SLM* slm, __half learning_rate) {
     int embed_size = slm->vocab_size * slm->embed_dim;
     int blocks = (embed_size + 255) / 256;
     
-    float beta1_t_f = powf(__half2float(slm->ssms[0]->beta1), slm->ssms[0]->t);
-    float beta2_t_f = powf(__half2float(slm->ssms[0]->beta2), slm->ssms[0]->t);
-    float alpha_t_f = __half2float(learning_rate) * sqrtf(1.0f - beta2_t_f) / (1.0f - beta1_t_f);
-    __half alpha_t = __float2half(alpha_t_f);
+    float beta1_t = powf(slm->ssms[0]->beta1, slm->ssms[0]->t);
+    float beta2_t = powf(slm->ssms[0]->beta2, slm->ssms[0]->t);
+    float alpha_t = learning_rate * sqrtf(1.0f - beta2_t) / (1.0f - beta1_t);
     
-    adamw_update_kernel_slm<<<blocks, 256>>>(
+    adamw_update_kernel_ssm<<<blocks, 256>>>(
         slm->d_embeddings, slm->d_embeddings_grad,
         slm->d_embeddings_m, slm->d_embeddings_v,
         slm->ssms[0]->beta1, slm->ssms[0]->beta2, slm->ssms[0]->epsilon,
@@ -366,13 +354,13 @@ void save_slm(SLM* slm, const char* filename) {
     
     // Allocate temporary host memory for embeddings
     __half* h_embeddings = (__half*)malloc(slm->vocab_size * slm->embed_dim * sizeof(__half));
-    __half* h_embeddings_m = (__half*)malloc(slm->vocab_size * slm->embed_dim * sizeof(__half));
-    __half* h_embeddings_v = (__half*)malloc(slm->vocab_size * slm->embed_dim * sizeof(__half));
+    float* h_embeddings_m = (float*)malloc(slm->vocab_size * slm->embed_dim * sizeof(float));
+    float* h_embeddings_v = (float*)malloc(slm->vocab_size * slm->embed_dim * sizeof(float));
     
     // Copy embeddings from device to host
     CHECK_CUDA(cudaMemcpy(h_embeddings, slm->d_embeddings, slm->vocab_size * slm->embed_dim * sizeof(__half), cudaMemcpyDeviceToHost));
-    CHECK_CUDA(cudaMemcpy(h_embeddings_m, slm->d_embeddings_m, slm->vocab_size * slm->embed_dim * sizeof(__half), cudaMemcpyDeviceToHost));
-    CHECK_CUDA(cudaMemcpy(h_embeddings_v, slm->d_embeddings_v, slm->vocab_size * slm->embed_dim * sizeof(__half), cudaMemcpyDeviceToHost));
+    CHECK_CUDA(cudaMemcpy(h_embeddings_m, slm->d_embeddings_m, slm->vocab_size * slm->embed_dim * sizeof(float), cudaMemcpyDeviceToHost));
+    CHECK_CUDA(cudaMemcpy(h_embeddings_v, slm->d_embeddings_v, slm->vocab_size * slm->embed_dim * sizeof(float), cudaMemcpyDeviceToHost));
     
     FILE* file = fopen(embed_file, "wb");
     if (!file) {
@@ -393,8 +381,8 @@ void save_slm(SLM* slm, const char* filename) {
     
     // Save embeddings and Adam state
     fwrite(h_embeddings, sizeof(__half), slm->vocab_size * slm->embed_dim, file);
-    fwrite(h_embeddings_m, sizeof(__half), slm->vocab_size * slm->embed_dim, file);
-    fwrite(h_embeddings_v, sizeof(__half), slm->vocab_size * slm->embed_dim, file);
+    fwrite(h_embeddings_m, sizeof(float), slm->vocab_size * slm->embed_dim, file);
+    fwrite(h_embeddings_v, sizeof(float), slm->vocab_size * slm->embed_dim, file);
     
     // Free temporary host memory
     free(h_embeddings);
@@ -434,13 +422,13 @@ SLM* load_slm(const char* filename, int custom_batch_size) {
     
     // Allocate temporary host memory for embeddings
     __half* h_embeddings = (__half*)malloc(vocab_size * embed_dim * sizeof(__half));
-    __half* h_embeddings_m = (__half*)malloc(vocab_size * embed_dim * sizeof(__half));
-    __half* h_embeddings_v = (__half*)malloc(vocab_size * embed_dim * sizeof(__half));
+    float* h_embeddings_m = (float*)malloc(vocab_size * embed_dim * sizeof(float));
+    float* h_embeddings_v = (float*)malloc(vocab_size * embed_dim * sizeof(float));
     
     // Read embeddings and Adam state
     fread(h_embeddings, sizeof(__half), vocab_size * embed_dim, file);
-    fread(h_embeddings_m, sizeof(__half), vocab_size * embed_dim, file);
-    fread(h_embeddings_v, sizeof(__half), vocab_size * embed_dim, file);
+    fread(h_embeddings_m, sizeof(float), vocab_size * embed_dim, file);
+    fread(h_embeddings_v, sizeof(float), vocab_size * embed_dim, file);
     fclose(file);
     
     // Initialize SLM with loaded parameters
@@ -448,8 +436,8 @@ SLM* load_slm(const char* filename, int custom_batch_size) {
     
     // Copy embeddings to device
     CHECK_CUDA(cudaMemcpy(slm->d_embeddings, h_embeddings, vocab_size * embed_dim * sizeof(__half), cudaMemcpyHostToDevice));
-    CHECK_CUDA(cudaMemcpy(slm->d_embeddings_m, h_embeddings_m, vocab_size * embed_dim * sizeof(__half), cudaMemcpyHostToDevice));
-    CHECK_CUDA(cudaMemcpy(slm->d_embeddings_v, h_embeddings_v, vocab_size * embed_dim * sizeof(__half), cudaMemcpyHostToDevice));
+    CHECK_CUDA(cudaMemcpy(slm->d_embeddings_m, h_embeddings_m, vocab_size * embed_dim * sizeof(float), cudaMemcpyHostToDevice));
+    CHECK_CUDA(cudaMemcpy(slm->d_embeddings_v, h_embeddings_v, vocab_size * embed_dim * sizeof(float), cudaMemcpyHostToDevice));
     
     free(h_embeddings);
     free(h_embeddings_m);

@@ -53,7 +53,7 @@ int main(int argc, char* argv[]) {
 
     // Training parameters
     const int num_batches = 1000000;
-    const __half learning_rate = __float2half(0.0001f);
+    const float learning_rate = 0.0001f;
     const int acc_steps = 1;
     
     // Pre-allocate memory for sequences
@@ -137,7 +137,7 @@ int main(int argc, char* argv[]) {
         if ((batch + 1) % acc_steps == 0) update_weights_slm(slm, learning_rate);
             
         // Print progress
-        printf("Batch [%d/%d], Loss: %.6f, LR: %.6f\n", batch, num_batches, loss, __half2float(learning_rate));        
+        printf("Batch [%d/%d], Loss: %.6f, LR: %.6f\n", batch, num_batches, loss, learning_rate);        
 
         // Generate sample text
         if (batch % 200 == 0) {
