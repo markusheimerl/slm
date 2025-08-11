@@ -3,10 +3,24 @@
 #include <math.h>
 #include <time.h>
 #include <string.h>
+#include <signal.h>
 #include "data.h"
 #include "slm.h"
 
-// Function to calculate total model parameters
+SLM* slm = NULL;
+
+// SIGINT handler to save model and exit
+void handle_sigint(int signum) {
+    if (slm) {
+        char model_filename[64];
+        time_t now = time(NULL);
+        strftime(model_filename, sizeof(model_filename), "%Y%m%d_%H%M%S_model.bin", localtime(&now));
+        save_slm(slm, model_filename);
+    }
+    exit(128 + signum);
+}
+
+// Calculate total model parameters
 size_t calculate_model_parameters(SLM* slm) {
     size_t total_params = 0;
     total_params += slm->vocab_size * slm->embed_dim;
@@ -24,7 +38,8 @@ size_t calculate_model_parameters(SLM* slm) {
 
 int main(int argc, char* argv[]) {
     srand(time(NULL));
-    
+    signal(SIGINT, handle_sigint);
+
     // Parse command line arguments
     char* model_file = NULL;
     if (argc > 1) model_file = argv[1];
@@ -53,7 +68,6 @@ int main(int argc, char* argv[]) {
     CHECK_CUDA(cudaMalloc(&d_target_chars, seq_len * batch_size * sizeof(unsigned char)));
     
     // Initialize or load model
-    SLM* slm;
     if (model_file) {
         printf("Loading model from %s\n", model_file);
         slm = load_slm(model_file, batch_size);
@@ -123,8 +137,7 @@ int main(int argc, char* argv[]) {
         if ((batch + 1) % acc_steps == 0) update_weights_slm(slm, learning_rate);
             
         // Print progress
-        printf("Batch [%d/%d], Loss: %.6f, LR: %.6f\n", batch, num_batches, loss, learning_rate);
-        
+        printf("Batch [%d/%d], Loss: %.6f, LR: %.6f\n", batch, num_batches, loss, learning_rate);        
 
         // Generate sample text
         if (batch % 200 == 0) {
