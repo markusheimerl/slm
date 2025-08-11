@@ -33,3 +33,4 @@ cont: train.out
 clean:
 	rm -f *.out *.o *.csv *.bin
 	$(MAKE) -C ssm clean
+	$(MAKE) -C fp16 clean
