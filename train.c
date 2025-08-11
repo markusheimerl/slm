@@ -142,10 +142,10 @@ int main(int argc, char* argv[]) {
         // Generate sample text
         if (batch % 200 == 0) {
             printf("\n--- Sample Generation at Batch %d ---\n", batch);
-            generate_text_slm(slm, "The quick brown fox", 128, 0.8f, 0.9f);
-            generate_text_slm(slm, "Once upon a time", 128, 0.8f, 0.9f);
-            generate_text_slm(slm, "In the beginning", 128, 0.8f, 0.9f);
-            generate_text_slm(slm, "The government announced today that", 128, 0.8f, 0.9f);
+            generate_text_slm(slm, "The quick brown fox jumps over the lazy dog and then sits beside the river to watch ", 128, 0.8f, 0.9f);
+            generate_text_slm(slm, "Once upon a time, in a distant kingdom, there lived a wise old king who loved to ", 128, 0.8f, 0.9f);
+            generate_text_slm(slm, "Scientists at the university have discovered a new method for producing ", 128, 0.8f, 0.9f);
+            generate_text_slm(slm, "In an unexpected turn of events, the latest smartphone update has caused users to experience ", 128, 0.8f, 0.9f);
             printf("--- End Sample Generation ---\n\n");
         }
     }
