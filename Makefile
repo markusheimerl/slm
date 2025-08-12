@@ -31,5 +31,5 @@ cont: train.out
 	@time ./train.out $(shell ls -t *_model_embeddings.bin 2>/dev/null | head -1 | sed 's/_embeddings\.bin/.bin/')
 
 clean:
-	rm -f *.out *.o *.csv *.bin
+	rm -f *.out *.o *.csv
 	$(MAKE) -C ssm clean
