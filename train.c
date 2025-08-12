@@ -89,7 +89,7 @@ int main(int argc, char* argv[]) {
     char* corpus = load_corpus("gutenberg_corpus.txt", &corpus_size, model_size * 500);
 
     // Training loop
-    for (int batch = 0; batch <= num_batches; batch++) {
+    for (int batch = slm->ssms[0]->t; batch <= num_batches; batch++) {
         // Generate fresh training data from random corpus locations
         generate_char_sequences_from_corpus(&input_chars, &target_chars, batch_size, seq_len, corpus, corpus_size);
         
@@ -142,10 +142,10 @@ int main(int argc, char* argv[]) {
         // Generate sample text
         if (batch % 200 == 0) {
             printf("\n--- Sample Generation at Batch %d ---\n", batch);
-            generate_text_slm(slm, "The quick brown fox jumps over the lazy dog and then sits beside the river to watch ", 128, 0.8f, 0.9f);
-            generate_text_slm(slm, "Once upon a time, in a distant kingdom, there lived a wise old king who loved to ", 128, 0.8f, 0.9f);
-            generate_text_slm(slm, "Scientists at the university have discovered a new method for producing ", 128, 0.8f, 0.9f);
-            generate_text_slm(slm, "In an unexpected turn of events, the latest smartphone update has caused users to experience ", 128, 0.8f, 0.9f);
+            generate_text_slm(slm, "The quick brown fox jumps over the lazy dog and then sits beside the river to watch ", 512, 0.9f, 0.99f);
+            generate_text_slm(slm, "Once upon a time, in a distant kingdom, there lived a wise old king who loved to ", 512, 0.9f, 0.99f);
+            generate_text_slm(slm, "Scientists at the university have discovered a new method for producing ", 512, 0.9f, 0.99f);
+            generate_text_slm(slm, "In an unexpected turn of events, the latest smartphone update has caused users to experience ", 512, 0.9f, 0.99f);
             printf("--- End Sample Generation ---\n\n");
         }
     }
