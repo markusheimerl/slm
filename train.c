@@ -53,7 +53,7 @@ int main(int argc, char* argv[]) {
 
     // Training parameters
     const int num_batches = 1000000;
-    const float learning_rate = 0.00002f;
+    const float learning_rate = 0.000001f;
     const int acc_steps = 1;
     
     // Pre-allocate memory for sequences
