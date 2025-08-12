@@ -39,7 +39,7 @@ where temperature $\tau$ controls sampling entropy - $\tau \rightarrow 0$ approa
 
 Nucleus sampling further improves generation quality by restricting sampling to the nucleus of the probability distribution. For a given threshold $p \in (0,1)$, only tokens with cumulative probability $\leq p$ (when sorted in descending order by probability) are considered for sampling. This eliminates low-probability tokens that could lead to incoherent text, while preserving diversity within the most likely candidates.
 
-The AdamW optimizer with weight decay is used for training, maintaining exponential moving averages for all parameters.
+The Lion optimizer with weight decay is used for training, maintaining exponential moving averages for gradient-based momentum updates.
 
 The implementation leverages CUDA for parallel computation across batch and sequence dimensions, with efficient kernel implementations for embedding lookup, Swish activation, softmax normalization, and gradient accumulation. Character sequences are extracted from text corpora through random position sampling, providing diverse training contexts.
 
