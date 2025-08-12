@@ -86,7 +86,7 @@ int main(int argc, char* argv[]) {
     
     // Load training corpus
     size_t corpus_size;
-    char* corpus = load_corpus("gutenberg_corpus.txt", &corpus_size, model_size * 500);
+    char* corpus = load_corpus("corpus.txt", &corpus_size);
 
     // Training loop
     for (int batch = slm->ssms[0]->t; batch <= num_batches; batch++) {
