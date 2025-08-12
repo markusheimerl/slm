@@ -35,7 +35,6 @@ SLM* init_slm(int embed_dim, int state_dim, int seq_len, int num_layers, int bat
     CHECK_CUDA(cudaMalloc(&slm->d_embeddings, slm->vocab_size * slm->embed_dim * sizeof(float)));
     CHECK_CUDA(cudaMalloc(&slm->d_embeddings_grad, slm->vocab_size * slm->embed_dim * sizeof(float)));
     CHECK_CUDA(cudaMalloc(&slm->d_embeddings_m, slm->vocab_size * slm->embed_dim * sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&slm->d_embeddings_v, slm->vocab_size * slm->embed_dim * sizeof(float)));
     
     // Allocate device memory for working buffers
     CHECK_CUDA(cudaMalloc(&slm->d_embedded_input, seq_len * batch_size * embed_dim * sizeof(float)));
@@ -46,7 +45,6 @@ SLM* init_slm(int embed_dim, int state_dim, int seq_len, int num_layers, int bat
     // Initialize device memory
     CHECK_CUDA(cudaMemcpy(slm->d_embeddings, h_embeddings, slm->vocab_size * slm->embed_dim * sizeof(float), cudaMemcpyHostToDevice));
     CHECK_CUDA(cudaMemset(slm->d_embeddings_m, 0, slm->vocab_size * slm->embed_dim * sizeof(float)));
-    CHECK_CUDA(cudaMemset(slm->d_embeddings_v, 0, slm->vocab_size * slm->embed_dim * sizeof(float)));
     
     // Free local host memory
     free(h_embeddings);
@@ -67,7 +65,6 @@ void free_slm(SLM* slm) {
         cudaFree(slm->d_embeddings);
         cudaFree(slm->d_embeddings_grad);
         cudaFree(slm->d_embeddings_m);
-        cudaFree(slm->d_embeddings_v);
         cudaFree(slm->d_embedded_input);
         cudaFree(slm->d_softmax);
         cudaFree(slm->d_input_gradients);
@@ -286,27 +283,23 @@ void backward_pass_slm(SLM* slm, unsigned char* d_X_t, int timestep) {
     );
 }
 
-// Update weights using AdamW
+// Update weights
 void update_weights_slm(SLM* slm, float learning_rate) {
     // Update all SSM weights
     for (int i = 0; i < slm->num_layers; i++) {
         update_weights_ssm(slm->ssms[i], learning_rate);
     }
     
-    // Update embeddings using AdamW
+    // Update embeddings
     int embed_size = slm->vocab_size * slm->embed_dim;
     int blocks = (embed_size + 255) / 256;
+    int total_samples = slm->ssms[0]->seq_len * slm->ssms[0]->batch_size;
     
-    float beta1_t = powf(slm->ssms[0]->beta1, slm->ssms[0]->t);
-    float beta2_t = powf(slm->ssms[0]->beta2, slm->ssms[0]->t);
-    float alpha_t = learning_rate * sqrtf(1.0f - beta2_t) / (1.0f - beta1_t);
-    
-    adamw_update_kernel_ssm<<<blocks, 256>>>(
+    lion_update_kernel_ssm<<<blocks, 256>>>(
         slm->d_embeddings, slm->d_embeddings_grad,
-        slm->d_embeddings_m, slm->d_embeddings_v,
-        slm->ssms[0]->beta1, slm->ssms[0]->beta2, slm->ssms[0]->epsilon,
-        learning_rate, slm->ssms[0]->weight_decay, alpha_t,
-        embed_size, slm->ssms[0]->seq_len * slm->ssms[0]->batch_size
+        slm->d_embeddings_m,
+        slm->ssms[0]->beta1, slm->ssms[0]->beta2, learning_rate,
+        slm->ssms[0]->weight_decay, embed_size, total_samples
     );
 }
 
@@ -335,19 +328,16 @@ void save_slm(SLM* slm, const char* filename) {
     // Allocate temporary host memory for embeddings
     float* h_embeddings = (float*)malloc(slm->vocab_size * slm->embed_dim * sizeof(float));
     float* h_embeddings_m = (float*)malloc(slm->vocab_size * slm->embed_dim * sizeof(float));
-    float* h_embeddings_v = (float*)malloc(slm->vocab_size * slm->embed_dim * sizeof(float));
     
     // Copy embeddings from device to host
     CHECK_CUDA(cudaMemcpy(h_embeddings, slm->d_embeddings, slm->vocab_size * slm->embed_dim * sizeof(float), cudaMemcpyDeviceToHost));
     CHECK_CUDA(cudaMemcpy(h_embeddings_m, slm->d_embeddings_m, slm->vocab_size * slm->embed_dim * sizeof(float), cudaMemcpyDeviceToHost));
-    CHECK_CUDA(cudaMemcpy(h_embeddings_v, slm->d_embeddings_v, slm->vocab_size * slm->embed_dim * sizeof(float), cudaMemcpyDeviceToHost));
     
     FILE* file = fopen(embed_file, "wb");
     if (!file) {
         printf("Error opening file for writing: %s\n", embed_file);
         free(h_embeddings);
         free(h_embeddings_m);
-        free(h_embeddings_v);
         return;
     }
     
@@ -359,15 +349,13 @@ void save_slm(SLM* slm, const char* filename) {
     fwrite(&slm->ssms[0]->state_dim, sizeof(int), 1, file);
     fwrite(&slm->ssms[0]->batch_size, sizeof(int), 1, file);
     
-    // Save embeddings and Adam state
+    // Save embeddings and Lion state
     fwrite(h_embeddings, sizeof(float), slm->vocab_size * slm->embed_dim, file);
     fwrite(h_embeddings_m, sizeof(float), slm->vocab_size * slm->embed_dim, file);
-    fwrite(h_embeddings_v, sizeof(float), slm->vocab_size * slm->embed_dim, file);
     
     // Free temporary host memory
     free(h_embeddings);
     free(h_embeddings_m);
-    free(h_embeddings_v);
     
     fclose(file);
     printf("Embeddings saved to %s\n", embed_file);
@@ -403,12 +391,10 @@ SLM* load_slm(const char* filename, int custom_batch_size) {
     // Allocate temporary host memory for embeddings
     float* h_embeddings = (float*)malloc(vocab_size * embed_dim * sizeof(float));
     float* h_embeddings_m = (float*)malloc(vocab_size * embed_dim * sizeof(float));
-    float* h_embeddings_v = (float*)malloc(vocab_size * embed_dim * sizeof(float));
     
-    // Read embeddings and Adam state
+    // Read embeddings and Lion state
     fread(h_embeddings, sizeof(float), vocab_size * embed_dim, file);
     fread(h_embeddings_m, sizeof(float), vocab_size * embed_dim, file);
-    fread(h_embeddings_v, sizeof(float), vocab_size * embed_dim, file);
     fclose(file);
     
     // Initialize SLM with loaded parameters
@@ -417,11 +403,9 @@ SLM* load_slm(const char* filename, int custom_batch_size) {
     // Copy embeddings to device
     CHECK_CUDA(cudaMemcpy(slm->d_embeddings, h_embeddings, vocab_size * embed_dim * sizeof(float), cudaMemcpyHostToDevice));
     CHECK_CUDA(cudaMemcpy(slm->d_embeddings_m, h_embeddings_m, vocab_size * embed_dim * sizeof(float), cudaMemcpyHostToDevice));
-    CHECK_CUDA(cudaMemcpy(slm->d_embeddings_v, h_embeddings_v, vocab_size * embed_dim * sizeof(float), cudaMemcpyHostToDevice));
     
     free(h_embeddings);
     free(h_embeddings_m);
-    free(h_embeddings_v);
     
     // Load SSMs
     for (int i = 0; i < num_layers; i++) {

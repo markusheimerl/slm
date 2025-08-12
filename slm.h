@@ -18,7 +18,6 @@ typedef struct {
     float* d_embeddings;        // vocab_size x embed_dim
     float* d_embeddings_grad;   // vocab_size x embed_dim
     float* d_embeddings_m;      // vocab_size x embed_dim
-    float* d_embeddings_v;      // vocab_size x embed_dim
     
     // Device pointers for working buffers
     float* d_embedded_input;    // seq_len x batch_size x embed_dim
