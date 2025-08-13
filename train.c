@@ -48,12 +48,12 @@ int main(int argc, char* argv[]) {
     const int embed_dim = 512;
     const int state_dim = 2048;
     const int seq_len = 2048;
-    const int num_layers = 11;
+    const int num_layers = 12;
     const int batch_size = 32;
 
     // Training parameters
     const int num_batches = 1000000;
-    const float learning_rate = 0.00002f;
+    const float learning_rate = 0.000001f;
     const int acc_steps = 1;
     
     // Pre-allocate memory for sequences
@@ -89,7 +89,7 @@ int main(int argc, char* argv[]) {
     char* corpus = load_corpus("corpus.txt", &corpus_size);
 
     // Training loop
-    for (int batch = slm->ssms[0]->t; batch <= num_batches; batch++) {
+    for (int batch = 0; batch <= num_batches; batch++) {
         // Generate fresh training data from random corpus locations
         generate_char_sequences_from_corpus(&input_chars, &target_chars, batch_size, seq_len, corpus, corpus_size);
         

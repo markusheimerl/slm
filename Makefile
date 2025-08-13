@@ -1,6 +1,6 @@
 CC = clang
 CFLAGS = -O3 -march=native -ffast-math -Wall -Wextra
-LDFLAGS = -lm -lcurl -flto
+LDFLAGS = -lm -flto
 
 ARCH ?= sm_87
 CUDAFLAGS = --cuda-gpu-arch=$(ARCH) -x cuda -Wno-unknown-cuda-version
@@ -31,5 +31,5 @@ cont: train.out
 	@time ./train.out $(shell ls -t *_model_embeddings.bin 2>/dev/null | head -1 | sed 's/_embeddings\.bin/.bin/')
 
 clean:
-	rm -f *.out *.o *.csv *.bin
+	rm -f *.out *.o *.csv
 	$(MAKE) -C ssm clean
