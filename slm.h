@@ -5,9 +5,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <time.h>
 #include <cublas_v2.h>
 #include <cuda_runtime.h>
 #include "transformer/gpu/transformer.h"
+#include "data.h"
 
 // CUDA Error checking macro
 #ifndef CHECK_CUDA
@@ -33,61 +35,75 @@
 } while(0)
 #endif
 
+#define VOCAB_SIZE 256  // Character-level: 0-255
+
 typedef struct {
-    // Transformer component
     Transformer* transformer;
+    cublasHandle_t cublas_handle;
     
-    // Device pointers for embeddings
-    float* d_embeddings;        // vocab_size x embed_dim
-    float* d_embeddings_grad;   // vocab_size x embed_dim
-    float* d_embeddings_m;      // First moment for embeddings (AdamW)
-    float* d_embeddings_v;      // Second moment for embeddings (AdamW)
+    // Embedding layers
+    float* d_token_embedding;     // [VOCAB_SIZE x d_model]
+    float* d_position_embedding;  // [seq_len x d_model]
+    float* d_output_projection;   // [d_model x VOCAB_SIZE]
     
-    // AdamW parameters for embeddings
+    // Embedding gradients
+    float* d_token_embedding_grad;
+    float* d_position_embedding_grad;
+    float* d_output_projection_grad;
+    
+    // Adam parameters for embeddings
+    float* d_token_embedding_m;
+    float* d_token_embedding_v;
+    float* d_position_embedding_m;
+    float* d_position_embedding_v;
+    float* d_output_projection_m;
+    float* d_output_projection_v;
+    
+    // Forward pass buffers
+    float* d_embedded_input;      // [batch_size x seq_len x d_model]
+    float* d_logits;             // [batch_size x seq_len x VOCAB_SIZE]
+    float* d_probabilities;      // [batch_size x seq_len x VOCAB_SIZE]
+    
+    // Backward pass buffers
+    float* d_grad_embedded;      // [batch_size x seq_len x d_model]
+    float* d_grad_logits;        // [batch_size x seq_len x VOCAB_SIZE]
+    
+    // Working buffers
+    float* d_temp_embedding;     // [batch_size x seq_len x d_model]
+    
+    // Adam parameters
     float beta1;
     float beta2;
     float epsilon;
-    int t;                      // Time step
+    int t;
     float weight_decay;
     
-    // Device pointers for working buffers
-    float* d_embedded_input;    // batch_size x seq_len x embed_dim
-    float* d_softmax;           // batch_size x seq_len x vocab_size
-    float* d_input_gradients;   // batch_size x seq_len x embed_dim
-    float* d_losses;            // batch_size x seq_len
-    
-    // cuBLAS handle
-    cublasHandle_t cublas_handle;
-    
     // Dimensions
-    int vocab_size;
-    int embed_dim;
+    int d_model;
     int seq_len;
     int batch_size;
+    int vocab_size;
+    int num_layers;
+    int mlp_hidden;
 } SLM;
 
 // CUDA kernel prototypes
-__global__ void embedding_lookup_kernel(float* output, float* embeddings, unsigned char* chars, 
-                                       int batch_size, int seq_len, int embed_dim);
-__global__ void softmax_kernel(float* output, float* input, int batch_size, int seq_len, int vocab_size);
-__global__ void cross_entropy_loss_kernel(float* losses, float* grad, float* softmax, unsigned char* targets, 
-                                         int batch_size, int seq_len, int vocab_size);
-__global__ void embedding_gradient_kernel(float* embed_grad, float* input_grad, unsigned char* chars,
-                                         int batch_size, int seq_len, int embed_dim);
-__global__ void adamw_update_kernel_embeddings(float* weight, float* grad, float* m, float* v,
-                                              float beta1, float beta2, float epsilon, float learning_rate,
-                                              float weight_decay, float alpha_t, int size, int total_samples);
+__global__ void add_position_embeddings_kernel(float* embedded, float* pos_emb, int batch_size, int seq_len, int d_model);
+__global__ void softmax_kernel_slm(float* probabilities, float* logits, int batch_size, int seq_len, int vocab_size);
+__global__ void cross_entropy_backward_kernel(float* grad_logits, float* probabilities, unsigned char* targets, int batch_size, int seq_len, int vocab_size);
+__global__ void embedding_backward_kernel(float* embedding_grad, float* grad_embedded, unsigned char* tokens, int batch_size, int seq_len, int d_model, int vocab_size);
+__global__ void adamw_update_kernel_slm(float* weight, float* grad, float* m, float* v, float beta1, float beta2, float epsilon, float learning_rate, float weight_decay, float alpha_t, int size, int batch_size);
 
 // Function prototypes
-SLM* init_slm(int embed_dim, int seq_len, int num_layers, int mlp_hidden, int batch_size);
+SLM* init_slm(int d_model, int seq_len, int batch_size, int mlp_hidden, int num_layers, cublasHandle_t cublas_handle);
 void free_slm(SLM* slm);
-void forward_pass_slm(SLM* slm, unsigned char* d_X);
-float calculate_loss_slm(SLM* slm, unsigned char* d_y);
+void forward_pass_slm(SLM* slm, unsigned char* d_input_tokens);
+float calculate_loss_slm(SLM* slm, unsigned char* d_target_tokens);
 void zero_gradients_slm(SLM* slm);
-void backward_pass_slm(SLM* slm, unsigned char* d_X);
+void backward_pass_slm(SLM* slm, unsigned char* d_input_tokens);
 void update_weights_slm(SLM* slm, float learning_rate);
 void save_slm(SLM* slm, const char* filename);
-SLM* load_slm(const char* filename, int custom_batch_size);
-void generate_text_slm(SLM* slm, const char* seed_text, int generation_length, float temperature, float top_p);
+SLM* load_slm(const char* filename, int custom_batch_size, cublasHandle_t cublas_handle);
+void generate_text(SLM* slm, unsigned char* seed, int seed_len, int generate_len, float temperature);
 
 #endif
