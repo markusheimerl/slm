@@ -32,4 +32,4 @@ cont: train.out
 
 clean:
 	rm -f *.out *.o *.csv
-	$(MAKE) -C ssm clean
+	$(MAKE) -C transformer clean
