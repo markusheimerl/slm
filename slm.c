@@ -213,11 +213,11 @@ float calculate_loss_slm(SLM* slm, unsigned char* d_y) {
     // Get final transformer output for gradient computation
     MLP* final_mlp = slm->transformer->mlp_layers[slm->transformer->num_layers - 1];
     
-    // Compute both cross-entropy loss and logits gradient
+    // Compute both cross-entropy loss and write gradients directly to final MLP error buffer
     int blocks = (total_tokens + 255) / 256;
     cross_entropy_loss_kernel<<<blocks, 256>>>(
         slm->d_losses, 
-        final_mlp->d_error_output, 
+        final_mlp->d_error_output,  // Write directly to final MLP error buffer
         slm->d_softmax, 
         d_y, 
         slm->batch_size,
@@ -237,16 +237,48 @@ void zero_gradients_slm(SLM* slm) {
 
 // Backward pass
 void backward_pass_slm(SLM* slm, unsigned char* d_X) {
-    // Backward through transformer (this computes gradients w.r.t. transformer input)
+    const float alpha = 1.0f;
+    const float beta = 0.0f;
+    int total_seq = slm->batch_size * slm->seq_len;
+    
+    // Backward through transformer (gradients are already in final MLP error buffer from loss calculation)
     backward_pass_transformer(slm->transformer, slm->d_embedded_input);
     
-    // Get input gradients from first layer of transformer
+    // Get input gradients from first layer of transformer using the same logic as transformer backward pass
     Attention* first_attn = slm->transformer->attention_layers[0];
     
-    // Copy gradients to input gradients buffer
-    CHECK_CUDA(cudaMemcpy(slm->d_input_gradients, first_attn->d_error_output, 
-                         slm->batch_size * slm->seq_len * slm->embed_dim * sizeof(float), 
-                         cudaMemcpyDeviceToDevice));
+    // Compute gradient w.r.t. embedding input: ∂L/∂X = (∂L/∂Q)W_q^T + (∂L/∂K)W_k^T + (∂L/∂V)W_v^T
+    // ∂L/∂X = (∂L/∂Q)W_q^T
+    CHECK_CUBLAS(cublasSgemm(slm->cublas_handle,
+                            CUBLAS_OP_T, CUBLAS_OP_N,
+                            slm->embed_dim, total_seq, slm->embed_dim,
+                            &alpha, first_attn->d_W_q, slm->embed_dim,
+                            first_attn->d_grad_Q, slm->embed_dim,
+                            &beta, slm->d_input_gradients, slm->embed_dim));
+    
+    // ∂L/∂X += (∂L/∂K)W_k^T
+    CHECK_CUBLAS(cublasSgemm(slm->cublas_handle,
+                            CUBLAS_OP_T, CUBLAS_OP_N,
+                            slm->embed_dim, total_seq, slm->embed_dim,
+                            &alpha, first_attn->d_W_k, slm->embed_dim,
+                            first_attn->d_grad_K, slm->embed_dim,
+                            &alpha, slm->d_input_gradients, slm->embed_dim));
+    
+    // ∂L/∂X += (∂L/∂V)W_v^T
+    CHECK_CUBLAS(cublasSgemm(slm->cublas_handle,
+                            CUBLAS_OP_T, CUBLAS_OP_N,
+                            slm->embed_dim, total_seq, slm->embed_dim,
+                            &alpha, first_attn->d_W_v, slm->embed_dim,
+                            first_attn->d_grad_V, slm->embed_dim,
+                            &alpha, slm->d_input_gradients, slm->embed_dim));
+    
+    // Add gradient from residual connection
+    CHECK_CUBLAS(cublasSgeam(slm->cublas_handle,
+                            CUBLAS_OP_N, CUBLAS_OP_N,
+                            slm->embed_dim, total_seq,
+                            &alpha, slm->d_input_gradients, slm->embed_dim,
+                            &alpha, first_attn->d_error_output, slm->embed_dim,
+                            slm->d_input_gradients, slm->embed_dim));
     
     // Accumulate embedding gradients
     dim3 block(slm->embed_dim);
