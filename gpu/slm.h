@@ -34,34 +34,23 @@
 } while(0)
 #endif
 
-#define VOCAB_SIZE 256  // Character vocabulary (0-255)
-
 typedef struct {
-    // Embedding layers
+    // Token embedding layer
     float* d_token_embedding;      // [vocab_size x d_model]
-    float* d_position_embedding;   // [seq_len x d_model]
-    float* d_output_projection;    // [d_model x vocab_size]
-    
-    // Gradients for embedding layers
     float* d_token_embedding_grad; // [vocab_size x d_model]
-    float* d_position_embedding_grad; // [seq_len x d_model]
-    float* d_output_projection_grad;  // [d_model x vocab_size]
     
     // Adam parameters for embeddings
     float* d_token_embedding_m, *d_token_embedding_v;
-    float* d_position_embedding_m, *d_position_embedding_v;
-    float* d_output_projection_m, *d_output_projection_v;
     float beta1, beta2, epsilon, weight_decay;
     int t;
     
     // Forward pass buffers
     float* d_embedded_input;    // [batch_size x seq_len x d_model]
-    float* d_logits;           // [batch_size x seq_len x vocab_size]
-    float* d_probs;            // [batch_size x seq_len x vocab_size]
+    float* d_output;           // [batch_size x seq_len x d_model] (points to transformer output)
     
     // Backward pass buffers
+    float* d_grad_output;      // [batch_size x seq_len x d_model]
     float* d_grad_embedded;    // [batch_size x seq_len x d_model]
-    float* d_grad_logits;      // [batch_size x seq_len x vocab_size]
     
     // Loss computation buffer
     float* d_loss_result;      // [1]
@@ -69,29 +58,10 @@ typedef struct {
     // Transformer core
     Transformer* transformer;
     
-    // cuBLASLt handle and layouts
+    // cuBLASLt handle
     cublasLtHandle_t cublaslt_handle;
-    cublasLtMatmulDesc_t matmul_desc;
-    cublasLtMatmulDesc_t matmul_NT_desc;
-    cublasLtMatmulDesc_t matmul_TN_desc;
     
-    // Matrix layouts
-    cublasLtMatrixLayout_t token_emb_layout;      // [vocab_size x d_model]
-    cublasLtMatrixLayout_t pos_emb_layout;        // [seq_len x d_model]
-    cublasLtMatrixLayout_t output_proj_layout;    // [d_model x vocab_size]
-    cublasLtMatrixLayout_t embedded_layout;       // [batch_size x seq_len x d_model]
-    cublasLtMatrixLayout_t logits_layout;         // [batch_size x seq_len x vocab_size]
-    
-    // Special layouts for embedding operations
-    cublasLtMatrixLayout_t token_emb_broadcast_layout;  // For broadcasting token embeddings
-    cublasLtMatrixLayout_t pos_emb_broadcast_layout;    // For broadcasting position embeddings
-    cublasLtMatrixLayout_t output_proj_broadcast_layout; // For broadcasting output projection
-    
-    // Gradient computation layouts
-    cublasLtMatrixLayout_t transformer_out_for_grad_layout;
-    cublasLtMatrixLayout_t grad_logits_for_grad_layout;
-    
-    // Dimensions
+    // Dimensions (d_model must equal vocab_size)
     int seq_len;
     int d_model;
     int batch_size;
@@ -110,6 +80,5 @@ void backward_pass_slm(SLM* slm, unsigned char* d_input_tokens);
 void update_weights_slm(SLM* slm, float learning_rate);
 void save_slm(SLM* slm, const char* filename);
 SLM* load_slm(const char* filename, int custom_batch_size, cublasLtHandle_t cublaslt_handle);
-void generate_text_slm(SLM* slm, unsigned char* seed_text, int seed_len, int generate_len, float temperature);
 
 #endif
