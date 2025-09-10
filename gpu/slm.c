@@ -1,7 +1,7 @@
 #include "slm.h"
 
 // Initialize the SLM
-SLM* init_slm(int seq_len, int d_model, int hidden_dim, int num_layers, int batch_size, bool is_causal, cublasLtHandle_t cublaslt_handle) {
+SLM* init_slm(int seq_len, int d_model, int hidden_dim, int num_layers, int batch_size, cublasLtHandle_t cublaslt_handle) {
     SLM* slm = (SLM*)malloc(sizeof(SLM));
     
     // Store dimensions
@@ -91,7 +91,7 @@ SLM* init_slm(int seq_len, int d_model, int hidden_dim, int num_layers, int batc
     CHECK_CUDA(cudaMemset(slm->d_output_projection_v, 0, output_proj_size * sizeof(float)));
     
     // Initialize transformer
-    slm->transformer = init_transformer(seq_len, d_model, hidden_dim, num_layers, batch_size, is_causal, cublaslt_handle);
+    slm->transformer = init_transformer(seq_len, d_model, hidden_dim, num_layers, batch_size, true, cublaslt_handle);
     
     // Create cuBLASLt descriptors
     CHECK_CUBLASLT(cublasLtMatmulDescCreate(&slm->matmul_desc, CUBLAS_COMPUTE_32F_FAST_TF32, CUDA_R_32F));
@@ -466,9 +466,6 @@ void save_slm(SLM* slm, const char* filename) {
     fwrite(&slm->num_layers, sizeof(int), 1, file);
     fwrite(&slm->vocab_size, sizeof(int), 1, file);
     
-    // Save is_causal flag from transformer
-    fwrite(&slm->transformer->attention_layers[0]->is_causal, sizeof(bool), 1, file);
-    
     int token_emb_size = slm->vocab_size * slm->d_model;
     int pos_emb_size = slm->seq_len * slm->d_model;
     int output_proj_size = slm->d_model * slm->vocab_size;
@@ -536,20 +533,18 @@ SLM* load_slm(const char* filename, int custom_batch_size, cublasLtHandle_t cubl
     
     // Read dimensions
     int seq_len, d_model, stored_batch_size, hidden_dim, num_layers, vocab_size;
-    bool is_causal;
     fread(&seq_len, sizeof(int), 1, file);
     fread(&d_model, sizeof(int), 1, file);
     fread(&stored_batch_size, sizeof(int), 1, file);
     fread(&hidden_dim, sizeof(int), 1, file);
     fread(&num_layers, sizeof(int), 1, file);
     fread(&vocab_size, sizeof(int), 1, file);
-    fread(&is_causal, sizeof(bool), 1, file);
     
     // Use custom_batch_size if provided, otherwise use stored value
     int batch_size = (custom_batch_size > 0) ? custom_batch_size : stored_batch_size;
     
     // Initialize SLM
-    SLM* slm = init_slm(seq_len, d_model, hidden_dim, num_layers, batch_size, is_causal, cublaslt_handle);
+    SLM* slm = init_slm(seq_len, d_model, hidden_dim, num_layers, batch_size, cublaslt_handle);
     
     int token_emb_size = vocab_size * d_model;
     int pos_emb_size = seq_len * d_model;

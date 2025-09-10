@@ -17,51 +17,20 @@ int main() {
     const int d_model = 256;
     const int hidden_dim = 512;
     const int num_layers = 4;
-    const int batch_size = 4;
-    const bool is_causal = true;  // Causal attention for language modeling
+    const int batch_size = 16;
     
     // Load corpus
     size_t corpus_size;
     char* corpus = load_corpus("../corpus.txt", &corpus_size);
-    if (!corpus) {
-        CHECK_CUBLASLT(cublasLtDestroy(cublaslt_handle));
-        return 1;
-    }
     
-    // Calculate max number of non-overlapping sequences we can get
+    // Generate random sequences from corpus
     const int num_sequences = (corpus_size - 1) / seq_len;
-    
-    // Allocate memory for character sequences
     unsigned char* input_chars = (unsigned char*)malloc(num_sequences * seq_len * sizeof(unsigned char));
     unsigned char* target_chars = (unsigned char*)malloc(num_sequences * seq_len * sizeof(unsigned char));
-    
-    if (!input_chars || !target_chars) {
-        printf("Error: Could not allocate memory for sequences\n");
-        free(corpus);
-        CHECK_CUBLASLT(cublasLtDestroy(cublaslt_handle));
-        return 1;
-    }
-    
-    // Generate non-overlapping sequential sequences from corpus
-    printf("Generating %d non-overlapping sequences from corpus...\n", num_sequences);
-    for (int seq = 0; seq < num_sequences; seq++) {
-        size_t start_pos = seq * seq_len;
+    generate_char_sequences_from_corpus(&input_chars, &target_chars, num_sequences, seq_len, corpus, corpus_size);
         
-        // Make sure we don't go beyond corpus bounds
-        if (start_pos + seq_len >= corpus_size) {
-            printf("Warning: Reached end of corpus at sequence %d\n", seq);
-            break;
-        }
-        
-        for (int t = 0; t < seq_len; t++) {
-            int idx = seq * seq_len + t;
-            input_chars[idx] = (unsigned char)corpus[start_pos + t];
-            target_chars[idx] = (unsigned char)corpus[start_pos + t + 1];
-        }
-    }
-    
     // Initialize SLM
-    SLM* slm = init_slm(seq_len, d_model, hidden_dim, num_layers, batch_size, is_causal, cublaslt_handle);
+    SLM* slm = init_slm(seq_len, d_model, hidden_dim, num_layers, batch_size, cublaslt_handle);
     
     // Training parameters
     const int num_epochs = 10;

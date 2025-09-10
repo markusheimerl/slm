@@ -94,7 +94,7 @@ typedef struct {
 } SLM;
 
 // Function prototypes
-SLM* init_slm(int seq_len, int d_model, int hidden_dim, int num_layers, int batch_size, bool is_causal, cublasLtHandle_t cublaslt_handle);
+SLM* init_slm(int seq_len, int d_model, int hidden_dim, int num_layers, int batch_size, cublasLtHandle_t cublaslt_handle);
 void free_slm(SLM* slm);
 void forward_pass_slm(SLM* slm, unsigned char* d_input_tokens);
 float calculate_loss_slm(SLM* slm, unsigned char* d_target_tokens);
