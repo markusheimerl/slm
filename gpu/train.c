@@ -121,6 +121,10 @@ int main() {
         
     // Initialize SLM
     slm = init_slm(seq_len, d_model, hidden_dim, num_layers, batch_size, cublaslt_handle);
+
+    // Show some training statistics
+    printf("Total parameters: ~%.1fM\n", (float)(slm->vocab_size * d_model + seq_len * d_model + d_model * slm->vocab_size + num_layers * (4 * d_model * d_model + d_model * hidden_dim + hidden_dim * d_model)) / 1e6f);
+    printf("Characters to be processed: %d (%.1f%% of corpus)\n", num_sequences * seq_len, (float)(num_sequences * seq_len) / corpus_size * 100);
     
     // Training parameters
     const int num_epochs = 10;
@@ -201,10 +205,6 @@ int main() {
     forward_pass_slm(loaded_slm, d_input_tokens);
     float verification_loss = calculate_loss_slm(loaded_slm, d_target_tokens);
     printf("Verification loss: %.6f\n", verification_loss);
-    
-    // Show some training statistics
-    printf("Total parameters: ~%.1fM\n", (float)(slm->vocab_size * d_model + seq_len * d_model + d_model * slm->vocab_size + num_layers * (4 * d_model * d_model + d_model * hidden_dim + hidden_dim * d_model)) / 1e6f);
-    printf("Characters processed: %d (%.1f%% of corpus)\n", num_sequences * seq_len, (float)(num_sequences * seq_len) / corpus_size * 100);
     
     // Cleanup
     free(corpus);
