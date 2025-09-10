@@ -511,7 +511,19 @@ void save_slm(SLM* slm, const char* filename) {
     
     // Save transformer components
     char transformer_filename[256];
-    snprintf(transformer_filename, sizeof(transformer_filename), "%s_transformer.bin", filename);
+    char base_filename[256];
+    
+    // Remove .bin extension from filename to create base name
+    strncpy(base_filename, filename, sizeof(base_filename) - 1);
+    base_filename[sizeof(base_filename) - 1] = '\0';
+    
+    // Find and remove .bin extension if it exists
+    char* dot_pos = strrchr(base_filename, '.');
+    if (dot_pos && strcmp(dot_pos, ".bin") == 0) {
+        *dot_pos = '\0';
+    }
+    
+    snprintf(transformer_filename, sizeof(transformer_filename), "%s_transformer.bin", base_filename);
     save_transformer(slm->transformer, transformer_filename);
     
     // Free temporary host memory
@@ -591,7 +603,19 @@ SLM* load_slm(const char* filename, int custom_batch_size, cublasLtHandle_t cubl
     
     // Load transformer components
     char transformer_filename[256];
-    snprintf(transformer_filename, sizeof(transformer_filename), "%s_transformer.bin", filename);
+    char base_filename[256];
+    
+    // Remove .bin extension from filename to create base name  
+    strncpy(base_filename, filename, sizeof(base_filename) - 1);
+    base_filename[sizeof(base_filename) - 1] = '\0';
+    
+    // Find and remove .bin extension if it exists
+    char* dot_pos = strrchr(base_filename, '.');
+    if (dot_pos && strcmp(dot_pos, ".bin") == 0) {
+        *dot_pos = '\0';
+    }
+    
+    snprintf(transformer_filename, sizeof(transformer_filename), "%s_transformer.bin", base_filename);
     
     // Free the initialized transformer
     free_transformer(slm->transformer);
