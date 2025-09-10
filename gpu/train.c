@@ -77,7 +77,7 @@ void generate_text(SLM* slm, char* corpus, size_t corpus_size, int length, float
         }
 
         // Display character
-        if (next_token < 32 || next_token > 126) printf(" ");
+        if (next_token < 32 || next_token > 126) printf("?");
         else printf("%c", (char)next_token);
         fflush(stdout);
         
@@ -104,10 +104,10 @@ int main(int argc, char* argv[]) {
 
     // Parameters
     const int seq_len = 1024;
-    const int d_model = 512;
+    const int d_model = 256;
     const int hidden_dim = 1024;
-    const int num_layers = 14;
-    const int batch_size = 32;
+    const int num_layers = 6;
+    const int batch_size = 64;
     
     // Load corpus
     size_t corpus_size;
