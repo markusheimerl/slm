@@ -1,3 +1,3 @@
 clean:
-	rm -f *.out *.o *.csv *.bin
+	rm -f *.out *.o *.csv
 	$(MAKE) -C gpu clean

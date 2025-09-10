@@ -31,7 +31,7 @@ run: train.out
 	@time ./train.out
 
 clean:
-	rm -f *.out *.o *.csv *.bin
+	rm -f *.out *.o *.csv
 	$(MAKE) -C ../transformer/gpu clean
 	$(MAKE) -C ../transformer/attention/gpu clean
 	$(MAKE) -C ../transformer/mlp/gpu clean
