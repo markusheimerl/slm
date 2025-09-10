@@ -75,7 +75,7 @@ void generate_text(SLM* slm, char* corpus, size_t corpus_size, int length, float
         CHECK_CUDA(cudaMemcpy(d_input_tokens, h_seed_tokens, slm->seq_len * sizeof(unsigned char), cudaMemcpyHostToDevice));
     }
     
-    printf("\"\n");
+    printf("\"");
     free(h_seed_tokens);
     free(h_logits);
 }
@@ -88,11 +88,11 @@ int main() {
     CHECK_CUBLASLT(cublasLtCreate(&cublaslt_handle));
 
     // Parameters
-    const int seq_len = 4096;
-    const int d_model = 256;
-    const int hidden_dim = 512;
-    const int num_layers = 4;
-    const int batch_size = 16;
+    const int seq_len = 1024;
+    const int d_model = 512;
+    const int hidden_dim = 1024;
+    const int num_layers = 14;
+    const int batch_size = 32;
     
     // Load corpus
     size_t corpus_size;
@@ -148,14 +148,14 @@ int main() {
             
             // Print progress
             if (batch % 2 == 0) {
-                printf("  Epoch [%d/%d], Batch [%d/%d], Loss: %.6f\n", epoch, num_epochs, batch, num_batches, loss);
+                printf("Epoch [%d/%d], Batch [%d/%d], Loss: %.6f\n", epoch, num_epochs, batch, num_batches, loss);
             }
             
             // Generate sample text periodically
             if (batch > 0 && batch % 200 == 0) {
                 printf("\n--- Generated sample (epoch %d, batch %d) ---\n", epoch, batch);
                 generate_text(slm, corpus, corpus_size, 128, 0.8f, d_input_tokens);
-                printf("--- End sample ---\n\n");
+                printf("\n--- End sample ---\n\n");
             }
         }
         

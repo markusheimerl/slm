@@ -7,5 +7,5 @@ sudo apt update
 sudo apt install clang time nvidia-cuda-toolkit
 git submodule init
 git submodule update
-make run -j 4
+make run -C gpu -j 4
 ```
