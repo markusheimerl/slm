@@ -94,7 +94,7 @@ void generate_text(SLM* slm, char* corpus, size_t corpus_size, int length, float
     free(h_logits);
 }
 
-int main() {
+int main(int argc, char* argv[]) {
     srand(time(NULL));
     signal(SIGINT, handle_sigint);
 
@@ -118,9 +118,16 @@ int main() {
     unsigned char* input_chars = (unsigned char*)malloc(num_sequences * seq_len * sizeof(unsigned char));
     unsigned char* target_chars = (unsigned char*)malloc(num_sequences * seq_len * sizeof(unsigned char));
     generate_char_sequences_from_corpus(&input_chars, &target_chars, num_sequences, seq_len, corpus, corpus_size);
-        
-    // Initialize SLM
-    slm = init_slm(seq_len, d_model, hidden_dim, num_layers, batch_size, cublaslt_handle);
+    
+    // Initialize or load SLM
+    if (argc > 1) {
+        printf("Loading checkpoint: %s\n", argv[1]);
+        slm = load_slm(argv[1], batch_size, cublaslt_handle);
+    } else {
+        printf("Initializing new model...\n");
+        slm = init_slm(seq_len, d_model, hidden_dim, num_layers, batch_size, cublaslt_handle);
+    }
+    
     printf("Total parameters: ~%.1fM\n", (float)(slm->vocab_size * d_model + seq_len * d_model + d_model * slm->vocab_size + num_layers * (4 * d_model * d_model + d_model * hidden_dim + hidden_dim * d_model)) / 1e6f);
     
     // Training parameters

@@ -30,6 +30,9 @@ train.o: train.c slm.h ../data.h
 run: train.out
 	@time ./train.out
 
+cont: train.out
+	@time ./train.out $$(ls -t *_slm.bin 2>/dev/null | head -n1)
+
 clean:
 	rm -f *.out *.o *.csv
 	$(MAKE) -C ../transformer/gpu clean
