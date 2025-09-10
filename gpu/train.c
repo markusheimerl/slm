@@ -5,48 +5,45 @@
 #include "../data.h"
 #include "slm.h"
 
-// Simple text generation function
-void generate_text(SLM* slm, char* corpus, size_t corpus_size, int gen_length, float temperature_scale, unsigned char* d_input_tokens) {
+// Text generation function
+void generate_text(SLM* slm, char* corpus, size_t corpus_size, int length, float temperature, unsigned char* d_input_tokens) {
     // Start with a random seed from corpus
     int seed_start = rand() % (corpus_size - slm->seq_len - 1);
     
     // Copy seed to host buffer
     unsigned char* h_seed_tokens = (unsigned char*)malloc(slm->seq_len * sizeof(unsigned char));
-    for (int i = 0; i < slm->seq_len; i++) {
-        h_seed_tokens[i] = (unsigned char)corpus[seed_start + i];
-    }
+    for (int i = 0; i < slm->seq_len; i++) h_seed_tokens[i] = (unsigned char)corpus[seed_start + i];
     
-    // Copy seed to batch 0 of d_input_tokens
+    // Copy seed to d_input_tokens
     CHECK_CUDA(cudaMemcpy(d_input_tokens, h_seed_tokens, slm->seq_len * sizeof(unsigned char), cudaMemcpyHostToDevice));
     
     printf("Seed: \"");
-    for (int i = 0; i < slm->seq_len; i++) {
-        printf("%c", (char)h_seed_tokens[i]);
-    }
+    for (int i = 0; i < slm->seq_len; i++) printf("%c", (char)h_seed_tokens[i]);
     printf("\" -> \"");
     
+    // Allocate logits buffer
+    float* h_logits = (float*)malloc(slm->vocab_size * sizeof(float));
+    
     // Generate text one token at a time
-    for (int gen = 0; gen < gen_length; gen++) {
+    for (int gen = 0; gen < length; gen++) {
         // Forward pass
         forward_pass_slm(slm, d_input_tokens);
         
-        // Get logits for batch 0, last position
-        float* h_logits = (float*)malloc(slm->vocab_size * sizeof(float));
-        int last_pos_offset = (slm->seq_len - 1) * slm->vocab_size; // batch 0, last position
-        CHECK_CUDA(cudaMemcpy(h_logits, &slm->d_logits[last_pos_offset], 
-                             slm->vocab_size * sizeof(float), cudaMemcpyDeviceToHost));
+        // Get logits
+        CHECK_CUDA(cudaMemcpy(h_logits, &slm->d_logits[(slm->seq_len - 1) * slm->vocab_size], slm->vocab_size * sizeof(float), cudaMemcpyDeviceToHost));
         
         // Apply temperature and softmax
         float max_logit = -1e30f;
         for (int v = 0; v < slm->vocab_size; v++) {
-            h_logits[v] /= temperature_scale;
+            h_logits[v] /= temperature;
             if (h_logits[v] > max_logit) max_logit = h_logits[v];
         }
         
         float sum_exp = 0.0f;
         for (int v = 0; v < slm->vocab_size; v++) {
-            h_logits[v] = expf(h_logits[v] - max_logit);
-            sum_exp += h_logits[v];
+            float exp_val = expf(h_logits[v] - max_logit);
+            h_logits[v] = exp_val;
+            sum_exp += exp_val;
         }
         
         for (int v = 0; v < slm->vocab_size; v++) {
@@ -65,26 +62,22 @@ void generate_text(SLM* slm, char* corpus, size_t corpus_size, int gen_length, f
             }
         }
 
-        // Print only valid characters
-        if(next_token < 32 || next_token > 126) next_token = (unsigned char)' ';
-        
-        printf("%c", (char)next_token);
+        // Display character
+        if (next_token < 32 || next_token > 126) printf(" ");
+        else printf("%c", (char)next_token);
         fflush(stdout);
         
         // Shift sequence left and add new token
-        for (int i = 0; i < slm->seq_len - 1; i++) {
-            h_seed_tokens[i] = h_seed_tokens[i + 1];
-        }
+        for (int i = 0; i < slm->seq_len - 1; i++) h_seed_tokens[i] = h_seed_tokens[i + 1];
         h_seed_tokens[slm->seq_len - 1] = next_token;
         
-        // Update only batch 0 with the new sequence
+        // Update with the new sequence
         CHECK_CUDA(cudaMemcpy(d_input_tokens, h_seed_tokens, slm->seq_len * sizeof(unsigned char), cudaMemcpyHostToDevice));
-        
-        free(h_logits);
     }
     
-    printf("\"\n\n");
+    printf("\"\n");
     free(h_seed_tokens);
+    free(h_logits);
 }
 
 int main() {
