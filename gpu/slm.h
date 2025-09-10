@@ -34,8 +34,6 @@
 } while(0)
 #endif
 
-#define VOCAB_SIZE 256  // Character vocabulary (0-255)
-
 typedef struct {
     // Embedding layers
     float* d_token_embedding;      // [vocab_size x d_model]
@@ -82,11 +80,6 @@ typedef struct {
     cublasLtMatrixLayout_t embedded_layout;       // [batch_size x seq_len x d_model]
     cublasLtMatrixLayout_t logits_layout;         // [batch_size x seq_len x vocab_size]
     
-    // Special layouts for embedding operations
-    cublasLtMatrixLayout_t token_emb_broadcast_layout;  // For broadcasting token embeddings
-    cublasLtMatrixLayout_t pos_emb_broadcast_layout;    // For broadcasting position embeddings
-    cublasLtMatrixLayout_t output_proj_broadcast_layout; // For broadcasting output projection
-    
     // Gradient computation layouts
     cublasLtMatrixLayout_t transformer_out_for_grad_layout;
     cublasLtMatrixLayout_t grad_logits_for_grad_layout;
@@ -110,6 +103,5 @@ void backward_pass_slm(SLM* slm, unsigned char* d_input_tokens);
 void update_weights_slm(SLM* slm, float learning_rate);
 void save_slm(SLM* slm, const char* filename);
 SLM* load_slm(const char* filename, int custom_batch_size, cublasLtHandle_t cublaslt_handle);
-void generate_text_slm(SLM* slm, unsigned char* seed_text, int seed_len, int generate_len, float temperature);
 
 #endif

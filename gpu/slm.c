@@ -10,7 +10,7 @@ SLM* init_slm(int seq_len, int d_model, int hidden_dim, int num_layers, int batc
     slm->batch_size = batch_size;
     slm->hidden_dim = hidden_dim;
     slm->num_layers = num_layers;
-    slm->vocab_size = VOCAB_SIZE;
+    slm->vocab_size = 256;
     slm->cublaslt_handle = cublaslt_handle;
     
     // Initialize Adam parameters
@@ -20,11 +20,11 @@ SLM* init_slm(int seq_len, int d_model, int hidden_dim, int num_layers, int batc
     slm->t = 0;
     slm->weight_decay = 0.01f;
     
-    int token_emb_size = VOCAB_SIZE * d_model;
+    int token_emb_size = slm->vocab_size * d_model;
     int pos_emb_size = seq_len * d_model;
-    int output_proj_size = d_model * VOCAB_SIZE;
+    int output_proj_size = d_model * slm->vocab_size;
     int embedded_size = batch_size * seq_len * d_model;
-    int logits_size = batch_size * seq_len * VOCAB_SIZE;
+    int logits_size = batch_size * seq_len * slm->vocab_size;
     
     // Allocate host memory for embedding initialization
     float* h_token_embedding = (float*)malloc(token_emb_size * sizeof(float));
@@ -113,26 +113,26 @@ SLM* init_slm(int seq_len, int d_model, int hidden_dim, int num_layers, int batc
     cublasLtOrder_t order = CUBLASLT_ORDER_ROW;
     
     // Create matrix layouts
-    CHECK_CUBLASLT(cublasLtMatrixLayoutCreate(&slm->token_emb_layout, CUDA_R_32F, VOCAB_SIZE, d_model, d_model));
+    CHECK_CUBLASLT(cublasLtMatrixLayoutCreate(&slm->token_emb_layout, CUDA_R_32F, slm->vocab_size, d_model, d_model));
     CHECK_CUBLASLT(cublasLtMatrixLayoutSetAttribute(slm->token_emb_layout, CUBLASLT_MATRIX_LAYOUT_ORDER, &order, sizeof(order)));
     
     CHECK_CUBLASLT(cublasLtMatrixLayoutCreate(&slm->pos_emb_layout, CUDA_R_32F, seq_len, d_model, d_model));
     CHECK_CUBLASLT(cublasLtMatrixLayoutSetAttribute(slm->pos_emb_layout, CUBLASLT_MATRIX_LAYOUT_ORDER, &order, sizeof(order)));
     
-    CHECK_CUBLASLT(cublasLtMatrixLayoutCreate(&slm->output_proj_layout, CUDA_R_32F, d_model, VOCAB_SIZE, VOCAB_SIZE));
+    CHECK_CUBLASLT(cublasLtMatrixLayoutCreate(&slm->output_proj_layout, CUDA_R_32F, d_model, slm->vocab_size, slm->vocab_size));
     CHECK_CUBLASLT(cublasLtMatrixLayoutSetAttribute(slm->output_proj_layout, CUBLASLT_MATRIX_LAYOUT_ORDER, &order, sizeof(order)));
     
     CHECK_CUBLASLT(cublasLtMatrixLayoutCreate(&slm->embedded_layout, CUDA_R_32F, batch_size * seq_len, d_model, d_model));
     CHECK_CUBLASLT(cublasLtMatrixLayoutSetAttribute(slm->embedded_layout, CUBLASLT_MATRIX_LAYOUT_ORDER, &order, sizeof(order)));
     
-    CHECK_CUBLASLT(cublasLtMatrixLayoutCreate(&slm->logits_layout, CUDA_R_32F, batch_size * seq_len, VOCAB_SIZE, VOCAB_SIZE));
+    CHECK_CUBLASLT(cublasLtMatrixLayoutCreate(&slm->logits_layout, CUDA_R_32F, batch_size * seq_len, slm->vocab_size, slm->vocab_size));
     CHECK_CUBLASLT(cublasLtMatrixLayoutSetAttribute(slm->logits_layout, CUBLASLT_MATRIX_LAYOUT_ORDER, &order, sizeof(order)));
     
     // Special layouts for gradient computation
     CHECK_CUBLASLT(cublasLtMatrixLayoutCreate(&slm->transformer_out_for_grad_layout, CUDA_R_32F, batch_size * seq_len, d_model, d_model));
     CHECK_CUBLASLT(cublasLtMatrixLayoutSetAttribute(slm->transformer_out_for_grad_layout, CUBLASLT_MATRIX_LAYOUT_ORDER, &order, sizeof(order)));
     
-    CHECK_CUBLASLT(cublasLtMatrixLayoutCreate(&slm->grad_logits_for_grad_layout, CUDA_R_32F, batch_size * seq_len, VOCAB_SIZE, VOCAB_SIZE));
+    CHECK_CUBLASLT(cublasLtMatrixLayoutCreate(&slm->grad_logits_for_grad_layout, CUDA_R_32F, batch_size * seq_len, slm->vocab_size, slm->vocab_size));
     CHECK_CUBLASLT(cublasLtMatrixLayoutSetAttribute(slm->grad_logits_for_grad_layout, CUBLASLT_MATRIX_LAYOUT_ORDER, &order, sizeof(order)));
     
     // Free host memory
@@ -329,9 +329,9 @@ float calculate_loss_slm(SLM* slm, unsigned char* d_target_tokens) {
 
 // Zero gradients
 void zero_gradients_slm(SLM* slm) {
-    int token_emb_size = VOCAB_SIZE * slm->d_model;
+    int token_emb_size = slm->vocab_size * slm->d_model;
     int pos_emb_size = slm->seq_len * slm->d_model;
-    int output_proj_size = slm->d_model * VOCAB_SIZE;
+    int output_proj_size = slm->d_model * slm->vocab_size;
     
     CHECK_CUDA(cudaMemset(slm->d_token_embedding_grad, 0, token_emb_size * sizeof(float)));
     CHECK_CUDA(cudaMemset(slm->d_position_embedding_grad, 0, pos_emb_size * sizeof(float)));
@@ -420,7 +420,7 @@ void update_weights_slm(SLM* slm, float learning_rate) {
     int block_size = 256;
     
     // Update token embeddings
-    int token_emb_size = VOCAB_SIZE * slm->d_model;
+    int token_emb_size = slm->vocab_size * slm->d_model;
     int token_blocks = (token_emb_size + block_size - 1) / block_size;
     adamw_update_kernel_slm<<<token_blocks, block_size>>>(
         slm->d_token_embedding, slm->d_token_embedding_grad, slm->d_token_embedding_m, slm->d_token_embedding_v,
@@ -438,7 +438,7 @@ void update_weights_slm(SLM* slm, float learning_rate) {
     );
     
     // Update output projection
-    int output_proj_size = slm->d_model * VOCAB_SIZE;
+    int output_proj_size = slm->d_model * slm->vocab_size;
     int output_blocks = (output_proj_size + block_size - 1) / block_size;
     adamw_update_kernel_slm<<<output_blocks, block_size>>>(
         slm->d_output_projection, slm->d_output_projection_grad, slm->d_output_projection_m, slm->d_output_projection_v,
@@ -469,9 +469,9 @@ void save_slm(SLM* slm, const char* filename) {
     // Save is_causal flag from transformer
     fwrite(&slm->transformer->attention_layers[0]->is_causal, sizeof(bool), 1, file);
     
-    int token_emb_size = VOCAB_SIZE * slm->d_model;
+    int token_emb_size = slm->vocab_size * slm->d_model;
     int pos_emb_size = slm->seq_len * slm->d_model;
-    int output_proj_size = slm->d_model * VOCAB_SIZE;
+    int output_proj_size = slm->d_model * slm->vocab_size;
     
     // Allocate host memory and copy embeddings
     float* h_token_embedding = (float*)malloc(token_emb_size * sizeof(float));
@@ -480,7 +480,7 @@ void save_slm(SLM* slm, const char* filename) {
     
     CHECK_CUDA(cudaMemcpy(h_token_embedding, slm->d_token_embedding, token_emb_size * sizeof(float), cudaMemcpyDeviceToHost));
     CHECK_CUDA(cudaMemcpy(h_position_embedding, slm->d_position_embedding, pos_emb_size * sizeof(float), cudaMemcpyDeviceToHost));
-    CHECK_CUDA(cudaMemcpy(h_output_projection, slm->d_output_projection, output_proj_size * sizeof(float), cudaMemcpyDeviceToHost));
+    CHECK_CUDA(cudaMemcpy(h_output_projection, slm->d_output_projection, output_proj_size * sizeof(float), cudaMemcpyHostToDevice));
     
     fwrite(h_token_embedding, sizeof(float), token_emb_size, file);
     fwrite(h_position_embedding, sizeof(float), pos_emb_size, file);
@@ -551,9 +551,9 @@ SLM* load_slm(const char* filename, int custom_batch_size, cublasLtHandle_t cubl
     // Initialize SLM
     SLM* slm = init_slm(seq_len, d_model, hidden_dim, num_layers, batch_size, is_causal, cublaslt_handle);
     
-    int token_emb_size = VOCAB_SIZE * d_model;
+    int token_emb_size = vocab_size * d_model;
     int pos_emb_size = seq_len * d_model;
-    int output_proj_size = d_model * VOCAB_SIZE;
+    int output_proj_size = d_model * vocab_size;
     
     // Load embeddings
     float* h_token_embedding = (float*)malloc(token_emb_size * sizeof(float));
