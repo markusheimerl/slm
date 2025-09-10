@@ -2,8 +2,22 @@
 #include <stdlib.h>
 #include <math.h>
 #include <time.h>
+#include <signal.h>
 #include "../data.h"
 #include "slm.h"
+
+SLM* slm = NULL;
+
+// SIGINT handler to save model and exit
+void handle_sigint(int signum) {
+    if (slm) {
+        char model_filename[64];
+        time_t now = time(NULL);
+        strftime(model_filename, sizeof(model_filename), "%Y%m%d_%H%M%S_slm.bin", localtime(&now));
+        save_slm(slm, model_filename);
+    }
+    exit(128 + signum);
+}
 
 // Text generation function
 void generate_text(SLM* slm, char* corpus, size_t corpus_size, int length, float temperature, unsigned char* d_input_tokens) {
@@ -82,6 +96,7 @@ void generate_text(SLM* slm, char* corpus, size_t corpus_size, int length, float
 
 int main() {
     srand(time(NULL));
+    signal(SIGINT, handle_sigint);
 
     // Initialize cuBLASLt
     cublasLtHandle_t cublaslt_handle;
@@ -105,7 +120,7 @@ int main() {
     generate_char_sequences_from_corpus(&input_chars, &target_chars, num_sequences, seq_len, corpus, corpus_size);
         
     // Initialize SLM
-    SLM* slm = init_slm(seq_len, d_model, hidden_dim, num_layers, batch_size, cublaslt_handle);
+    slm = init_slm(seq_len, d_model, hidden_dim, num_layers, batch_size, cublaslt_handle);
     
     // Training parameters
     const int num_epochs = 10;

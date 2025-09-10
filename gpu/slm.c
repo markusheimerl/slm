@@ -477,7 +477,7 @@ void save_slm(SLM* slm, const char* filename) {
     
     CHECK_CUDA(cudaMemcpy(h_token_embedding, slm->d_token_embedding, token_emb_size * sizeof(float), cudaMemcpyDeviceToHost));
     CHECK_CUDA(cudaMemcpy(h_position_embedding, slm->d_position_embedding, pos_emb_size * sizeof(float), cudaMemcpyDeviceToHost));
-    CHECK_CUDA(cudaMemcpy(h_output_projection, slm->d_output_projection, output_proj_size * sizeof(float), cudaMemcpyHostToDevice));
+    CHECK_CUDA(cudaMemcpy(h_output_projection, slm->d_output_projection, output_proj_size * sizeof(float), cudaMemcpyDeviceToHost));
     
     fwrite(h_token_embedding, sizeof(float), token_emb_size, file);
     fwrite(h_position_embedding, sizeof(float), pos_emb_size, file);
