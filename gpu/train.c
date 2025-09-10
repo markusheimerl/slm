@@ -5,7 +5,7 @@
 #include "../data.h"
 #include "slm.h"
 
-// Simple text generation function using batch 0
+// Simple text generation function
 void generate_text(SLM* slm, char* corpus, size_t corpus_size, int gen_length, float temperature_scale, unsigned char* d_input_tokens) {
     // Start with a random seed from corpus
     int seed_start = rand() % (corpus_size - slm->seq_len - 1);
@@ -27,7 +27,7 @@ void generate_text(SLM* slm, char* corpus, size_t corpus_size, int gen_length, f
     
     // Generate text one token at a time
     for (int gen = 0; gen < gen_length; gen++) {
-        // Forward pass (uses all batches but we only care about batch 0)
+        // Forward pass
         forward_pass_slm(slm, d_input_tokens);
         
         // Get logits for batch 0, last position
@@ -64,6 +64,9 @@ void generate_text(SLM* slm, char* corpus, size_t corpus_size, int gen_length, f
                 break;
             }
         }
+
+        // Print only valid characters
+        if(next_token < 32 || next_token > 126) next_token = (unsigned char)' ';
         
         printf("%c", (char)next_token);
         fflush(stdout);
@@ -156,7 +159,7 @@ int main() {
             }
             
             // Generate sample text periodically
-            if (batch > 0 && batch % 2000 == 0) {
+            if (batch > 0 && batch % 200 == 0) {
                 printf("\n--- Generated sample (epoch %d, batch %d) ---\n", epoch, batch);
                 generate_text(slm, corpus, corpus_size, 128, 0.8f, d_input_tokens);
                 printf("--- End sample ---\n\n");
