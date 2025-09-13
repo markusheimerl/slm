@@ -31,22 +31,22 @@ The token embedding layer maps discrete character tokens to continuous vector re
 $$
 \begin{align*}
 \frac{\partial L}{\partial Y_{out}} &= \hat{y} - y_{true} \\
-\frac{\partial L}{\partial W_2} &= {S'}^T(\frac{\partial L}{\partial Y_{attn}}) \\
-\frac{\partial L}{\partial S'} &= (\frac{\partial L}{\partial Y_{attn}})W_2^T \\
-\frac{\partial L}{\partial H} &= \frac{\partial L}{\partial S'} \odot [\sigma(H) + H \odot \sigma(H) \odot (1-\sigma(H))] \\
-\frac{\partial L}{\partial W_1} &= {Z'}^T(\frac{\partial L}{\partial H}) \\
-\frac{\partial L}{\partial Z'} &= (\frac{\partial L}{\partial H})W_1^T + \frac{\partial L}{\partial Y_{attn}} \\
-\frac{\partial L}{\partial W_o} &= Z^T(\frac{\partial L}{\partial Z'}) \\
-\frac{\partial L}{\partial Z} &= (\frac{\partial L}{\partial Z'})W_o^T \\
-\frac{\partial L}{\partial A} &= (\frac{\partial L}{\partial Z})V^T \\
-\frac{\partial L}{\partial V} &= A^T(\frac{\partial L}{\partial Z}) \\
+\frac{\partial L}{\partial W_2} &= {S'}^T\left(\frac{\partial L}{\partial Y_{attn}}\right) \\
+\frac{\partial L}{\partial S'} &= \left(\frac{\partial L}{\partial Y_{attn}}\right)W_2^T \\
+\frac{\partial L}{\partial H} &= \frac{\partial L}{\partial S'} \odot \left[\sigma(H) + H \odot \sigma(H) \odot (1-\sigma(H))\right] \\
+\frac{\partial L}{\partial W_1} &= {Z'}^T\left(\frac{\partial L}{\partial H}\right) \\
+\frac{\partial L}{\partial Z'} &= \left(\frac{\partial L}{\partial H}\right)W_1^T + \frac{\partial L}{\partial Y_{attn}} \\
+\frac{\partial L}{\partial W_o} &= Z^T\left(\frac{\partial L}{\partial Z'}\right) \\
+\frac{\partial L}{\partial Z} &= \left(\frac{\partial L}{\partial Z'}\right)W_o^T \\
+\frac{\partial L}{\partial A} &= \left(\frac{\partial L}{\partial Z}\right)V^T \\
+\frac{\partial L}{\partial V} &= A^T\left(\frac{\partial L}{\partial Z}\right) \\
 \frac{\partial L}{\partial S} &= A \odot \left(\frac{\partial L}{\partial A} - \sum_j \frac{\partial L}{\partial A} \odot A\right) \odot M_{causal} \\
-\frac{\partial L}{\partial Q} &= \frac{1}{\sqrt{d}}(\frac{\partial L}{\partial S})K \\
-\frac{\partial L}{\partial K} &= \frac{1}{\sqrt{d}}(\frac{\partial L}{\partial S})^TQ \\
-\frac{\partial L}{\partial W_q} &= P^T(\frac{\partial L}{\partial Q}) \\
-\frac{\partial L}{\partial W_k} &= P^T(\frac{\partial L}{\partial K}) \\
-\frac{\partial L}{\partial W_v} &= P^T(\frac{\partial L}{\partial V}) \\
-\frac{\partial L}{\partial P} &= (\frac{\partial L}{\partial Q})W_q^T + (\frac{\partial L}{\partial K})W_k^T + (\frac{\partial L}{\partial V})W_v^T + \frac{\partial L}{\partial Z'} \\
+\frac{\partial L}{\partial Q} &= \frac{1}{\sqrt{d}}\left(\frac{\partial L}{\partial S}\right)K \\
+\frac{\partial L}{\partial K} &= \frac{1}{\sqrt{d}}\left(\frac{\partial L}{\partial S}\right)^TQ \\
+\frac{\partial L}{\partial W_q} &= P^T\left(\frac{\partial L}{\partial Q}\right) \\
+\frac{\partial L}{\partial W_k} &= P^T\left(\frac{\partial L}{\partial K}\right) \\
+\frac{\partial L}{\partial W_v} &= P^T\left(\frac{\partial L}{\partial V}\right) \\
+\frac{\partial L}{\partial P} &= \left(\frac{\partial L}{\partial Q}\right)W_q^T + \left(\frac{\partial L}{\partial K}\right)W_k^T + \left(\frac{\partial L}{\partial V}\right)W_v^T + \frac{\partial L}{\partial Z'} \\
 \frac{\partial L}{\partial W_{emb}} &= \sum_{b,t} \frac{\partial L}{\partial E_{b,t}} \cdot \delta(x_{b,t})
 \end{align*}
 $$
