@@ -9,6 +9,7 @@
 #include <cublasLt.h>
 #include <cuda_runtime.h>
 #include "../transformer/gpu/transformer.h"
+#include "../transformer/mlp/gpu/mlp.h"
 
 // CUDA Error checking macro
 #ifndef CHECK_CUDA
@@ -35,31 +36,17 @@
 #endif
 
 typedef struct {
-    // Embedding layers
+    // Token embedding layer
     float* d_token_embedding;      // [vocab_size x d_model]
-    float* d_position_embedding;   // [seq_len x d_model]
-    float* d_output_projection;    // [d_model x vocab_size]
-    
-    // Gradients for embedding layers
     float* d_token_embedding_grad; // [vocab_size x d_model]
-    float* d_position_embedding_grad; // [seq_len x d_model]
-    float* d_output_projection_grad;  // [d_model x vocab_size]
     
-    // Adam parameters for embeddings
+    // Adam parameters for token embeddings
     float* d_token_embedding_m, *d_token_embedding_v;
-    float* d_position_embedding_m, *d_position_embedding_v;
-    float* d_output_projection_m, *d_output_projection_v;
     float beta1, beta2, epsilon, weight_decay;
     int t;
     
     // Forward pass buffers
     float* d_embedded_input;    // [batch_size x seq_len x d_model]
-    float* d_logits;           // [batch_size x seq_len x vocab_size]
-    float* d_probs;            // [batch_size x seq_len x vocab_size]
-    
-    // Backward pass buffers
-    float* d_grad_embedded;    // [batch_size x seq_len x d_model]
-    float* d_grad_logits;      // [batch_size x seq_len x vocab_size]
     
     // Loss computation buffer
     float* d_loss_result;      // [1]
@@ -67,22 +54,11 @@ typedef struct {
     // Transformer core
     Transformer* transformer;
     
-    // cuBLASLt handle and layouts
+    // Output projection MLP
+    MLP* output_mlp;
+    
+    // cuBLASLt handle
     cublasLtHandle_t cublaslt_handle;
-    cublasLtMatmulDesc_t matmul_desc;
-    cublasLtMatmulDesc_t matmul_NT_desc;
-    cublasLtMatmulDesc_t matmul_TN_desc;
-    
-    // Matrix layouts
-    cublasLtMatrixLayout_t token_emb_layout;      // [vocab_size x d_model]
-    cublasLtMatrixLayout_t pos_emb_layout;        // [seq_len x d_model]
-    cublasLtMatrixLayout_t output_proj_layout;    // [d_model x vocab_size]
-    cublasLtMatrixLayout_t embedded_layout;       // [batch_size x seq_len x d_model]
-    cublasLtMatrixLayout_t logits_layout;         // [batch_size x seq_len x vocab_size]
-    
-    // Gradient computation layouts
-    cublasLtMatrixLayout_t transformer_out_for_grad_layout;
-    cublasLtMatrixLayout_t grad_logits_for_grad_layout;
     
     // Dimensions
     int seq_len;

@@ -44,7 +44,7 @@ void generate_text(SLM* slm, char* corpus, size_t corpus_size, int length, float
         forward_pass_slm(slm, d_input_tokens);
         
         // Get logits
-        CHECK_CUDA(cudaMemcpy(h_logits, &slm->d_logits[(slm->seq_len - 1) * slm->vocab_size], slm->vocab_size * sizeof(float), cudaMemcpyDeviceToHost));
+        CHECK_CUDA(cudaMemcpy(h_logits, &slm->output_mlp->d_layer_output[(slm->seq_len - 1) * slm->vocab_size], slm->vocab_size * sizeof(float), cudaMemcpyDeviceToHost));
         
         // Apply temperature and softmax
         float max_logit = -1e30f;
