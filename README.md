@@ -26,30 +26,7 @@ L &= -\frac{1}{BT} \sum_{b,t} \log \hat{y}_{b,t,y_{b,t}}
 \end{align*}
 $$
 
-The token embedding layer maps discrete character tokens to continuous vector representations, while sinusoidal position encodings provide positional information. The transformer processes sequences through multiple layers of causal self-attention and feed-forward networks with residual connections. Each transformer layer applies attention followed by an MLP with swish activation. The output projection maps the final transformer layer to vocabulary logits for next-token prediction. The backward pass computes gradients for each component through the chain rule:
-
-$$
-\begin{align*}
-\frac{\partial L}{\partial Y_{out}} &= \hat{y} - y_{true} \\
-\frac{\partial L}{\partial W_2} &= {S'}^T\left(\frac{\partial L}{\partial Y_{attn}}\right) \\
-\frac{\partial L}{\partial S'} &= \left(\frac{\partial L}{\partial Y_{attn}}\right)W_2^T \\
-\frac{\partial L}{\partial H} &= \frac{\partial L}{\partial S'} \odot \left[\sigma(H) + H \odot \sigma(H) \odot (1-\sigma(H))\right] \\
-\frac{\partial L}{\partial W_1} &= {Z'}^T\left(\frac{\partial L}{\partial H}\right) \\
-\frac{\partial L}{\partial Z'} &= \left(\frac{\partial L}{\partial H}\right)W_1^T + \frac{\partial L}{\partial Y_{attn}} \\
-\frac{\partial L}{\partial W_o} &= Z^T\left(\frac{\partial L}{\partial Z'}\right) \\
-\frac{\partial L}{\partial Z} &= \left(\frac{\partial L}{\partial Z'}\right)W_o^T \\
-\frac{\partial L}{\partial A} &= \left(\frac{\partial L}{\partial Z}\right)V^T \\
-\frac{\partial L}{\partial V} &= A^T\left(\frac{\partial L}{\partial Z}\right) \\
-\frac{\partial L}{\partial S} &= A \odot \left(\frac{\partial L}{\partial A} - \sum_j \frac{\partial L}{\partial A} \odot A\right) \odot M_{causal} \\
-\frac{\partial L}{\partial Q} &= \frac{1}{\sqrt{d}}\left(\frac{\partial L}{\partial S}\right)K \\
-\frac{\partial L}{\partial K} &= \frac{1}{\sqrt{d}}\left(\frac{\partial L}{\partial S}\right)^TQ \\
-\frac{\partial L}{\partial W_q} &= P^T\left(\frac{\partial L}{\partial Q}\right) \\
-\frac{\partial L}{\partial W_k} &= P^T\left(\frac{\partial L}{\partial K}\right) \\
-\frac{\partial L}{\partial W_v} &= P^T\left(\frac{\partial L}{\partial V}\right) \\
-\frac{\partial L}{\partial P} &= \left(\frac{\partial L}{\partial Q}\right)W_q^T + \left(\frac{\partial L}{\partial K}\right)W_k^T + \left(\frac{\partial L}{\partial V}\right)W_v^T + \frac{\partial L}{\partial Z'} \\
-\frac{\partial L}{\partial W_{emb}} &= \sum_{b,t} \frac{\partial L}{\partial E_{b,t}} \cdot \delta(x_{b,t})
-\end{align*}
-$$
+The token embedding layer maps discrete character tokens to continuous vector representations, while sinusoidal position encodings provide positional information. The transformer processes sequences through multiple layers of causal self-attention and feed-forward networks with residual connections. Each transformer layer applies attention followed by an MLP with swish activation. The output projection maps the final transformer layer to vocabulary logits for next-token prediction.
 
 The AdamW optimizer maintains exponential moving averages of gradients and their squares through $\beta_1$ and $\beta_2$, while simultaneously applying L2 regularization through weight decay $\lambda$. The learning rate is denoted by $\eta$, $t$ is the current training iteration, and $\epsilon$ is a small constant for numerical stability. For each weight matrix $W$, the update rule is:
 
