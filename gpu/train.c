@@ -77,8 +77,7 @@ void generate_text(SLM* slm, char* corpus, size_t corpus_size, int length, float
         }
 
         // Display character
-        if (next_token < 32 || next_token > 126) printf("?");
-        else printf("%c", (char)next_token);
+        printf("%c", (char)next_token);
         fflush(stdout);
         
         // Shift sequence left and add new token
@@ -105,9 +104,9 @@ int main(int argc, char* argv[]) {
     // Parameters
     const int seq_len = 4096;
     const int d_model = 512;
-    const int hidden_dim = 2048;
-    const int num_layers = 12;
-    const int batch_size = 4;
+    const int hidden_dim = 1024;
+    const int num_layers = 6;
+    const int batch_size = 8;
     
     // Load corpus
     size_t corpus_size;
@@ -130,7 +129,7 @@ int main(int argc, char* argv[]) {
     printf("Total parameters: ~%.1fM\n", (float)(slm->vocab_size * d_model + seq_len * d_model + d_model * slm->vocab_size + num_layers * (4 * d_model * d_model + d_model * hidden_dim + hidden_dim * d_model)) / 1e6f);
     
     // Training parameters
-    const int num_epochs = 10;
+    const int num_epochs = 100;
     const float learning_rate = 0.0003f;
     const int num_batches = num_sequences / batch_size;
 
