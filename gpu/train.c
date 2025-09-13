@@ -113,11 +113,10 @@ int main(int argc, char* argv[]) {
     size_t corpus_size;
     char* corpus = load_corpus("../corpus.txt", &corpus_size);
     
-    // Generate random sequences from corpus
+    // Prepare training data buffers
     const int num_sequences = (corpus_size - 1) / seq_len;
     unsigned char* input_chars = (unsigned char*)malloc(num_sequences * seq_len * sizeof(unsigned char));
     unsigned char* target_chars = (unsigned char*)malloc(num_sequences * seq_len * sizeof(unsigned char));
-    generate_char_sequences_from_corpus(&input_chars, &target_chars, num_sequences, seq_len, corpus, corpus_size);
     
     // Initialize or load SLM
     if (argc > 1) {
@@ -142,6 +141,9 @@ int main(int argc, char* argv[]) {
     
     // Training loop
     for (int epoch = 0; epoch < num_epochs + 1; epoch++) {
+        // Generate random sequences from corpus
+        generate_char_sequences_from_corpus(&input_chars, &target_chars, num_sequences, seq_len, corpus, corpus_size);
+        
         float epoch_loss = 0.0f;
         
         for (int batch = 0; batch < num_batches; batch++) {
