@@ -161,6 +161,13 @@ int main(int argc, char* argv[]) {
                 generate_text(slm, corpus, corpus_size, 128, 0.8f);
                 printf("\n--- End sample ---\n\n");
             }
+
+            // Checkpoint model periodically
+            if (batch > 0 && batch % 1000 == 0) {
+                char checkpoint_fname[64];
+                snprintf(checkpoint_fname, sizeof(checkpoint_fname), "checkpoint_slm.bin");
+                save_slm(slm, checkpoint_fname);
+            }
         }
         
         epoch_loss /= num_batches;
