@@ -104,9 +104,9 @@ int main(int argc, char* argv[]) {
     // Parameters
     const int seq_len = 4096;
     const int d_model = 512;
-    const int hidden_dim = 1024;
-    const int num_layers = 6;
-    const int batch_size = 8;
+    const int hidden_dim = 2048;
+    const int num_layers = 12;
+    const int batch_size = 4;
     
     // Load corpus
     size_t corpus_size;
@@ -130,7 +130,7 @@ int main(int argc, char* argv[]) {
     
     // Training parameters
     const int num_epochs = 100;
-    const float learning_rate = 0.0003f;
+    const float learning_rate = 0.00001f;
     const int num_batches = num_sequences / batch_size;
 
     // Allocate device memory for batch data
