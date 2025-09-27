@@ -45,7 +45,7 @@ typedef struct {
     float beta1, beta2, epsilon, weight_decay;
     int t;
     
-    // Forward pass buffers
+    // Buffers
     float* d_embedded_input;    // [batch_size x seq_len x d_model]
     
     // Loss computation buffer
