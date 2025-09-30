@@ -5,6 +5,8 @@ Consider a small language model operating on sequences of character tokens. The 
 
 ## How to run
 ```
+wget https://huggingface.co/datasets/GeoGPT-Research-Project/GeoGPT-QA/resolve/main/geogpt-qa.csv
+python3 -c "import csv; [print(f'<|start|>user<|message|>{row[\"question\"]}<|end|>\n<|start|>assistant<|channel|>final<|message|>{row[\"answer\"]}<|end|>') for row in csv.DictReader(open('geogpt-qa.csv'))]" > corpus.txt
 sudo apt update
 sudo apt install clang time libopenblas-dev
 make run
