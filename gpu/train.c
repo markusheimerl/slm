@@ -102,11 +102,11 @@ int main(int argc, char* argv[]) {
     CHECK_CUBLASLT(cublasLtCreate(&cublaslt_handle));
 
     // Parameters
-    const int seq_len = 1024;
-    const int d_model = 256;
-    const int hidden_dim = 512;
-    const int num_layers = 8;
-    const int batch_size = 32;
+    const int seq_len = 4096;
+    const int d_model = 512;
+    const int hidden_dim = 2048;
+    const int num_layers = 12;
+    const int batch_size = 7;
     
     // Load corpus
     size_t corpus_size;
@@ -130,7 +130,7 @@ int main(int argc, char* argv[]) {
     
     // Training parameters
     const int num_epochs = 100;
-    const float learning_rate = 0.000005f;
+    const float learning_rate = 0.00001f;
     const int num_batches = num_sequences / batch_size;
 
     // Allocate device memory for batch data
@@ -173,7 +173,7 @@ int main(int argc, char* argv[]) {
             update_weights_slm(slm, learning_rate);
             
             // Print progress
-            if (batch % 1 == 0) {
+            if (batch % 2 == 0) {
                 printf("Epoch [%d/%d], Batch [%d/%d], Loss: %.6f\n", epoch, num_epochs, batch, num_batches, loss);
             }
             
