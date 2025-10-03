@@ -105,8 +105,8 @@ int main(int argc, char* argv[]) {
     const int seq_len = 4096;
     const int d_model = 512;
     const int hidden_dim = 2048;
-    const int num_layers = 8;
-    const int batch_size = 10;
+    const int num_layers = 12;
+    const int batch_size = 7;
     
     // Load corpus
     size_t corpus_size;
