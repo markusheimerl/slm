@@ -120,7 +120,7 @@ __global__ static void sinusoidal_position_encoding_kernel(float* embedded, int 
     embedded[idx] += pos_encoding;
 }
 
-__global__ void softmax_cross_entropy_row_kernel(float* loss_out, float* grad_logits, const float* logits, const unsigned char* targets, int rows, int vocab_size) {
+__global__ static void softmax_cross_entropy_kernel(float* loss_out, float* grad_logits, const float* logits, const unsigned char* targets, int rows, int vocab_size) {
     int row = blockIdx.x;
     if (row >= rows) return;
 
@@ -224,7 +224,7 @@ float calculate_loss_slm(SLM* slm, unsigned char* d_target_tokens) {
     CHECK_CUDA(cudaMemset(slm->d_loss_result, 0, sizeof(float)));
     
     // Compute softmax and cross-entropy loss
-    softmax_cross_entropy_row_kernel<<<slm->batch_size * slm->seq_len, 256, 256 * sizeof(float)>>>(slm->d_loss_result, 
+    softmax_cross_entropy_kernel<<<slm->batch_size * slm->seq_len, 256, 256 * sizeof(float)>>>(slm->d_loss_result, 
         slm->output_mlp->d_output, slm->output_mlp->d_output, d_target_tokens, slm->batch_size * slm->seq_len, slm->vocab_size);
 
     float total_loss;
