@@ -44,8 +44,24 @@ void generate_char_sequences_from_corpus(unsigned char** input_chars, unsigned c
 
     size_t usable_corpus_size = corpus_size - seq_len;
 
+    // Shuffle starting positions to ensure non-overlapping sequences
+    size_t* positions = (size_t*)malloc(num_sequences * sizeof(size_t));
+    size_t stride = usable_corpus_size / num_sequences;
+    
     for (int seq = 0; seq < num_sequences; seq++) {
-        size_t start_pos = rand() % usable_corpus_size;
+        positions[seq] = seq * stride;
+    }
+    
+    // Shuffle positions
+    for (int i = num_sequences - 1; i > 0; i--) {
+        int j = rand() % (i + 1);
+        size_t temp = positions[i];
+        positions[i] = positions[j];
+        positions[j] = temp;
+    }
+
+    for (int seq = 0; seq < num_sequences; seq++) {
+        size_t start_pos = positions[seq];
 
         for (int t = 0; t < seq_len; t++) {
             int idx = seq * seq_len + t;
@@ -53,4 +69,6 @@ void generate_char_sequences_from_corpus(unsigned char** input_chars, unsigned c
             (*target_chars)[idx] = (unsigned char)corpus[start_pos + t + 1];
         }
     }
+    
+    free(positions);
 }
