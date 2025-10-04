@@ -130,7 +130,6 @@ int main(int argc, char* argv[]) {
     
     // Training parameters
     const int num_epochs = 100;
-    const float learning_rate = 0.00001f;
     const int num_batches = num_sequences / batch_size;
 
     // Allocate device memory for batch data
@@ -146,6 +145,10 @@ int main(int argc, char* argv[]) {
         float epoch_loss = 0.0f;
         
         for (int batch = 0; batch < num_batches; batch++) {
+            // Calculate learning rate
+            float progress = fminf((float)(slm->t) / 100000.0f, 1.0f);
+            float learning_rate = 1e-8f + (1e-4f - 1e-8f) * (progress * progress * progress);
+            
             // Calculate batch offset
             int batch_offset = batch * batch_size * seq_len;
 
@@ -174,21 +177,7 @@ int main(int argc, char* argv[]) {
             
             // Print progress
             if (batch % 2 == 0) {
-                printf("Epoch [%d/%d], Batch [%d/%d], Loss: %.6f\n", epoch, num_epochs, batch, num_batches, loss);
-            }
-            
-            // Generate sample text periodically
-            if (batch > 0 && batch % 200 == 0) {
-                printf("\n--- Generated sample (epoch %d, batch %d) ---\n", epoch, batch);
-                generate_text(slm, corpus, corpus_size, 128, 0.8f, d_input_tokens);
-                printf("\n--- End sample ---\n\n");
-            }
-
-            // Checkpoint model periodically
-            if (batch > 0 && batch % 1000 == 0) {
-                char checkpoint_fname[64];
-                snprintf(checkpoint_fname, sizeof(checkpoint_fname), "checkpoint_slm.bin");
-                save_slm(slm, checkpoint_fname);
+                printf("Epoch [%d/%d], Batch [%d/%d], Loss: %.6f, LR: %.2e\n", epoch, num_epochs, batch, num_batches, loss, learning_rate);
             }
         }
         
