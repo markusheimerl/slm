@@ -12,16 +12,20 @@
 
 typedef struct {
     // Token embedding layer
-    float* token_embedding;      // [vocab_size x d_model]
-    float* token_embedding_grad; // [vocab_size x d_model]
+    float* token_embedding;        // [vocab_size x d_model]
+    float* token_embedding_grad;   // [vocab_size x d_model]
     
-    // Adam parameters for token embeddings
-    float* token_embedding_m, *token_embedding_v;
-    float beta1, beta2, epsilon, weight_decay;
-    int t;
+    // Adam parameters
+    float* token_embedding_m;      // First moment for token embeddings
+    float* token_embedding_v;      // Second moment for token embeddings
+    float beta1;                   // Exponential decay rate for first moment
+    float beta2;                   // Exponential decay rate for second moment
+    float epsilon;                 // Small constant for numerical stability
+    int t;                         // Time step
+    float weight_decay;            // Weight decay parameter for AdamW
     
     // Forward pass buffers
-    float* embedded_input;    // [batch_size x seq_len x d_model]
+    float* embedded_input;         // [batch_size x seq_len x d_model]
     
     // Transformer core
     Transformer* transformer;

@@ -195,7 +195,7 @@ void forward_pass_slm(SLM* slm, unsigned char* d_input_tokens) {
     forward_pass_transformer(slm->transformer, slm->d_embedded_input);
     
     // Step 4: Output projection through MLP
-    forward_pass_mlp(slm->output_mlp, slm->transformer->mlp_layers[slm->num_layers-1]->d_layer_output);
+    forward_pass_mlp(slm->output_mlp, slm->transformer->mlp_layers[slm->num_layers-1]->d_output);
 }
 
 // Calculate loss
@@ -206,7 +206,7 @@ float calculate_loss_slm(SLM* slm, unsigned char* d_target_tokens) {
     // Compute softmax and cross-entropy loss
     dim3 grid(slm->batch_size, slm->seq_len);
     softmax_cross_entropy_kernel<<<grid, 1>>>(
-        slm->d_loss_result, slm->output_mlp->d_grad_output, slm->output_mlp->d_layer_output, d_target_tokens,
+        slm->d_loss_result, slm->output_mlp->d_grad_output, slm->output_mlp->d_output, d_target_tokens,
         slm->batch_size, slm->seq_len, slm->vocab_size
     );
     
@@ -231,7 +231,7 @@ void zero_gradients_slm(SLM* slm) {
 void backward_pass_slm(SLM* slm, unsigned char* d_input_tokens) {
     // Step 4 (backward): Backward pass through output MLP
     backward_pass_mlp(slm->output_mlp, 
-                      slm->transformer->mlp_layers[slm->num_layers-1]->d_layer_output, 
+                      slm->transformer->mlp_layers[slm->num_layers-1]->d_output, 
                       slm->transformer->mlp_layers[slm->num_layers-1]->d_grad_output);
     
     // Step 3 (backward): Backward pass through transformer
