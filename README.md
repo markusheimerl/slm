@@ -1,44 +1,17 @@
 # slm
 A small language model implementation
 
-Consider a small language model operating on sequences of character tokens. The architecture consists of token embeddings, sinusoidal positional encodings, a transformer backbone with causal self-attention, and an output projection layer. The forward propagation follows:
+This project implements a character-level language model using a transformer architecture. The model processes sequences of individual characters rather than word tokens, learning to predict the next character given previous context.
 
-$$
-\begin{align*}
-E_{b,t,d} &= W_{emb}[x_{b,t}, d] \\
-P_{b,t,d} &= E_{b,t,d} + \begin{cases}
-\sin(t / 10000^{2k/d_{model}}) & \text{if } d = 2k \\
-\cos(t / 10000^{2k/d_{model}}) & \text{if } d = 2k+1
-\end{cases} \\
-Q &= PW_q, \quad K = PW_k, \quad V = PW_v \\
-S &= \frac{QK^T}{\sqrt{d}} \\
-A_{ij} &= \begin{cases}
-\frac{\exp(S_{ij})}{\sum_{k \leq j} \exp(S_{ik})} & \text{if } i \leq j \\
-0 & \text{if } i > j
-\end{cases} \\
-Z &= AV \\
-Z' &= ZW_o + P \\
-H &= Z'W_1 \\
-S' &= H \odot \sigma(H) \\
-Y_{attn} &= S'W_2 + Z' \\
-\hat{y}_{b,t,v} &= \frac{\exp(Y_{out,b,t,v})}{\sum_k \exp(Y_{out,b,t,k})} \\
-L &= -\frac{1}{BT} \sum_{b,t} \log \hat{y}_{b,t,y_{b,t}}
-\end{align*}
-$$
+The architecture begins with a token embedding layer that converts each character into a continuous vector representation. These embeddings are then augmented with sinusoidal positional encodings that provide the model with information about each character's position in the sequence.
 
-The token embedding layer maps discrete character tokens to continuous vector representations, while sinusoidal position encodings provide positional information. The transformer processes sequences through multiple layers of causal self-attention and feed-forward networks with residual connections. Each transformer layer applies attention followed by an MLP with swish activation. The output projection maps the final transformer layer to vocabulary logits for next-token prediction.
+The core of the model is a multi-layer transformer that processes the embedded sequences. Each transformer layer consists of two main components: a causal self-attention mechanism and a feed-forward network. The causal attention ensures that predictions for each position can only depend on previous positions, which is essential for autoregressive text generation. The attention mechanism computes query, key, and value projections, applies scaled dot-product attention with a causal mask, and projects the result back. The feed-forward network uses a swish activation function (a smooth, non-monotonic activation that multiplies the input by its sigmoid) and includes residual connections around both the attention and feed-forward components.
 
-The AdamW optimizer maintains exponential moving averages of gradients and their squares through $\beta_1$ and $\beta_2$, while simultaneously applying L2 regularization through weight decay $\lambda$. The learning rate is denoted by $\eta$, $t$ is the current training iteration, and $\epsilon$ is a small constant for numerical stability. For each weight matrix $W$, the update rule is:
+After processing through all transformer layers, an output projection layer maps the final hidden states to logits over the vocabulary (all 256 possible byte values). These logits are converted to probabilities using the softmax function, and the model is trained to maximize the probability of the correct next character using cross-entropy loss.
 
-$$
-\begin{align*}
-m &= \beta_1m + (1-\beta_1)(\frac{\partial L}{\partial W}) \\
-v &= \beta_2v + (1-\beta_2)(\frac{\partial L}{\partial W})^2 \\
-W &= (1-\lambda\eta)W - \eta\cdot\frac{m}{1-\beta_1^t}/\sqrt{\frac{v}{1-\beta_2^t} + \epsilon}
-\end{align*}
-$$
+The training process uses the AdamW optimizer, which enhances the standard Adam optimizer by decoupling weight decay from the gradient-based update. AdamW maintains exponential moving averages of both gradients and squared gradients, using these to adapt the learning rate for each parameter individually. The weight decay acts as L2 regularization, encouraging the model to use smaller weights and improving generalization.
 
-The implementation leverages BLAS for matrix operations, enabling efficient computation on modern hardware.
+The implementation uses BLAS (Basic Linear Algebra Subprograms) for efficient matrix operations, allowing the model to train effectively on modern CPU hardware.
 
 ## How to run
 ```
