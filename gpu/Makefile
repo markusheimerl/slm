@@ -6,8 +6,8 @@ ARCH ?= sm_86
 CUDAFLAGS = --cuda-gpu-arch=$(ARCH) -x cuda
 CUDALIBS = -L/usr/local/cuda/lib64 -lcudart -lcublasLt
 
-train.out: slm.o ../transformer/gpu/transformer.o ../transformer/attention/gpu/attention.o ../transformer/mlp/gpu/mlp.o ../data.o train.o
-	$(CC) slm.o ../transformer/gpu/transformer.o ../transformer/attention/gpu/attention.o ../transformer/mlp/gpu/mlp.o ../data.o train.o $(CUDALIBS) $(LDFLAGS) -o $@
+train.out: slm.o ../transformer/gpu/transformer.o ../transformer/attention/gpu/attention.o ../transformer/mlp/gpu/mlp.o ../data.o ../bpe/bpe.o train.o
+	$(CC) slm.o ../transformer/gpu/transformer.o ../transformer/attention/gpu/attention.o ../transformer/mlp/gpu/mlp.o ../data.o ../bpe/bpe.o train.o $(CUDALIBS) $(LDFLAGS) -o $@
 
 slm.o: slm.c slm.h
 	$(CC) $(CFLAGS) $(CUDAFLAGS) -c slm.c -o $@
@@ -24,6 +24,9 @@ slm.o: slm.c slm.h
 ../data.o: ../data.c ../data.h
 	$(CC) $(CFLAGS) $(CUDAFLAGS) -c ../data.c -o $@
 
+../bpe/bpe.o:
+	$(MAKE) -C  ../bpe
+
 train.o: train.c slm.h ../data.h
 	$(CC) $(CFLAGS) $(CUDAFLAGS) -c train.c -o $@
 
@@ -38,3 +41,4 @@ clean:
 	$(MAKE) -C ../transformer/gpu clean
 	$(MAKE) -C ../transformer/attention/gpu clean
 	$(MAKE) -C ../transformer/mlp/gpu clean
+	$(MAKE) -C ../bpe clean
