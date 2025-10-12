@@ -1,3 +1,6 @@
 [submodule "transformer"]
 	path = transformer
 	url = https://github.com/markusheimerl/transformer
+[submodule "bpe"]
+	path = bpe
+	url = https://github.com/markusheimerl/bpe
