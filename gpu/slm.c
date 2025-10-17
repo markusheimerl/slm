@@ -288,10 +288,10 @@ void backward_pass_slm(SLM* slm, uint32_t* d_input_tokens) {
 // CUDA kernel for AdamW update
 __global__ static void adamw_update_kernel_slm(float* weight, float* grad, float* m, float* v,
                                                float beta1, float beta2, float epsilon, float learning_rate,
-                                               float weight_decay, float alpha_t, int size, int batch_size) {
+                                               float weight_decay, float alpha_t, int size, int effective_batch_size) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < size) {
-        float g = grad[idx] / batch_size;
+        float g = grad[idx] / effective_batch_size;
         
         // m = β₁m + (1-β₁)(∂L/∂W)
         m[idx] = beta1 * m[idx] + (1.0f - beta1) * g;
@@ -305,7 +305,7 @@ __global__ static void adamw_update_kernel_slm(float* weight, float* grad, float
 }
 
 // Update weights
-void update_weights_slm(SLM* slm, float learning_rate) {
+void update_weights_slm(SLM* slm, float learning_rate, int effective_batch_size) {
     slm->t++;
     
     float beta1_t = powf(slm->beta1, slm->t);
@@ -320,14 +320,14 @@ void update_weights_slm(SLM* slm, float learning_rate) {
     adamw_update_kernel_slm<<<token_blocks, block_size>>>(
         slm->d_token_embedding, slm->d_token_embedding_grad, slm->d_token_embedding_m, slm->d_token_embedding_v,
         slm->beta1, slm->beta2, slm->epsilon, learning_rate, slm->weight_decay,
-        alpha_t, token_emb_size, slm->batch_size
+        alpha_t, token_emb_size, effective_batch_size
     );
     
     // Update transformer weights
-    update_weights_transformer(slm->transformer, learning_rate);
+    update_weights_transformer(slm->transformer, learning_rate, effective_batch_size);
     
     // Update output MLP weights
-    update_weights_mlp(slm->output_mlp, learning_rate);
+    update_weights_mlp(slm->output_mlp, learning_rate, effective_batch_size);
 }
 
 // Save SLM to binary file

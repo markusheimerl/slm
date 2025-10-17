@@ -110,6 +110,7 @@ int main(int argc, char* argv[]) {
     const int hidden_dim = 4096;
     const int num_layers = 32;
     const int batch_size = 2;
+    const int accumulation_steps = 128;
     
     // Load corpus
     size_t corpus_size;
@@ -143,10 +144,12 @@ int main(int argc, char* argv[]) {
     uint32_t* target_tokens = (uint32_t*)malloc(num_sequences * seq_len * sizeof(uint32_t));
     
     printf("Total parameters: ~%.1fM\n", (float)(slm->vocab_size * d_model + seq_len * d_model + d_model * slm->vocab_size + num_layers * (4 * d_model * d_model + d_model * hidden_dim + hidden_dim * d_model)) / 1e6f);
+    printf("Gradient accumulation steps: %d\n", accumulation_steps);
+    printf("Effective batch size: %d\n\n", batch_size * accumulation_steps);
     
     // Training parameters
     const int num_epochs = 100;
-    const float learning_rate = 0.00001f;
+    const float learning_rate = 0.003f;
     const int num_batches = num_sequences / batch_size;
 
     // Allocate device memory for batch data
@@ -204,12 +207,19 @@ int main(int argc, char* argv[]) {
             // Don't update weights after final evaluation
             if (epoch == num_epochs) continue;
 
-            // Backward pass
-            zero_gradients_slm(slm);
+            // Zero gradients at start of accumulation cycle
+            if (batch % accumulation_steps == 0) {
+                zero_gradients_slm(slm);
+            }
+            
+            // Backward pass (accumulates gradients)
             backward_pass_slm(slm, d_input_tokens);
             
-            // Update weights
-            update_weights_slm(slm, learning_rate);
+            // Update weights after accumulation_steps batches
+            if ((batch + 1) % accumulation_steps == 0 || batch == num_batches - 1) {
+                int effective_batch_size = batch_size * accumulation_steps;
+                update_weights_slm(slm, learning_rate, effective_batch_size);
+            }
             
             // Print progress
             if (batch % 2 == 0) {
