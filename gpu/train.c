@@ -130,7 +130,7 @@ int main(int argc, char* argv[]) {
     
     // Training parameters
     const int num_epochs = 100;
-    const float learning_rate = 0.000001f;
+    const float learning_rate = 0.0001f;
     const int num_batches = num_sequences / batch_size;
 
     // Allocate device memory for batch data
@@ -158,7 +158,7 @@ int main(int argc, char* argv[]) {
             
             // Calculate loss
             float loss = calculate_loss_slm(slm, d_target_tokens);
-            if(loss >= 6.0) raise(SIGINT);
+            if(loss >= 23.0) raise(SIGINT);
             
             epoch_loss += loss;
 
