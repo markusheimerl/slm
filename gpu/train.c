@@ -105,11 +105,11 @@ int main(int argc, char* argv[]) {
     CHECK_CUBLASLT(cublasLtCreate(&cublaslt_handle));
 
     // Parameters
-    const int seq_len = 4096;
-    const int d_model = 512;
-    const int hidden_dim = 2048;
-    const int num_layers = 12;
-    const int batch_size = 4;
+    const int seq_len = 2048;
+    const int d_model = 1024;
+    const int hidden_dim = 4096;
+    const int num_layers = 32;
+    const int batch_size = 2;
     
     // Load corpus
     size_t corpus_size;
@@ -197,7 +197,7 @@ int main(int argc, char* argv[]) {
             
             // Calculate loss
             float loss = calculate_loss_slm(slm, d_target_tokens);
-            if(loss >= 7.0) raise(SIGINT);
+            //if(loss >= 7.0) raise(SIGINT);
             
             epoch_loss += loss;
 
