@@ -6,10 +6,12 @@
 #include <string.h>
 #include <math.h>
 #include <stdbool.h>
+#include <stdint.h>
 #include <cublasLt.h>
 #include <cuda_runtime.h>
 #include "../transformer/gpu/transformer.h"
 #include "../transformer/mlp/gpu/mlp.h"
+#include "../bpe/gpu/bpe.h"
 
 // CUDA Error checking macro
 #ifndef CHECK_CUDA
@@ -36,6 +38,9 @@
 #endif
 
 typedef struct {
+    // BPE tokenizer
+    BPE* bpe;
+    
     // Token embedding layer
     float* d_token_embedding;      // [vocab_size x d_model]
     float* d_token_embedding_grad; // [vocab_size x d_model]
@@ -74,14 +79,14 @@ typedef struct {
 } SLM;
 
 // Function prototypes
-SLM* init_slm(int seq_len, int d_model, int hidden_dim, int num_layers, int batch_size, cublasLtHandle_t cublaslt_handle);
+SLM* init_slm(BPE* bpe, int seq_len, int d_model, int hidden_dim, int num_layers, int batch_size, cublasLtHandle_t cublaslt_handle);
 void free_slm(SLM* slm);
-void forward_pass_slm(SLM* slm, unsigned char* d_input_tokens);
-float calculate_loss_slm(SLM* slm, unsigned char* d_target_tokens);
+void forward_pass_slm(SLM* slm, uint32_t* d_input_tokens);
+float calculate_loss_slm(SLM* slm, uint32_t* d_target_tokens);
 void zero_gradients_slm(SLM* slm);
-void backward_pass_slm(SLM* slm, unsigned char* d_input_tokens);
+void backward_pass_slm(SLM* slm, uint32_t* d_input_tokens);
 void update_weights_slm(SLM* slm, float learning_rate, int effective_batch_size);
-void save_slm(SLM* slm, const char* filename);
+void save_slm(SLM* slm, const char* filename, const char* bpe_path);
 SLM* load_slm(const char* filename, int custom_batch_size, cublasLtHandle_t cublaslt_handle);
 
 #endif

@@ -7,6 +7,7 @@
 #include "slm.h"
 
 SLM* slm = NULL;
+const char* bpe_tokenizer_path = "../bpe/gpu/20251019_155518_bpe.bin";
 
 // SIGINT handler to save model and exit
 void handle_sigint(int signum) {
@@ -14,26 +15,40 @@ void handle_sigint(int signum) {
         char model_filename[64];
         time_t now = time(NULL);
         strftime(model_filename, sizeof(model_filename), "%Y%m%d_%H%M%S_slm.bin", localtime(&now));
-        save_slm(slm, model_filename);
+        save_slm(slm, model_filename, bpe_tokenizer_path);
     }
     exit(128 + signum);
 }
 
 // Text generation function
-void generate_text(SLM* slm, char* corpus, size_t corpus_size, int length, float temperature, unsigned char* d_input_tokens) {
-    // Start with a random seed from corpus
-    int seed_start = rand() % (corpus_size - slm->seq_len - 1);
+void generate_text(SLM* slm, char* corpus, size_t corpus_size, int length, float temperature, uint32_t* d_input_tokens) {
+    // Start with a random seed from corpus - get enough text to tokenize into seq_len tokens
+    int seed_start = rand() % (corpus_size - slm->seq_len * 4 - 1);
     
-    // Copy seed to host buffer
-    unsigned char* h_seed_tokens = (unsigned char*)malloc(slm->seq_len * sizeof(unsigned char));
-    for (int i = 0; i < slm->seq_len; i++) h_seed_tokens[i] = (unsigned char)corpus[seed_start + i];
+    // Extract text and tokenize it
+    int text_len = slm->seq_len * 4;  // Conservative estimate
+    if ((size_t)(seed_start + text_len) > corpus_size) text_len = corpus_size - seed_start;
+    
+    uint32_t num_tokens;
+    uint32_t* tokens = encode_bpe(slm->bpe, &corpus[seed_start], text_len, &num_tokens);
+    
+    // Copy seed to host buffer (truncate or pad to seq_len)
+    uint32_t* h_seed_tokens = (uint32_t*)malloc(slm->seq_len * sizeof(uint32_t));
+    for (int i = 0; i < slm->seq_len; i++) {
+        h_seed_tokens[i] = ((uint32_t)i < num_tokens) ? tokens[i] : 0;
+    }
+    uint32_t actual_tokens = (num_tokens < (uint32_t)slm->seq_len) ? num_tokens : slm->seq_len;
+    free(tokens);
     
     // Copy seed to d_input_tokens
-    CHECK_CUDA(cudaMemcpy(d_input_tokens, h_seed_tokens, slm->seq_len * sizeof(unsigned char), cudaMemcpyHostToDevice));
+    CHECK_CUDA(cudaMemcpy(d_input_tokens, h_seed_tokens, slm->seq_len * sizeof(uint32_t), cudaMemcpyHostToDevice));
     
+    // Display seed
+    char* seed_text = decode_bpe(slm->bpe, h_seed_tokens, actual_tokens);
     printf("Seed: \"");
-    for (int i = 0; i < slm->seq_len; i++) printf("%c", (char)h_seed_tokens[i]);
+    for (size_t i = 0; i < strlen(seed_text); i++) printf("%c", seed_text[i]);
     printf("\" -> \"");
+    free(seed_text);
     
     // Allocate logits buffer
     float* h_logits = (float*)malloc(slm->vocab_size * sizeof(float));
@@ -66,7 +81,7 @@ void generate_text(SLM* slm, char* corpus, size_t corpus_size, int length, float
         
         // Sample from the distribution
         float r = (float)rand() / (float)RAND_MAX;
-        unsigned char next_token = 0;
+        uint32_t next_token = 0;
         float cumsum = 0.0f;
         for (int v = 0; v < slm->vocab_size; v++) {
             cumsum += h_logits[v];
@@ -76,8 +91,10 @@ void generate_text(SLM* slm, char* corpus, size_t corpus_size, int length, float
             }
         }
 
-        // Display character
-        printf("%c", (char)next_token);
+        // Display token as text
+        char* token_text = decode_bpe(slm->bpe, &next_token, 1);
+        printf("%s", token_text);
+        free(token_text);
         fflush(stdout);
         
         // Shift sequence left and add new token
@@ -85,12 +102,42 @@ void generate_text(SLM* slm, char* corpus, size_t corpus_size, int length, float
         h_seed_tokens[slm->seq_len - 1] = next_token;
         
         // Update with the new sequence
-        CHECK_CUDA(cudaMemcpy(d_input_tokens, h_seed_tokens, slm->seq_len * sizeof(unsigned char), cudaMemcpyHostToDevice));
+        CHECK_CUDA(cudaMemcpy(d_input_tokens, h_seed_tokens, slm->seq_len * sizeof(uint32_t), cudaMemcpyHostToDevice));
     }
     
     printf("\"");
     free(h_seed_tokens);
     free(h_logits);
+}
+
+// Tokenize corpus into sequences
+void tokenize_corpus_to_sequences(BPE* bpe, char* corpus, size_t corpus_size, uint32_t** input_tokens, uint32_t** target_tokens, int* num_sequences, int seq_len) {
+    // First, tokenize the entire corpus
+    uint32_t total_tokens;
+    uint32_t* corpus_tokens = encode_bpe(bpe, corpus, corpus_size, &total_tokens);
+    
+    // Calculate how many sequences we can make
+    *num_sequences = (total_tokens - 1) / seq_len;
+    
+    printf("Tokenized corpus: %zu bytes -> %u tokens -> %d sequences of length %d\n", 
+           corpus_size, total_tokens, *num_sequences, seq_len);
+    
+    // Allocate sequence arrays
+    *input_tokens = (uint32_t*)malloc(*num_sequences * seq_len * sizeof(uint32_t));
+    *target_tokens = (uint32_t*)malloc(*num_sequences * seq_len * sizeof(uint32_t));
+    
+    // Create non-overlapping sequences
+    for (int seq = 0; seq < *num_sequences; seq++) {
+        size_t start_pos = seq * seq_len;
+        
+        for (int t = 0; t < seq_len; t++) {
+            int idx = seq * seq_len + t;
+            (*input_tokens)[idx] = corpus_tokens[start_pos + t];
+            (*target_tokens)[idx] = corpus_tokens[start_pos + t + 1];
+        }
+    }
+    
+    free(corpus_tokens);
 }
 
 int main(int argc, char* argv[]) {
@@ -100,6 +147,15 @@ int main(int argc, char* argv[]) {
     // Initialize cuBLASLt
     cublasLtHandle_t cublaslt_handle;
     CHECK_CUBLASLT(cublasLtCreate(&cublaslt_handle));
+
+    // Load BPE tokenizer
+    printf("Loading BPE tokenizer from %s\n", bpe_tokenizer_path);
+    BPE* bpe = load_bpe(bpe_tokenizer_path);
+    if (!bpe) {
+        printf("Failed to load BPE tokenizer\n");
+        return 1;
+    }
+    printf("BPE vocab size: %u\n", bpe->vocab_size);
 
     // Parameters
     const int seq_len = 2048;
@@ -112,10 +168,11 @@ int main(int argc, char* argv[]) {
     size_t corpus_size;
     char* corpus = load_corpus("../corpus.txt", &corpus_size);
     
-    // Prepare training data buffers
-    const int num_sequences = (corpus_size - 1) / seq_len;
-    unsigned char* input_chars = (unsigned char*)malloc(num_sequences * seq_len * sizeof(unsigned char));
-    unsigned char* target_chars = (unsigned char*)malloc(num_sequences * seq_len * sizeof(unsigned char));
+    // Tokenize corpus into sequences
+    uint32_t* input_tokens;
+    uint32_t* target_tokens;
+    int num_sequences;
+    tokenize_corpus_to_sequences(bpe, corpus, corpus_size, &input_tokens, &target_tokens, &num_sequences, seq_len);
     
     // Initialize or load SLM
     if (argc > 1) {
@@ -123,10 +180,10 @@ int main(int argc, char* argv[]) {
         slm = load_slm(argv[1], batch_size, cublaslt_handle);
     } else {
         printf("Initializing new model...\n");
-        slm = init_slm(seq_len, d_model, hidden_dim, num_layers, batch_size, cublaslt_handle);
+        slm = init_slm(bpe, seq_len, d_model, hidden_dim, num_layers, batch_size, cublaslt_handle);
     }
     
-    printf("Total parameters: ~%.1fM\n", (float)(slm->vocab_size * d_model + seq_len * d_model + d_model * slm->vocab_size + num_layers * (4 * d_model * d_model + d_model * hidden_dim + hidden_dim * d_model)) / 1e6f);
+    printf("Total parameters: ~%.1fM\n", (float)(slm->vocab_size * d_model + d_model * slm->vocab_size + num_layers * (4 * d_model * d_model + d_model * hidden_dim + hidden_dim * d_model)) / 1e6f);
     
     // Training parameters
     const int num_epochs = 100;
@@ -135,15 +192,12 @@ int main(int argc, char* argv[]) {
     const int accumulation_steps = 1;
 
     // Allocate device memory for batch data
-    unsigned char *d_input_tokens, *d_target_tokens;
-    CHECK_CUDA(cudaMalloc(&d_input_tokens, batch_size * seq_len * sizeof(unsigned char)));
-    CHECK_CUDA(cudaMalloc(&d_target_tokens, batch_size * seq_len * sizeof(unsigned char)));
+    uint32_t *d_input_tokens, *d_target_tokens;
+    CHECK_CUDA(cudaMalloc(&d_input_tokens, batch_size * seq_len * sizeof(uint32_t)));
+    CHECK_CUDA(cudaMalloc(&d_target_tokens, batch_size * seq_len * sizeof(uint32_t)));
     
     // Training loop
     for (int epoch = 0; epoch < num_epochs + 1; epoch++) {
-        // Generate random sequences from corpus
-        generate_char_sequences_from_corpus(&input_chars, &target_chars, num_sequences, seq_len, corpus, corpus_size);
-        
         float epoch_loss = 0.0f;
         
         for (int batch = 0; batch < num_batches; batch++) {
@@ -151,15 +205,15 @@ int main(int argc, char* argv[]) {
             int batch_offset = batch * batch_size * seq_len;
 
             // Copy batch data to device
-            CHECK_CUDA(cudaMemcpy(d_input_tokens, &input_chars[batch_offset], batch_size * seq_len * sizeof(unsigned char), cudaMemcpyHostToDevice));
-            CHECK_CUDA(cudaMemcpy(d_target_tokens, &target_chars[batch_offset], batch_size * seq_len * sizeof(unsigned char), cudaMemcpyHostToDevice));
+            CHECK_CUDA(cudaMemcpy(d_input_tokens, &input_tokens[batch_offset], batch_size * seq_len * sizeof(uint32_t), cudaMemcpyHostToDevice));
+            CHECK_CUDA(cudaMemcpy(d_target_tokens, &target_tokens[batch_offset], batch_size * seq_len * sizeof(uint32_t), cudaMemcpyHostToDevice));
             
             // Forward pass
             forward_pass_slm(slm, d_input_tokens);
             
             // Calculate loss
             float loss = calculate_loss_slm(slm, d_target_tokens);
-            if(loss >= 7.5) raise(SIGINT);
+            //if(loss >= 7.5) raise(SIGINT);
             
             epoch_loss += loss;
 
@@ -183,7 +237,7 @@ int main(int argc, char* argv[]) {
             // Generate sample text periodically
             if (batch > 0 && batch % 200 == 0) {
                 printf("\n--- Generated sample (epoch %d, batch %d) ---\n", epoch, batch);
-                generate_text(slm, corpus, corpus_size, 128, 0.8f, d_input_tokens);
+                generate_text(slm, corpus, corpus_size, 64, 0.8f, d_input_tokens);
                 printf("\n--- End sample ---\n\n");
             }
 
@@ -191,7 +245,7 @@ int main(int argc, char* argv[]) {
             if (batch > 0 && batch % 1000 == 0) {
                 char checkpoint_fname[64];
                 snprintf(checkpoint_fname, sizeof(checkpoint_fname), "checkpoint_slm.bin");
-                save_slm(slm, checkpoint_fname);
+                save_slm(slm, checkpoint_fname, bpe_tokenizer_path);
             }
         }
         
@@ -207,7 +261,7 @@ int main(int argc, char* argv[]) {
     strftime(model_fname, sizeof(model_fname), "%Y%m%d_%H%M%S_slm.bin", localtime(&now));
 
     // Save model with timestamped filename
-    save_slm(slm, model_fname);
+    save_slm(slm, model_fname, bpe_tokenizer_path);
     
     // Load the model back and verify
     printf("\nVerifying saved model...\n");
@@ -216,8 +270,8 @@ int main(int argc, char* argv[]) {
     SLM* loaded_slm = load_slm(model_fname, batch_size, cublaslt_handle);
 
     // Test loaded model with a forward pass
-    CHECK_CUDA(cudaMemcpy(d_input_tokens, input_chars, batch_size * seq_len * sizeof(unsigned char), cudaMemcpyHostToDevice));
-    CHECK_CUDA(cudaMemcpy(d_target_tokens, target_chars, batch_size * seq_len * sizeof(unsigned char), cudaMemcpyHostToDevice));
+    CHECK_CUDA(cudaMemcpy(d_input_tokens, input_tokens, batch_size * seq_len * sizeof(uint32_t), cudaMemcpyHostToDevice));
+    CHECK_CUDA(cudaMemcpy(d_target_tokens, target_tokens, batch_size * seq_len * sizeof(uint32_t), cudaMemcpyHostToDevice));
     
     forward_pass_slm(loaded_slm, d_input_tokens);
     float verification_loss = calculate_loss_slm(loaded_slm, d_target_tokens);
@@ -225,12 +279,13 @@ int main(int argc, char* argv[]) {
     
     // Cleanup
     free(corpus);
-    free(input_chars);
-    free(target_chars);
+    free(input_tokens);
+    free(target_tokens);
     CHECK_CUDA(cudaFree(d_input_tokens));
     CHECK_CUDA(cudaFree(d_target_tokens));
     free_slm(slm);
     free_slm(loaded_slm);
+    free_bpe(bpe);
     CHECK_CUBLASLT(cublasLtDestroy(cublaslt_handle));
     
     return 0;

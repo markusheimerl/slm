@@ -1,8 +1,11 @@
 #include "slm.h"
 
 // Initialize the SLM
-SLM* init_slm(int seq_len, int d_model, int hidden_dim, int num_layers, int batch_size, cublasLtHandle_t cublaslt_handle) {
+SLM* init_slm(BPE* bpe, int seq_len, int d_model, int hidden_dim, int num_layers, int batch_size, cublasLtHandle_t cublaslt_handle) {
     SLM* slm = (SLM*)malloc(sizeof(SLM));
+    
+    // Store BPE tokenizer
+    slm->bpe = bpe;
     
     // Store dimensions
     slm->seq_len = seq_len;
@@ -10,7 +13,7 @@ SLM* init_slm(int seq_len, int d_model, int hidden_dim, int num_layers, int batc
     slm->batch_size = batch_size;
     slm->hidden_dim = hidden_dim;
     slm->num_layers = num_layers;
-    slm->vocab_size = 256;
+    slm->vocab_size = bpe->vocab_size;  // Use BPE vocab size
     slm->cublaslt_handle = cublaslt_handle;
     
     // Initialize Adam parameters
@@ -82,11 +85,13 @@ void free_slm(SLM* slm) {
     // Free loss computation buffer
     cudaFree(slm->d_loss_result);
     
+    // Note: We don't free BPE here as it's managed externally
+    
     free(slm);
 }
 
-// CUDA kernel for token embedding lookup
-__global__ static void token_embedding_lookup_kernel(float* embedded, float* token_embedding, unsigned char* tokens, int batch_size, int seq_len, int d_model) {
+// CUDA kernel for token embedding lookup (uint32_t tokens)
+__global__ static void token_embedding_lookup_kernel(float* embedded, float* token_embedding, uint32_t* tokens, int batch_size, int seq_len, int d_model) {
     int b = blockIdx.x;
     int t = blockIdx.y;
     int d = threadIdx.x;
@@ -94,7 +99,7 @@ __global__ static void token_embedding_lookup_kernel(float* embedded, float* tok
     if (b >= batch_size || t >= seq_len || d >= d_model) return;
     
     int token_idx = b * seq_len + t;
-    int token = tokens[token_idx];
+    uint32_t token = tokens[token_idx];
     int emb_idx = b * seq_len * d_model + t * d_model + d;
     
     embedded[emb_idx] = token_embedding[token * d_model + d];
@@ -120,8 +125,8 @@ __global__ static void sinusoidal_position_encoding_kernel(float* embedded, int 
     embedded[idx] += pos_encoding;
 }
 
-// CUDA kernel for softmax and cross-entropy loss computation
-__global__ static void softmax_cross_entropy_kernel(float* loss_result, float* grad_logits, float* logits, unsigned char* targets, int batch_size, int seq_len, int vocab_size) {
+// CUDA kernel for softmax and cross-entropy loss computation (uint32_t targets)
+__global__ static void softmax_cross_entropy_kernel(float* loss_result, float* grad_logits, float* logits, uint32_t* targets, int batch_size, int seq_len, int vocab_size) {
     int b = blockIdx.x;
     int t = blockIdx.y;
     
@@ -151,7 +156,7 @@ __global__ static void softmax_cross_entropy_kernel(float* loss_result, float* g
     }
     
     // Compute cross-entropy loss and gradient
-    int target_token = targets[b * seq_len + t];
+    uint32_t target_token = targets[b * seq_len + t];
     float target_prob = grad_logits_bt[target_token];
     
     // Add cross-entropy loss
@@ -161,8 +166,8 @@ __global__ static void softmax_cross_entropy_kernel(float* loss_result, float* g
     grad_logits_bt[target_token] -= 1.0f;
 }
 
-// CUDA kernel for token embedding gradient accumulation
-__global__ static void token_embedding_grad_kernel(float* token_embedding_grad, float* grad_embedded, unsigned char* tokens, int batch_size, int seq_len, int d_model) {
+// CUDA kernel for token embedding gradient accumulation (uint32_t tokens)
+__global__ static void token_embedding_grad_kernel(float* token_embedding_grad, float* grad_embedded, uint32_t* tokens, int batch_size, int seq_len, int d_model) {
     int b = blockIdx.x;
     int t = blockIdx.y;
     int d = threadIdx.x;
@@ -170,14 +175,14 @@ __global__ static void token_embedding_grad_kernel(float* token_embedding_grad, 
     if (b >= batch_size || t >= seq_len || d >= d_model) return;
     
     int token_idx = b * seq_len + t;
-    int token = tokens[token_idx];
+    uint32_t token = tokens[token_idx];
     int emb_idx = b * seq_len * d_model + t * d_model + d;
     
     atomicAdd(&token_embedding_grad[token * d_model + d], grad_embedded[emb_idx]);
 }
 
 // Forward pass
-void forward_pass_slm(SLM* slm, unsigned char* d_input_tokens) {
+void forward_pass_slm(SLM* slm, uint32_t* d_input_tokens) {
     // Step 1: Token embedding lookup
     dim3 grid_emb(slm->batch_size, slm->seq_len);
     dim3 block_emb(slm->d_model);
@@ -199,7 +204,7 @@ void forward_pass_slm(SLM* slm, unsigned char* d_input_tokens) {
 }
 
 // Calculate loss
-float calculate_loss_slm(SLM* slm, unsigned char* d_target_tokens) {
+float calculate_loss_slm(SLM* slm, uint32_t* d_target_tokens) {
     // Reset loss accumulator
     CHECK_CUDA(cudaMemset(slm->d_loss_result, 0, sizeof(float)));
     
@@ -228,7 +233,7 @@ void zero_gradients_slm(SLM* slm) {
 }
 
 // Backward pass
-void backward_pass_slm(SLM* slm, unsigned char* d_input_tokens) {
+void backward_pass_slm(SLM* slm, uint32_t* d_input_tokens) {
     // Step 4 (backward): Backward pass through output MLP
     backward_pass_mlp(slm->output_mlp, 
                       slm->transformer->mlp_layers[slm->num_layers-1]->d_output, 
@@ -296,7 +301,7 @@ void update_weights_slm(SLM* slm, float learning_rate, int effective_batch_size)
 }
 
 // Save SLM to binary file
-void save_slm(SLM* slm, const char* filename) {
+void save_slm(SLM* slm, const char* filename, const char* bpe_path) {
     FILE* file = fopen(filename, "wb");
     if (!file) {
         printf("Error opening file for writing: %s\n", filename);
@@ -310,6 +315,11 @@ void save_slm(SLM* slm, const char* filename) {
     fwrite(&slm->hidden_dim, sizeof(int), 1, file);
     fwrite(&slm->num_layers, sizeof(int), 1, file);
     fwrite(&slm->vocab_size, sizeof(int), 1, file);
+    
+    // Save BPE path length and path
+    size_t bpe_path_len = strlen(bpe_path);
+    fwrite(&bpe_path_len, sizeof(size_t), 1, file);
+    fwrite(bpe_path, sizeof(char), bpe_path_len, file);
     
     int token_emb_size = slm->vocab_size * slm->d_model;
     
@@ -378,11 +388,28 @@ SLM* load_slm(const char* filename, int custom_batch_size, cublasLtHandle_t cubl
     fread(&num_layers, sizeof(int), 1, file);
     fread(&vocab_size, sizeof(int), 1, file);
     
+    // Read BPE path
+    size_t bpe_path_len;
+    fread(&bpe_path_len, sizeof(size_t), 1, file);
+    char* bpe_path = (char*)malloc((bpe_path_len + 1) * sizeof(char));
+    fread(bpe_path, sizeof(char), bpe_path_len, file);
+    bpe_path[bpe_path_len] = '\0';
+    
+    // Load BPE tokenizer
+    printf("Loading BPE tokenizer from: %s\n", bpe_path);
+    BPE* bpe = load_bpe(bpe_path);
+    free(bpe_path);
+    
+    if (!bpe) {
+        fclose(file);
+        return NULL;
+    }
+    
     // Use custom_batch_size if provided, otherwise use stored value
     int batch_size = (custom_batch_size > 0) ? custom_batch_size : stored_batch_size;
     
     // Initialize SLM
-    SLM* slm = init_slm(seq_len, d_model, hidden_dim, num_layers, batch_size, cublaslt_handle);
+    SLM* slm = init_slm(bpe, seq_len, d_model, hidden_dim, num_layers, batch_size, cublaslt_handle);
     
     int token_emb_size = vocab_size * d_model;
     
