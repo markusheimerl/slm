@@ -132,6 +132,7 @@ int main(int argc, char* argv[]) {
     const int num_epochs = 100;
     const float learning_rate = 0.00001f;
     const int num_batches = num_sequences / batch_size;
+    const int accumulation_steps = 1;
 
     // Allocate device memory for batch data
     unsigned char *d_input_tokens, *d_target_tokens;
@@ -165,12 +166,14 @@ int main(int argc, char* argv[]) {
             // Don't update weights after final evaluation
             if (epoch == num_epochs) continue;
 
+            // Zero gradients
+            if (batch % accumulation_steps == 0) zero_gradients_slm(slm);
+            
             // Backward pass
-            zero_gradients_slm(slm);
             backward_pass_slm(slm, d_input_tokens);
             
             // Update weights
-            update_weights_slm(slm, learning_rate, batch_size);
+            if ((batch + 1) % accumulation_steps == 0) update_weights_slm(slm, learning_rate, batch_size * accumulation_steps);
             
             // Print progress
             if (batch % 2 == 0) {
