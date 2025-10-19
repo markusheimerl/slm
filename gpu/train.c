@@ -175,7 +175,7 @@ int main(int argc, char* argv[]) {
     const int num_epochs = 100;
     const float learning_rate = 0.00002f;
     const int num_batches = num_sequences / batch_size;
-    const int accumulation_steps = 16;
+    const int accumulation_steps = 2;
 
     // Allocate device memory for batch data
     uint32_t *d_input_tokens, *d_target_tokens;
@@ -216,7 +216,7 @@ int main(int argc, char* argv[]) {
             if ((batch + 1) % accumulation_steps == 0) update_weights_slm(slm, learning_rate, batch_size * accumulation_steps);
             
             // Print progress
-            if (batch % 2 == 0) {
+            if (batch % (accumulation_steps * batch_size) == 0) {
                 printf("Epoch [%d/%d], Batch [%d/%d], Loss: %.6f\n", epoch, num_epochs, batch, num_batches, loss);
             }
             
