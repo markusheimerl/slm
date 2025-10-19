@@ -7,7 +7,7 @@
 #include "slm.h"
 
 SLM* slm = NULL;
-const char* bpe_tokenizer_path = "../bpe/gpu/20251019_155518_bpe.bin";
+const char* bpe_tokenizer_path = "../bpe/gpu/20251019_162333_bpe.bin";
 
 // SIGINT handler to save model and exit
 void handle_sigint(int signum) {
