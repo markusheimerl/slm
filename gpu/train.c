@@ -170,7 +170,7 @@ int main(int argc, char* argv[]) {
             backward_pass_slm(slm, d_input_tokens);
             
             // Update weights
-            update_weights_slm(slm, learning_rate);
+            update_weights_slm(slm, learning_rate, batch_size);
             
             // Print progress
             if (batch % 2 == 0) {

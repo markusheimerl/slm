@@ -215,7 +215,7 @@ void backward_pass_slm(SLM* slm, unsigned char* input_tokens) {
 }
 
 // Update weights
-void update_weights_slm(SLM* slm, float learning_rate) {
+void update_weights_slm(SLM* slm, float learning_rate, int effective_batch_size) {
     slm->t++;
     
     float beta1_t = powf(slm->beta1, slm->t);
@@ -239,10 +239,10 @@ void update_weights_slm(SLM* slm, float learning_rate) {
     }
     
     // Update transformer weights
-    update_weights_transformer(slm->transformer, learning_rate);
+    update_weights_transformer(slm->transformer, learning_rate, effective_batch_size);
     
     // Update output MLP weights
-    update_weights_mlp(slm->output_mlp, learning_rate);
+    update_weights_mlp(slm->output_mlp, learning_rate, effective_batch_size);
 }
 
 // Save SLM to binary file
