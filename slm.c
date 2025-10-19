@@ -226,7 +226,7 @@ void update_weights_slm(SLM* slm, float learning_rate, int effective_batch_size)
     
     // Update token embeddings
     for (int i = 0; i < token_emb_size; i++) {
-        float grad = slm->token_embedding_grad[i] / slm->batch_size;
+        float grad = slm->token_embedding_grad[i] / effective_batch_size;
         
         // m = β₁m + (1-β₁)(∂L/∂W)
         slm->token_embedding_m[i] = slm->beta1 * slm->token_embedding_m[i] + (1.0f - slm->beta1) * grad;
