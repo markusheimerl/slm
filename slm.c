@@ -215,7 +215,7 @@ void backward_pass_slm(SLM* slm, unsigned char* input_tokens) {
 }
 
 // Update weights
-void update_weights_slm(SLM* slm, float learning_rate) {
+void update_weights_slm(SLM* slm, float learning_rate, int effective_batch_size) {
     slm->t++;
     
     float beta1_t = powf(slm->beta1, slm->t);
@@ -226,7 +226,7 @@ void update_weights_slm(SLM* slm, float learning_rate) {
     
     // Update token embeddings
     for (int i = 0; i < token_emb_size; i++) {
-        float grad = slm->token_embedding_grad[i] / slm->batch_size;
+        float grad = slm->token_embedding_grad[i] / effective_batch_size;
         
         // m = β₁m + (1-β₁)(∂L/∂W)
         slm->token_embedding_m[i] = slm->beta1 * slm->token_embedding_m[i] + (1.0f - slm->beta1) * grad;
@@ -239,10 +239,10 @@ void update_weights_slm(SLM* slm, float learning_rate) {
     }
     
     // Update transformer weights
-    update_weights_transformer(slm->transformer, learning_rate);
+    update_weights_transformer(slm->transformer, learning_rate, effective_batch_size);
     
     // Update output MLP weights
-    update_weights_mlp(slm->output_mlp, learning_rate);
+    update_weights_mlp(slm->output_mlp, learning_rate, effective_batch_size);
 }
 
 // Save SLM to binary file
