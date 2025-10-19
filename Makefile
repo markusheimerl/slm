@@ -32,6 +32,7 @@ cont: train.out
 clean:
 	rm -f *.out *.o *.csv
 	$(MAKE) -C gpu clean
+	$(MAKE) -C bpe clean
 	$(MAKE) -C transformer clean
 	$(MAKE) -C transformer/attention clean
 	$(MAKE) -C transformer/mlp clean
