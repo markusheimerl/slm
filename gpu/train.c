@@ -332,7 +332,7 @@ int main(int argc, char* argv[]) {
             if ((batch + 1) % accumulation_steps == 0) update_weights_slm(slm, learning_rate, batch_size * accumulation_steps);
             
             // Print progress
-            if (batch % (accumulation_steps * batch_size) == 0) {
+            if (batch % accumulation_steps == 0) {
                 printf("Epoch [%d/%d], Batch [%d/%d], Loss: %.6f\n", epoch, num_epochs, batch, num_batches, loss);
             }
             
