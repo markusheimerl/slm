@@ -292,7 +292,6 @@ int load_and_tokenize_chunk(BPE* bpe, size_t corpus_offset, size_t total_corpus_
 int main(int argc, char* argv[]) {
     srand(time(NULL));
     signal(SIGINT, handle_sigint);
-    training_start_time = time(NULL);
 
     // Initialize cuBLAS
     cublasLtHandle_t cublaslt_handle;
@@ -313,8 +312,8 @@ int main(int argc, char* argv[]) {
     const int hidden_dim = 4096;
     const int num_layers = 32;
     const int batch_size = 2;
-    const int accumulation_steps = 2;
-    const float learning_rate = 0.00002f;
+    const int accumulation_steps = 128;
+    const float learning_rate = 0.001f;
     
     // Get corpus size
     size_t total_corpus_size = get_file_size(CORPUS_PATH);
@@ -382,7 +381,8 @@ int main(int argc, char* argv[]) {
     size_t corpus_offset = first_chunk_bytes;
     int global_batch_counter = 0;
     int chunk_number = 1;
-    
+    training_start_time = time(NULL);
+
     // Initialize timing
     clock_gettime(CLOCK_MONOTONIC, &last_accumulation_time);
     
@@ -404,7 +404,7 @@ int main(int argc, char* argv[]) {
             // Forward pass
             forward_pass_slm(slm, d_input_tokens);
             float loss = calculate_loss_slm(slm, d_target_tokens);
-            if(loss >= 10.0) raise(SIGINT);
+            if(loss >= 30.0) raise(SIGINT);
 
             // Backward pass with gradient accumulation
             if (batch % accumulation_steps == 0) zero_gradients_slm(slm);
@@ -440,7 +440,7 @@ int main(int argc, char* argv[]) {
             }
             
             // Generate samples periodically
-            if (global_batch_counter % 200 == 0) {
+            if (global_batch_counter % 20000 == 0) {
                 printf("\n--- Generated sample (batch %d/%d) ---\n", global_batch_counter, estimated_total_batches);
                 generate_from_corpus(slm, input_tokens, num_sequences, 128, 0.8f, d_input_tokens);
                 printf("\n");
