@@ -20,7 +20,111 @@ void handle_sigint(int signum) {
     exit(128 + signum);
 }
 
-// Text generation function
+// Text generation function from a custom prompt
+void generate_text_from_prompt(SLM* slm, const char* prompt, int length, float temperature, uint32_t* d_input_tokens) {
+    // Encode the prompt
+    size_t prompt_len = strlen(prompt);
+    uint32_t num_prompt_tokens;
+    uint32_t* prompt_tokens = encode_bpe(slm->bpe, prompt, prompt_len, &num_prompt_tokens);
+    
+    if (num_prompt_tokens >= (uint32_t)slm->seq_len) {
+        printf("Error: prompt too long (%u tokens, max %d)\n", num_prompt_tokens, slm->seq_len);
+        free(prompt_tokens);
+        return;
+    }
+    
+    // Prepare seed tokens buffer
+    uint32_t* h_seed_tokens = (uint32_t*)malloc(slm->seq_len * sizeof(uint32_t));
+    
+    // Put prompt at the beginning, pad rest with zeros
+    for (uint32_t i = 0; i < num_prompt_tokens; i++) {
+        h_seed_tokens[i] = prompt_tokens[i];
+    }
+    for (int i = num_prompt_tokens; i < slm->seq_len; i++) {
+        h_seed_tokens[i] = 0;
+    }
+    
+    // Copy seed to device
+    CHECK_CUDA(cudaMemcpy(d_input_tokens, h_seed_tokens, slm->seq_len * sizeof(uint32_t), cudaMemcpyHostToDevice));
+    
+    // Display prompt
+    printf("%s", prompt);
+    fflush(stdout);
+    
+    // Allocate logits buffer
+    float* h_logits = (float*)malloc(slm->vocab_size * sizeof(float));
+    
+    // Track current position (starts at last prompt token position)
+    int current_pos = num_prompt_tokens - 1;
+    
+    // Generate text one token at a time
+    for (int gen = 0; gen < length; gen++) {
+        // Forward pass
+        forward_pass_slm(slm, d_input_tokens);
+        
+        // Get logits from current position
+        CHECK_CUDA(cudaMemcpy(h_logits, &slm->output_mlp->d_output[current_pos * slm->vocab_size], slm->vocab_size * sizeof(float), cudaMemcpyDeviceToHost));
+        
+        // Apply temperature and softmax
+        float max_logit = -1e30f;
+        for (int v = 0; v < slm->vocab_size; v++) {
+            h_logits[v] /= temperature;
+            if (h_logits[v] > max_logit) max_logit = h_logits[v];
+        }
+        
+        float sum_exp = 0.0f;
+        for (int v = 0; v < slm->vocab_size; v++) {
+            float exp_val = expf(h_logits[v] - max_logit);
+            h_logits[v] = exp_val;
+            sum_exp += exp_val;
+        }
+        
+        for (int v = 0; v < slm->vocab_size; v++) {
+            h_logits[v] /= sum_exp;
+        }
+        
+        // Sample from the distribution
+        float r = (float)rand() / (float)RAND_MAX;
+        uint32_t next_token = 0;
+        float cumsum = 0.0f;
+        for (int v = 0; v < slm->vocab_size; v++) {
+            cumsum += h_logits[v];
+            if (r <= cumsum) {
+                next_token = v;
+                break;
+            }
+        }
+
+        // Display token
+        char* token_text = decode_bpe(slm->bpe, &next_token, 1);
+        printf("%s", token_text);
+        free(token_text);
+        fflush(stdout);
+        
+        // Add new token at next position
+        current_pos++;
+        if (current_pos >= slm->seq_len) {
+            // Shift everything left
+            for (int i = 0; i < slm->seq_len - 1; i++) {
+                h_seed_tokens[i] = h_seed_tokens[i + 1];
+            }
+            h_seed_tokens[slm->seq_len - 1] = next_token;
+            current_pos = slm->seq_len - 1;
+        } else {
+            h_seed_tokens[current_pos] = next_token;
+        }
+        
+        // Update device memory
+        CHECK_CUDA(cudaMemcpy(d_input_tokens, h_seed_tokens, slm->seq_len * sizeof(uint32_t), cudaMemcpyHostToDevice));
+    }
+    
+    printf("\n");
+    free(prompt_tokens);
+    free(h_seed_tokens);
+    free(h_logits);
+}
+
+// Text generation function (original - uses random corpus seed)
 void generate_text(SLM* slm, uint32_t* corpus_tokens, uint32_t num_corpus_tokens, int length, float temperature, uint32_t* d_input_tokens) {
     // Start with a random seed from corpus
     int seed_start = rand() % (num_corpus_tokens - slm->seq_len - 1);
@@ -182,6 +286,18 @@ int main(int argc, char* argv[]) {
     CHECK_CUDA(cudaMalloc(&d_input_tokens, batch_size * seq_len * sizeof(uint32_t)));
     CHECK_CUDA(cudaMalloc(&d_target_tokens, batch_size * seq_len * sizeof(uint32_t)));
     
+    // Custom prompts for generation
+    const char* prompts[] = {
+        "<|bos|>The capital of France is ",
+        "<|bos|>The chemical symbol of gold is ",
+        "<|bos|>If yesterday was Friday, then tomorrow will be ",
+        "<|bos|>The opposite of hot is ",
+        "<|bos|>The planets of the solar system are: ",
+        "<|bos|>My favorite color is ",
+        "<|bos|>If 5*x + 3 = 13, then x is "
+    };
+    const int num_prompts = sizeof(prompts) / sizeof(prompts[0]);
+    
     // Training loop
     for (int epoch = 0; epoch < num_epochs + 1; epoch++) {
         float epoch_loss = 0.0f;
@@ -224,6 +340,7 @@ int main(int argc, char* argv[]) {
             if (batch > 0 && batch % 200 == 0) {
                 printf("\n--- Generated sample (epoch %d, batch %d) ---\n", epoch, batch);
                 generate_text(slm, corpus_tokens, num_corpus_tokens, 128, 0.8f, d_input_tokens);
+                for (int p = 0; p < num_prompts; p++) generate_text_from_prompt(slm, prompts[p], 64, 0.0f, d_input_tokens);
                 printf("\n--- End sample ---\n\n");
             }
 
