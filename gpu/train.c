@@ -8,7 +8,7 @@
 #include "slm.h"
 
 // Constants
-const char* BPE_TOKENIZER_PATH = "../bpe/gpu/20251019_162333_bpe.bin";
+const char* BPE_TOKENIZER_PATH = "../bpe/gpu/20251020_003829_bpe.bin";
 const char* CORPUS_PATH = "../corpus.txt";
 const size_t CHUNK_SIZE = 2ULL * 1024 * 1024 * 1024; // 2GB
 const char* TEMP_CHECKPOINT = "temp_chunk_checkpoint.bin";
@@ -331,14 +331,14 @@ int main(int argc, char* argv[]) {
     const int seq_len = 2048;
     const int d_model = 1024;
     const int hidden_dim = 4096;
-    const int num_layers = 32;
+    const int num_layers = 30;
     const int batch_size = 2;
     const int accumulation_steps = 128;
     
-    // Learning rate schedule parameters (SOTA: Warmup + Cosine Decay)
-    const int warmup_steps = 2000;           // Warmup for first 2000 steps
-    const float max_learning_rate = 6e-4f;   // Peak learning rate (GPT-3 style: 6e-4)
-    const float min_learning_rate = 6e-5f;   // Minimum learning rate (10% of max)
+    // Learning rate schedule parameters
+    const int warmup_steps = 100;
+    const float max_learning_rate = 6e-4f;
+    const float min_learning_rate = 6e-5f;
     
     // Get corpus size
     size_t total_corpus_size = get_file_size(CORPUS_PATH);
@@ -414,7 +414,7 @@ int main(int argc, char* argv[]) {
     printf("\n=== Starting Training ===\n");
     size_t corpus_offset = first_chunk_bytes;
     int global_batch_counter = 0;
-    int global_step_counter = 0;  // For learning rate schedule
+    int global_step_counter = 0;
     int chunk_number = 1;
     training_start_time = time(NULL);
 
@@ -439,7 +439,7 @@ int main(int argc, char* argv[]) {
             // Forward pass
             forward_pass_slm(slm, d_input_tokens);
             float loss = calculate_loss_slm(slm, d_target_tokens);
-            if(loss >= 30.0) raise(SIGINT);
+            if(loss >= 11.0) raise(SIGINT);
 
             // Backward pass with gradient accumulation
             if (batch % accumulation_steps == 0) zero_gradients_slm(slm);
