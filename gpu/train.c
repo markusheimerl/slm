@@ -366,20 +366,10 @@ int main(int argc, char* argv[]) {
     int num_batches = num_sequences / batch_size;
     double bytes_per_batch = (double)first_chunk_bytes / (double)num_batches;
     int estimated_total_batches = (int)((double)total_corpus_size / bytes_per_batch);
-    
-    printf("First chunk: %zu bytes, %d sequences, %d batches\n", first_chunk_bytes, num_sequences, num_batches);
-    printf("Bytes per batch: %.2f\n", bytes_per_batch);
-    printf("Estimated total batches: %d\n", estimated_total_batches);
-    
+
     // Total training steps for cosine schedule
     const int total_training_steps = estimated_total_batches / accumulation_steps;
-    
-    printf("\n=== Learning Rate Schedule ===\n");
-    printf("Warmup steps: %d\n", warmup_steps);
-    printf("Max learning rate: %.6f\n", max_learning_rate);
-    printf("Min learning rate: %.6f\n", min_learning_rate);
-    printf("Total training steps: %d\n", total_training_steps);
-    
+
     // Initialize or load model
     if (argc > 1) {
         printf("\nLoading checkpoint: %s\n", argv[1]);
@@ -421,10 +411,17 @@ int main(int argc, char* argv[]) {
     // Initialize timing
     clock_gettime(CLOCK_MONOTONIC, &last_accumulation_time);
     
+    // Loss averaging variables
+    float accumulated_loss = 0.0f;
+    float previous_avg_loss = 0.0f;
+    
     while (true) {
         printf("\n=== Chunk %d ===\n", chunk_number);
         
         int num_batches_this_chunk = num_sequences / batch_size;
+        
+        // Reset loss accumulator at start of each chunk
+        accumulated_loss = 0.0f;
         
         for (int batch = 0; batch < num_batches_this_chunk; batch++) {
             global_batch_counter++;
@@ -441,11 +438,18 @@ int main(int argc, char* argv[]) {
             float loss = calculate_loss_slm(slm, d_target_tokens);
             if(loss >= 11.0) raise(SIGINT);
 
+            // Accumulate loss
+            accumulated_loss += loss;
+
             // Backward pass with gradient accumulation
             if (batch % accumulation_steps == 0) zero_gradients_slm(slm);
             backward_pass_slm(slm, d_input_tokens);
             if ((batch + 1) % accumulation_steps == 0) {
                 global_step_counter++;
+                
+                // Calculate average loss for this accumulation window
+                previous_avg_loss = accumulated_loss / accumulation_steps;
+                accumulated_loss = 0.0f;
                 
                 // Calculate learning rate based on schedule
                 float current_lr = get_learning_rate(global_step_counter, warmup_steps, 
@@ -457,6 +461,9 @@ int main(int argc, char* argv[]) {
             
             // Print progress with ETA and DT
             if (batch % accumulation_steps == 0) {
+                // For the very first batch, use current loss; otherwise use average from previous window
+                float display_loss = (global_batch_counter == 1) ? loss : previous_avg_loss;
+                
                 // Calculate current learning rate for display
                 float current_lr = get_learning_rate(global_step_counter, warmup_steps, 
                                                      max_learning_rate, min_learning_rate, 
@@ -483,7 +490,7 @@ int main(int argc, char* argv[]) {
                 
                 printf("Step [%d/%d] Batch [%d/%d] (Chunk %d, Local %d/%d), Loss: %.6f, LR: %.6f, ETA: %s, DT: %lldms\n", 
                        global_step_counter, total_training_steps, global_batch_counter, estimated_total_batches,
-                       chunk_number, batch, num_batches_this_chunk, loss, current_lr, eta_str, dt_ms);
+                       chunk_number, batch, num_batches_this_chunk, display_loss, current_lr, eta_str, dt_ms);
             }
             
             // Generate samples periodically
