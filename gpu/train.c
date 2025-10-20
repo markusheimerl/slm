@@ -340,6 +340,7 @@ int main(int argc, char* argv[]) {
             if (batch > 0 && batch % 200 == 0) {
                 printf("\n--- Generated sample (epoch %d, batch %d) ---\n", epoch, batch);
                 generate_text(slm, corpus_tokens, num_corpus_tokens, 128, 0.8f, d_input_tokens);
+                printf("\n");
                 for (int p = 0; p < num_prompts; p++) generate_text_from_prompt(slm, prompts[p], 64, 0.01f, d_input_tokens);
                 printf("\n--- End sample ---\n\n");
             }
