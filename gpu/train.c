@@ -336,8 +336,8 @@ int main(int argc, char* argv[]) {
     const int accumulation_steps = 128;
     
     // Learning rate schedule parameters
-    const int warmup_steps = 2000;
-    const float max_learning_rate = 6e-4f;
+    const int warmup_steps = 1;
+    const float max_learning_rate = 2e-5f;
     const float min_learning_rate = 6e-5f;
     
     // Get corpus size
