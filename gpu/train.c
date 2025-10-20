@@ -16,6 +16,7 @@ const char* TEMP_CHECKPOINT = "temp_chunk_checkpoint.bin";
 // Global state
 SLM* slm = NULL;
 time_t training_start_time;
+struct timespec last_accumulation_time;
 
 // SIGINT handler to save model and exit
 void handle_sigint(int signum) {
@@ -34,6 +35,13 @@ void format_time(int total_seconds, char* buffer, size_t buffer_size) {
     int minutes = (total_seconds % 3600) / 60;
     int seconds = total_seconds % 60;
     snprintf(buffer, buffer_size, "%02d:%02d:%02d", hours, minutes, seconds);
+}
+
+// Get current time in milliseconds
+long long get_time_ms() {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (long long)ts.tv_sec * 1000LL + ts.tv_nsec / 1000000LL;
 }
 
 // Get file size
@@ -375,6 +383,9 @@ int main(int argc, char* argv[]) {
     int global_batch_counter = 0;
     int chunk_number = 1;
     
+    // Initialize timing
+    clock_gettime(CLOCK_MONOTONIC, &last_accumulation_time);
+    
     while (true) {
         printf("\n=== Chunk %d ===\n", chunk_number);
         
@@ -402,8 +413,9 @@ int main(int argc, char* argv[]) {
                 update_weights_slm(slm, learning_rate, batch_size * accumulation_steps);
             }
             
-            // Print progress with ETA
+            // Print progress with ETA and DT
             if (batch % accumulation_steps == 0) {
+                // Calculate ETA
                 time_t now = time(NULL);
                 int elapsed_seconds = (int)difftime(now, training_start_time);
                 double avg_seconds_per_batch = (double)elapsed_seconds / (double)global_batch_counter;
@@ -413,8 +425,18 @@ int main(int argc, char* argv[]) {
                 char eta_str[16];
                 format_time(eta_seconds, eta_str, sizeof(eta_str));
                 
-                printf("Batch [%d/%d] (Chunk %d, Local %d/%d), Loss: %.6f, ETA: %s\n", 
-                       global_batch_counter, estimated_total_batches, chunk_number, batch, num_batches_this_chunk, loss, eta_str);
+                // Calculate DT (delta time in milliseconds)
+                long long current_time_ms = get_time_ms();
+                struct timespec current_time;
+                clock_gettime(CLOCK_MONOTONIC, &current_time);
+                long long last_time_ms = (long long)last_accumulation_time.tv_sec * 1000LL + 
+                                         last_accumulation_time.tv_nsec / 1000000LL;
+                long long dt_ms = current_time_ms - last_time_ms;
+                last_accumulation_time = current_time;
+                
+                printf("Batch [%d/%d] (Chunk %d, Local %d/%d), Loss: %.6f, ETA: %s, DT: %lldms\n", 
+                       global_batch_counter, estimated_total_batches, chunk_number, batch, 
+                       num_batches_this_chunk, loss, eta_str, dt_ms);
             }
             
             // Generate samples periodically
@@ -426,6 +448,9 @@ int main(int argc, char* argv[]) {
                     generate_from_prompt(slm, prompts[p], 64, 0.01f, d_input_tokens);
                 }
                 printf("--- End sample ---\n\n");
+                
+                // Reset timing after generation
+                clock_gettime(CLOCK_MONOTONIC, &last_accumulation_time);
             }
 
             // Checkpoint periodically
@@ -463,6 +488,9 @@ int main(int argc, char* argv[]) {
         
         printf("Reloading model...\n");
         slm = load_slm(TEMP_CHECKPOINT, batch_size, cublaslt_handle);
+        
+        // Reset timing after chunk loading
+        clock_gettime(CLOCK_MONOTONIC, &last_accumulation_time);
     }
 
     // Training complete
