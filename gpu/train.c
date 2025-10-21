@@ -319,7 +319,7 @@ int main(int argc, char* argv[]) {
     // Learning rate schedule parameters (SOTA: Warmup + Cosine Decay)
     const int total_steps = num_epochs * num_batches;
     const int warmup_steps = total_steps / 10;  // 10% warmup
-    const float max_lr = 0.00003f;  // Peak learning rate (3e-5, common for transformers)
+    const float max_lr = 0.00002f;  // Peak learning rate (3e-5, common for transformers)
     const float min_lr = 0.000001f;  // Minimum learning rate (1e-6)
     
     printf("Learning rate schedule: Warmup (%d steps) + Cosine Decay\n", warmup_steps);
