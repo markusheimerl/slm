@@ -54,27 +54,6 @@ size_t get_file_size(const char* filename) {
     return st.st_size;
 }
 
-// Learning rate schedule: Warmup + Cosine Decay
-float get_learning_rate(int step, int warmup_steps, float max_lr, float min_lr, int total_steps) {
-    if (step < warmup_steps) {
-        // Linear warmup from 0 to max_lr
-        return max_lr * ((float)step / (float)warmup_steps);
-    } else {
-        // Cosine decay from max_lr to min_lr
-        int decay_steps = total_steps - warmup_steps;
-        int current_decay_step = step - warmup_steps;
-        
-        // Clamp to prevent going beyond total_steps
-        if (current_decay_step > decay_steps) {
-            return min_lr;
-        }
-        
-        float decay_ratio = (float)current_decay_step / (float)decay_steps;
-        float cosine_decay = 0.5f * (1.0f + cosf(M_PI * decay_ratio));
-        return min_lr + (max_lr - min_lr) * cosine_decay;
-    }
-}
-
 // Load a chunk of the corpus
 char* load_corpus_chunk(const char* filename, size_t offset, size_t chunk_size, size_t* bytes_read) {
     FILE* file = fopen(filename, "rb");
@@ -334,11 +313,7 @@ int main(int argc, char* argv[]) {
     const int num_layers = 32;
     const int batch_size = 2;
     const int accumulation_steps = 128;
-    
-    // Learning rate schedule parameters (SOTA: Warmup + Cosine Decay)
-    const int warmup_steps = 2000;           // Warmup for first 2000 steps
-    const float max_learning_rate = 6e-4f;   // Peak learning rate (GPT-3 style: 6e-4)
-    const float min_learning_rate = 6e-5f;   // Minimum learning rate (10% of max)
+    const float learning_rate = 0.001f;
     
     // Get corpus size
     size_t total_corpus_size = get_file_size(CORPUS_PATH);
@@ -370,15 +345,6 @@ int main(int argc, char* argv[]) {
     printf("First chunk: %zu bytes, %d sequences, %d batches\n", first_chunk_bytes, num_sequences, num_batches);
     printf("Bytes per batch: %.2f\n", bytes_per_batch);
     printf("Estimated total batches: %d\n", estimated_total_batches);
-    
-    // Total training steps for cosine schedule
-    const int total_training_steps = estimated_total_batches / accumulation_steps;
-    
-    printf("\n=== Learning Rate Schedule ===\n");
-    printf("Warmup steps: %d\n", warmup_steps);
-    printf("Max learning rate: %.6f\n", max_learning_rate);
-    printf("Min learning rate: %.6f\n", min_learning_rate);
-    printf("Total training steps: %d\n", total_training_steps);
     
     // Initialize or load model
     if (argc > 1) {
@@ -414,7 +380,6 @@ int main(int argc, char* argv[]) {
     printf("\n=== Starting Training ===\n");
     size_t corpus_offset = first_chunk_bytes;
     int global_batch_counter = 0;
-    int global_step_counter = 0;  // For learning rate schedule
     int chunk_number = 1;
     training_start_time = time(NULL);
 
@@ -445,23 +410,11 @@ int main(int argc, char* argv[]) {
             if (batch % accumulation_steps == 0) zero_gradients_slm(slm);
             backward_pass_slm(slm, d_input_tokens);
             if ((batch + 1) % accumulation_steps == 0) {
-                global_step_counter++;
-                
-                // Calculate learning rate based on schedule
-                float current_lr = get_learning_rate(global_step_counter, warmup_steps, 
-                                                     max_learning_rate, min_learning_rate, 
-                                                     total_training_steps);
-                
-                update_weights_slm(slm, current_lr, batch_size * accumulation_steps);
+                update_weights_slm(slm, learning_rate, batch_size * accumulation_steps);
             }
             
             // Print progress with ETA and DT
             if (batch % accumulation_steps == 0) {
-                // Calculate current learning rate for display
-                float current_lr = get_learning_rate(global_step_counter, warmup_steps, 
-                                                     max_learning_rate, min_learning_rate, 
-                                                     total_training_steps);
-                
                 // Calculate ETA
                 time_t now = time(NULL);
                 int elapsed_seconds = (int)difftime(now, training_start_time);
@@ -481,15 +434,14 @@ int main(int argc, char* argv[]) {
                 long long dt_ms = current_time_ms - last_time_ms;
                 last_accumulation_time = current_time;
                 
-                printf("Step [%d/%d] Batch [%d/%d] (Chunk %d, Local %d/%d), Loss: %.6f, LR: %.6f, ETA: %s, DT: %lldms\n", 
-                       global_step_counter, total_training_steps, global_batch_counter, estimated_total_batches,
-                       chunk_number, batch, num_batches_this_chunk, loss, current_lr, eta_str, dt_ms);
+                printf("Batch [%d/%d] (Chunk %d, Local %d/%d), Loss: %.6f, ETA: %s, DT: %lldms\n", 
+                       global_batch_counter, estimated_total_batches, chunk_number, batch, 
+                       num_batches_this_chunk, loss, eta_str, dt_ms);
             }
             
             // Generate samples periodically
             if (global_batch_counter % 20000 == 0) {
-                printf("\n--- Generated sample (step %d/%d, batch %d/%d) ---\n", 
-                       global_step_counter, total_training_steps, global_batch_counter, estimated_total_batches);
+                printf("\n--- Generated sample (batch %d/%d) ---\n", global_batch_counter, estimated_total_batches);
                 generate_from_corpus(slm, input_tokens, num_sequences, 128, 0.8f, d_input_tokens);
                 printf("\n");
                 for (int p = 0; p < num_prompts; p++) {
@@ -543,7 +495,6 @@ int main(int argc, char* argv[]) {
 
     // Training complete
     printf("\n=== Training Complete ===\n");
-    printf("Total steps processed: %d\n", global_step_counter);
     printf("Total batches processed: %d\n", global_batch_counter);
     
     time_t now = time(NULL);
