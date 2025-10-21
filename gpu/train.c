@@ -8,7 +8,7 @@
 #include "slm.h"
 
 // Constants
-const char* BPE_TOKENIZER_PATH = "../bpe/gpu/20251019_162333_bpe.bin";
+const char* BPE_TOKENIZER_PATH = "../bpe/gpu/20251020_003829_bpe.bin";
 const char* CORPUS_PATH = "../corpus.txt";
 const size_t CHUNK_SIZE = 2ULL * 1024 * 1024 * 1024; // 2GB
 const char* TEMP_CHECKPOINT = "temp_chunk_checkpoint.bin";
@@ -331,12 +331,12 @@ int main(int argc, char* argv[]) {
     const int seq_len = 2048;
     const int d_model = 1024;
     const int hidden_dim = 4096;
-    const int num_layers = 32;
+    const int num_layers = 30;
     const int batch_size = 2;
     const int accumulation_steps = 128;
     
     // Learning rate schedule parameters
-    const int warmup_steps = 2000;
+    const int warmup_steps = 1000;
     const float max_learning_rate = 6e-4f;
     const float min_learning_rate = 6e-5f;
     
