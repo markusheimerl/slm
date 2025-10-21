@@ -313,7 +313,7 @@ int main(int argc, char* argv[]) {
     const int num_layers = 32;
     const int batch_size = 2;
     const int accumulation_steps = 2;
-    const float learning_rate = 0.00002f;
+    const float learning_rate = 0.00001f;
     
     // Get corpus size
     size_t total_corpus_size = get_file_size(CORPUS_PATH);
