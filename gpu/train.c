@@ -258,11 +258,11 @@ int main(int argc, char* argv[]) {
     printf("BPE vocab size: %u\n", bpe->vocab_size);
 
     // Parameters
-    const int seq_len = 2048;
+    const int seq_len = 1024;
     const int d_model = 512;
     const int hidden_dim = 2048;
     const int num_layers = 8;
-    const int batch_size = 15;
+    const int batch_size = 36;
     
     // Load corpus
     size_t corpus_size;
