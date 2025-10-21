@@ -20,6 +20,27 @@ void handle_sigint(int signum) {
     exit(128 + signum);
 }
 
+// SOTA Learning Rate Schedule: Warmup + Cosine Decay
+float get_learning_rate(int current_step, int warmup_steps, int total_steps, float max_lr, float min_lr) {
+    // Linear warmup
+    if (current_step < warmup_steps) {
+        return max_lr * ((float)current_step / (float)warmup_steps);
+    }
+    
+    // Cosine decay
+    int decay_steps = total_steps - warmup_steps;
+    int current_decay_step = current_step - warmup_steps;
+    
+    if (current_decay_step >= decay_steps) {
+        return min_lr;
+    }
+    
+    // Cosine annealing formula
+    float decay_ratio = (float)current_decay_step / (float)decay_steps;
+    float coeff = 0.5f * (1.0f + cosf(M_PI * decay_ratio));
+    return min_lr + (max_lr - min_lr) * coeff;
+}
+
 // Text generation function from a custom prompt
 void generate_text_from_prompt(SLM* slm, const char* prompt, int length, float temperature, uint32_t* d_input_tokens) {
     // Encode the prompt
@@ -292,9 +313,17 @@ int main(int argc, char* argv[]) {
     
     // Training parameters
     const int num_epochs = 1;
-    const float learning_rate = 0.00002f;
     const int num_batches = num_sequences / batch_size;
     const int accumulation_steps = 1;
+    
+    // Learning rate schedule parameters (SOTA: Warmup + Cosine Decay)
+    const int total_steps = num_epochs * num_batches;
+    const int warmup_steps = total_steps / 10;  // 10% warmup
+    const float max_lr = 0.00003f;  // Peak learning rate (3e-5, common for transformers)
+    const float min_lr = 0.000001f;  // Minimum learning rate (1e-6)
+    
+    printf("Learning rate schedule: Warmup (%d steps) + Cosine Decay\n", warmup_steps);
+    printf("Max LR: %.6f, Min LR: %.6f, Total steps: %d\n", max_lr, min_lr, total_steps);
 
     // Allocate device memory for batch data
     uint32_t *d_input_tokens, *d_target_tokens;
@@ -315,6 +344,7 @@ int main(int argc, char* argv[]) {
     
     // Training timing
     time_t training_start_time = time(NULL);
+    int global_step = 0;
     
     // Training loop
     for (int epoch = 0; epoch < num_epochs + 1; epoch++) {
@@ -340,31 +370,37 @@ int main(int argc, char* argv[]) {
             // Don't update weights after final evaluation
             if (epoch == num_epochs) continue;
 
+            // Get current learning rate from schedule
+            float current_lr = get_learning_rate(global_step, warmup_steps, total_steps, max_lr, min_lr);
+
             // Zero gradients
             if (batch % accumulation_steps == 0) zero_gradients_slm(slm);
             
             // Backward pass
             backward_pass_slm(slm, d_input_tokens);
             
-            // Update weights
-            if ((batch + 1) % accumulation_steps == 0) update_weights_slm(slm, learning_rate, batch_size * accumulation_steps);
+            // Update weights with scheduled learning rate
+            if ((batch + 1) % accumulation_steps == 0) {
+                update_weights_slm(slm, current_lr, batch_size * accumulation_steps);
+                global_step++;
+            }
             
             // Print progress with ETA
             if (batch % accumulation_steps == 0) {
                 // Calculate ETA
                 time_t current_time = time(NULL);
                 double elapsed = difftime(current_time, training_start_time);
-                int total_batches = num_epochs * num_batches;
+                int total_batches_all = num_epochs * num_batches;
                 int completed_batches = epoch * num_batches + batch;
                 double batches_per_sec = completed_batches / elapsed;
-                double remaining_batches = total_batches - completed_batches;
+                double remaining_batches = total_batches_all - completed_batches;
                 double eta_seconds = remaining_batches / batches_per_sec;
                 
                 char eta_str[64];
                 format_time(eta_seconds, eta_str, sizeof(eta_str));
                 
-                printf("Epoch [%d/%d], Batch [%d/%d], Loss: %.6f, ETA: %s\n", 
-                       epoch, num_epochs, batch, num_batches, loss, eta_str);
+                printf("Epoch [%d/%d], Batch [%d/%d], Loss: %.6f, LR: %.6f, ETA: %s\n", 
+                       epoch, num_epochs, batch, num_batches, loss, current_lr, eta_str);
             }
             
             // Generate sample text periodically
