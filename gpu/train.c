@@ -440,7 +440,7 @@ int main(int argc, char* argv[]) {
             }
             
             // Generate samples periodically
-            if (global_batch_counter % 200 == 0) {
+            if (global_batch_counter % 20000 == 0) {
                 printf("\n--- Generated sample (batch %d/%d) ---\n", global_batch_counter, estimated_total_batches);
                 generate_from_corpus(slm, input_tokens, num_sequences, 128, 0.8f, d_input_tokens);
                 printf("\n");
@@ -454,7 +454,7 @@ int main(int argc, char* argv[]) {
             }
 
             // Checkpoint periodically
-            if (global_batch_counter % 1000 == 0) {
+            if (global_batch_counter % 10000 == 0) {
                 save_slm(slm, "checkpoint_slm.bin", BPE_TOKENIZER_PATH);
             }
         }
