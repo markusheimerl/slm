@@ -502,7 +502,7 @@ int main(int argc, char* argv[]) {
             }
 
             // Checkpoint periodically
-            if (global_batch_counter % 15000 == 0) {
+            if (global_batch_counter % 1000 == 0) {
                 save_slm(slm, "checkpoint_slm.bin", BPE_TOKENIZER_PATH);
             }
         }
