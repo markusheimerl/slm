@@ -292,7 +292,6 @@ int load_and_tokenize_chunk(BPE* bpe, size_t corpus_offset, size_t total_corpus_
 int main(int argc, char* argv[]) {
     srand(time(NULL));
     signal(SIGINT, handle_sigint);
-    training_start_time = time(NULL);
 
     // Initialize cuBLAS
     cublasLtHandle_t cublaslt_handle;
@@ -379,6 +378,7 @@ int main(int argc, char* argv[]) {
     
     // Training loop
     printf("\n=== Starting Training ===\n");
+    training_start_time = time(NULL);
     size_t corpus_offset = first_chunk_bytes;
     int global_batch_counter = 0;
     int chunk_number = 1;
