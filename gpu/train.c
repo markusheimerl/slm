@@ -336,7 +336,7 @@ int main(int argc, char* argv[]) {
     const int accumulation_steps = 128;
     
     // Learning rate schedule parameters
-    const int warmup_steps = 1000;
+    const int warmup_steps = 100;
     const float max_learning_rate = 6e-4f;
     const float min_learning_rate = 6e-5f;
     
