@@ -225,6 +225,21 @@ void tokenize_corpus_to_sequences(uint32_t* corpus_tokens, uint32_t total_tokens
     }
 }
 
+// Format seconds into human-readable time string
+void format_time(double seconds, char* buffer, size_t buffer_size) {
+    int hours = (int)(seconds / 3600);
+    int mins = (int)((seconds - hours * 3600) / 60);
+    int secs = (int)(seconds - hours * 3600 - mins * 60);
+    
+    if (hours > 0) {
+        snprintf(buffer, buffer_size, "%dh %dm %ds", hours, mins, secs);
+    } else if (mins > 0) {
+        snprintf(buffer, buffer_size, "%dm %ds", mins, secs);
+    } else {
+        snprintf(buffer, buffer_size, "%ds", secs);
+    }
+}
+
 int main(int argc, char* argv[]) {
     srand(time(NULL));
     signal(SIGINT, handle_sigint);
@@ -244,10 +259,10 @@ int main(int argc, char* argv[]) {
 
     // Parameters
     const int seq_len = 2048;
-    const int d_model = 1024;
-    const int hidden_dim = 4096;
-    const int num_layers = 32;
-    const int batch_size = 2;
+    const int d_model = 512;
+    const int hidden_dim = 2048;
+    const int num_layers = 8;
+    const int batch_size = 15;
     
     // Load corpus
     size_t corpus_size;
@@ -276,10 +291,10 @@ int main(int argc, char* argv[]) {
     printf("Total parameters: ~%.1fM\n", (float)(slm->vocab_size * d_model + d_model * slm->vocab_size + num_layers * (4 * d_model * d_model + d_model * hidden_dim + hidden_dim * d_model)) / 1e6f);
     
     // Training parameters
-    const int num_epochs = 100;
+    const int num_epochs = 1;
     const float learning_rate = 0.00002f;
     const int num_batches = num_sequences / batch_size;
-    const int accumulation_steps = 2;
+    const int accumulation_steps = 1;
 
     // Allocate device memory for batch data
     uint32_t *d_input_tokens, *d_target_tokens;
@@ -297,6 +312,9 @@ int main(int argc, char* argv[]) {
         "<|bos|>If 5*x + 3 = 13, then x is "
     };
     const int num_prompts = sizeof(prompts) / sizeof(prompts[0]);
+    
+    // Training timing
+    time_t training_start_time = time(NULL);
     
     // Training loop
     for (int epoch = 0; epoch < num_epochs + 1; epoch++) {
@@ -331,13 +349,26 @@ int main(int argc, char* argv[]) {
             // Update weights
             if ((batch + 1) % accumulation_steps == 0) update_weights_slm(slm, learning_rate, batch_size * accumulation_steps);
             
-            // Print progress
+            // Print progress with ETA
             if (batch % accumulation_steps == 0) {
-                printf("Epoch [%d/%d], Batch [%d/%d], Loss: %.6f\n", epoch, num_epochs, batch, num_batches, loss);
+                // Calculate ETA
+                time_t current_time = time(NULL);
+                double elapsed = difftime(current_time, training_start_time);
+                int total_batches = num_epochs * num_batches;
+                int completed_batches = epoch * num_batches + batch;
+                double batches_per_sec = completed_batches / elapsed;
+                double remaining_batches = total_batches - completed_batches;
+                double eta_seconds = remaining_batches / batches_per_sec;
+                
+                char eta_str[64];
+                format_time(eta_seconds, eta_str, sizeof(eta_str));
+                
+                printf("Epoch [%d/%d], Batch [%d/%d], Loss: %.6f, ETA: %s\n", 
+                       epoch, num_epochs, batch, num_batches, loss, eta_str);
             }
             
             // Generate sample text periodically
-            if (batch > 0 && batch % 200 == 0) {
+            if (batch > 0 && batch % 10000 == 0) {
                 printf("\n--- Generated sample (epoch %d, batch %d) ---\n", epoch, batch);
                 generate_text(slm, corpus_tokens, num_corpus_tokens, 128, 0.8f, d_input_tokens);
                 printf("\n");
@@ -346,7 +377,7 @@ int main(int argc, char* argv[]) {
             }
 
             // Checkpoint model periodically
-            if (batch > 0 && batch % 1000 == 0) {
+            if (batch > 0 && batch % 9000 == 0) {
                 char checkpoint_fname[64];
                 snprintf(checkpoint_fname, sizeof(checkpoint_fname), "checkpoint_slm.bin");
                 save_slm(slm, checkpoint_fname, bpe_tokenizer_path);
