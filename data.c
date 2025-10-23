@@ -35,41 +35,79 @@ char* load_corpus(const char* filename, size_t* corpus_size) {
     return corpus;
 }
 
-// Generate all non-overlapping character sequences from corpus in random order
-void generate_char_sequences_from_corpus(unsigned char** input_chars, unsigned char** target_chars, int num_sequences, int seq_len, char* corpus, size_t corpus_size) {
-    // Calculate the maximum number of non-overlapping sequences we can extract
-    int max_sequences = (corpus_size - 1) / seq_len;
+// Extract sections starting with <|bos|> marker
+void extract_bos_sections(char* corpus, size_t corpus_size, unsigned char** input_tokens, unsigned char** target_tokens, int* num_sections, int seq_len) {
+    const char* bos_marker = "<|bos|>";
+    const int bos_len = 7;
     
-    if (num_sequences > max_sequences) {
-        printf("Error: Requested %d sequences but corpus only has %d non-overlapping sequences of length %d\n", num_sequences, max_sequences, seq_len);
-        printf("Corpus size: %zu, needed: %zu\n", corpus_size, (size_t)(num_sequences * seq_len + 1));
-        exit(1);
-    }
-    
-    // Create array of sequence starting positions for non-overlapping sequences
-    int* sequence_positions = (int*)malloc(max_sequences * sizeof(int));
-    for (int i = 0; i < max_sequences; i++) {
-        sequence_positions[i] = i * seq_len;
-    }
-    
-    // Fisher-Yates shuffle to create random permutation
-    for (int i = max_sequences - 1; i > 0; i--) {
-        int j = rand() % (i + 1);
-        int temp = sequence_positions[i];
-        sequence_positions[i] = sequence_positions[j];
-        sequence_positions[j] = temp;
-    }
-    
-    // Fill sequences using the shuffled positions
-    for (int seq = 0; seq < num_sequences; seq++) {
-        size_t start_pos = sequence_positions[seq];
-        
-        for (int t = 0; t < seq_len; t++) {
-            int idx = seq * seq_len + t;
-            (*input_chars)[idx]  = (unsigned char)corpus[start_pos + t];
-            (*target_chars)[idx] = (unsigned char)corpus[start_pos + t + 1];
+    // First pass: count sections
+    int section_count = 0;
+    for (size_t i = 0; i <= corpus_size - bos_len; i++) {
+        if (strncmp(&corpus[i], bos_marker, bos_len) == 0) {
+            section_count++;
         }
     }
     
-    free(sequence_positions);
+    printf("Found %d sections starting with <|bos|>\n", section_count);
+    
+    if (section_count == 0) {
+        printf("Error: No <|bos|> markers found in corpus\n");
+        *num_sections = 0;
+        return;
+    }
+    
+    // Allocate memory for all sections (initialized to spaces by default)
+    *input_tokens = (unsigned char*)malloc(section_count * seq_len * sizeof(unsigned char));
+    *target_tokens = (unsigned char*)malloc(section_count * seq_len * sizeof(unsigned char));
+    
+    // Initialize all to spaces
+    memset(*input_tokens, ' ', section_count * seq_len);
+    memset(*target_tokens, ' ', section_count * seq_len);
+    
+    // Second pass: extract sections
+    int current_section = 0;
+    
+    for (size_t i = 0; i <= corpus_size - bos_len; i++) {
+        // Find <|bos|> marker
+        if (strncmp(&corpus[i], bos_marker, bos_len) == 0) {
+            size_t section_start = i;
+            size_t section_end;
+            
+            // Find next <|bos|> marker or end of corpus
+            bool found_next = false;
+            for (size_t j = i + bos_len; j <= corpus_size - bos_len; j++) {
+                if (strncmp(&corpus[j], bos_marker, bos_len) == 0) {
+                    section_end = j;
+                    found_next = true;
+                    break;
+                }
+            }
+            
+            if (!found_next) {
+                section_end = corpus_size;
+            }
+            
+            // Calculate section length
+            size_t section_length = section_end - section_start;
+            
+            // Copy section to input_tokens (truncate if too long)
+            size_t copy_length = (section_length < (size_t)seq_len) ? section_length : (size_t)seq_len;
+            memcpy(&(*input_tokens)[current_section * seq_len], &corpus[section_start], copy_length);
+            
+            // Create target_tokens (shifted by 1)
+            memcpy(&(*target_tokens)[current_section * seq_len], 
+                   &(*input_tokens)[current_section * seq_len] + 1, 
+                   (seq_len - 1) * sizeof(unsigned char));
+            
+            current_section++;
+            
+            if (current_section >= section_count) break;
+            
+            // Jump to next section start
+            i = section_end - 1; // -1 because loop will increment
+        }
+    }
+    
+    *num_sections = current_section;
+    printf("Extracted %d sections (seq_len=%d)\n", *num_sections, seq_len);
 }
