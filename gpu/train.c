@@ -37,7 +37,7 @@ void shuffle_data(unsigned char* input_tokens, unsigned char* target_tokens, int
 }
 
 // Generate text function using autoregressive sampling
-void generate_text(SLM* slm, unsigned char* generated_text, float temperature, unsigned char* d_input_tokens, unsigned int seq_len) {
+void generate_text(SLM* slm, float temperature, unsigned char* d_input_tokens, unsigned int seq_len) {
     // Start with zero-initialized sequence
     unsigned char* h_tokens = (unsigned char*)calloc(seq_len, sizeof(unsigned char));
     
@@ -104,9 +104,6 @@ void generate_text(SLM* slm, unsigned char* generated_text, float temperature, u
     }
     
     printf("\"\n");
-    
-    // Copy tokens to output text
-    memcpy(generated_text, h_tokens, seq_len * sizeof(unsigned char));
     
     free(h_tokens);
     free(h_logits);
@@ -207,13 +204,8 @@ int main(int argc, char* argv[]) {
             if (batch > 0 && batch % 1500 == 0) {
                 // Generate sample text periodically
                 printf("\n--- Generating sample text (epoch %d, batch %d) ---\n", epoch, batch);
-                
-                unsigned char* generated_text = (unsigned char*)malloc(seq_len * sizeof(unsigned char));
-                generate_text(slm, generated_text, 0.8f, d_input_tokens, seq_len);
-                
+                generate_text(slm, 0.8f, d_input_tokens, seq_len);
                 printf("--- End generation ---\n\n");
-                
-                free(generated_text);
 
                 // Checkpoint model periodically
                 char checkpoint_fname[64];
