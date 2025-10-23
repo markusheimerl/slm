@@ -118,11 +118,11 @@ int main(int argc, char* argv[]) {
     CHECK_CUBLASLT(cublasLtCreate(&cublaslt_handle));
 
     // Parameters
-    const int seq_len = 949;
-    const int d_model = 512;
-    const int hidden_dim = 2048;
-    const int num_layers = 12;
-    const int batch_size = 32;
+    const int seq_len = 512;
+    const int num_layers = 16;
+    const int batch_size = 24;
+    const int d_model = num_layers * 64;
+    const int hidden_dim = d_model * 4;
     
     // Load corpus and extract BOS-delimited sections
     size_t corpus_size;
