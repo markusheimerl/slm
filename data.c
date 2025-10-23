@@ -35,36 +35,59 @@ char* load_corpus(const char* filename, size_t* corpus_size) {
     return corpus;
 }
 
-// Extract sections starting with <|bos|> marker
+// Extract sections starting with <|bos|> marker (only sections >= seq_len)
 void extract_bos_sections(char* corpus, size_t corpus_size, unsigned char** input_tokens, unsigned char** target_tokens, int* num_sections, int seq_len) {
     const char* bos_marker = "<|bos|>";
     const int bos_len = 7;
     
-    // First pass: count sections
-    int section_count = 0;
+    // First pass: count valid sections (>= seq_len)
+    int valid_section_count = 0;
+    
     for (size_t i = 0; i <= corpus_size - bos_len; i++) {
         if (strncmp(&corpus[i], bos_marker, bos_len) == 0) {
-            section_count++;
+            size_t section_start = i;
+            size_t section_end;
+            
+            // Find next <|bos|> marker or end of corpus
+            bool found_next = false;
+            for (size_t j = i + bos_len; j <= corpus_size - bos_len; j++) {
+                if (strncmp(&corpus[j], bos_marker, bos_len) == 0) {
+                    section_end = j;
+                    found_next = true;
+                    break;
+                }
+            }
+            
+            if (!found_next) {
+                section_end = corpus_size;
+            }
+            
+            // Calculate section length
+            size_t section_length = section_end - section_start;
+            
+            // Only count if section is long enough
+            if (section_length >= (size_t)seq_len) {
+                valid_section_count++;
+            }
+            
+            // Jump to next section start
+            i = section_end - 1;
         }
     }
     
-    printf("Found %d sections starting with <|bos|>\n", section_count);
+    printf("Found %d sections with length >= %d\n", valid_section_count, seq_len);
     
-    if (section_count == 0) {
-        printf("Error: No <|bos|> markers found in corpus\n");
+    if (valid_section_count == 0) {
+        printf("Error: No sections >= %d characters found in corpus\n", seq_len);
         *num_sections = 0;
         return;
     }
     
-    // Allocate memory for all sections (initialized to spaces by default)
-    *input_tokens = (unsigned char*)malloc(section_count * seq_len * sizeof(unsigned char));
-    *target_tokens = (unsigned char*)malloc(section_count * seq_len * sizeof(unsigned char));
+    // Allocate memory for valid sections only
+    *input_tokens = (unsigned char*)malloc(valid_section_count * seq_len * sizeof(unsigned char));
+    *target_tokens = (unsigned char*)malloc(valid_section_count * seq_len * sizeof(unsigned char));
     
-    // Initialize all to spaces
-    memset(*input_tokens, ' ', section_count * seq_len);
-    memset(*target_tokens, ' ', section_count * seq_len);
-    
-    // Second pass: extract sections
+    // Second pass: extract valid sections
     int current_section = 0;
     
     for (size_t i = 0; i <= corpus_size - bos_len; i++) {
@@ -90,24 +113,26 @@ void extract_bos_sections(char* corpus, size_t corpus_size, unsigned char** inpu
             // Calculate section length
             size_t section_length = section_end - section_start;
             
-            // Copy section to input_tokens (truncate if too long)
-            size_t copy_length = (section_length < (size_t)seq_len) ? section_length : (size_t)seq_len;
-            memcpy(&(*input_tokens)[current_section * seq_len], &corpus[section_start], copy_length);
+            // Only extract if section is long enough
+            if (section_length >= (size_t)seq_len) {
+                // Copy exactly seq_len characters (truncate if longer)
+                memcpy(&(*input_tokens)[current_section * seq_len], &corpus[section_start], seq_len);
+                
+                // Create target_tokens (shifted by 1)
+                memcpy(&(*target_tokens)[current_section * seq_len], 
+                       &(*input_tokens)[current_section * seq_len] + 1, 
+                       (seq_len - 1) * sizeof(unsigned char));
+                
+                current_section++;
+            }
             
-            // Create target_tokens (shifted by 1)
-            memcpy(&(*target_tokens)[current_section * seq_len], 
-                   &(*input_tokens)[current_section * seq_len] + 1, 
-                   (seq_len - 1) * sizeof(unsigned char));
-            
-            current_section++;
-            
-            if (current_section >= section_count) break;
+            if (current_section >= valid_section_count) break;
             
             // Jump to next section start
-            i = section_end - 1; // -1 because loop will increment
+            i = section_end - 1;
         }
     }
     
     *num_sections = current_section;
-    printf("Extracted %d sections (seq_len=%d)\n", *num_sections, seq_len);
+    printf("Extracted %d valid sections (seq_len=%d)\n", *num_sections, seq_len);
 }

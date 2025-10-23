@@ -48,6 +48,8 @@ void generate_text(SLM* slm, unsigned char* generated_text, float temperature, u
     }
     
     printf("Generating text character by character...\n");
+    printf("\"<|bos|>");
+    fflush(stdout);
     
     // Allocate logits buffer on host
     float* h_logits = (float*)malloc(slm->vocab_size * sizeof(float));
@@ -95,13 +97,13 @@ void generate_text(SLM* slm, unsigned char* generated_text, float temperature, u
         
         // Set the next character
         h_tokens[pos + 1] = next_token;
-
-        if (pos % 10 == 0 || pos == (int)(seq_len - 2)) {
-            printf("\rGenerating characters... %3d%% (%d/%d)", (pos - 5) * 100 / (seq_len - 7), pos - 5, seq_len - 7);
-            fflush(stdout);
-        }
-        if (pos == (int)(seq_len - 2)) printf("\n");
+        
+        // Print character immediately
+        printf("%c", (char)next_token);
+        fflush(stdout);
     }
+    
+    printf("\"\n");
     
     // Copy tokens to output text
     memcpy(generated_text, h_tokens, seq_len * sizeof(unsigned char));
@@ -208,13 +210,6 @@ int main(int argc, char* argv[]) {
                 
                 unsigned char* generated_text = (unsigned char*)malloc(seq_len * sizeof(unsigned char));
                 generate_text(slm, generated_text, 0.8f, d_input_tokens, seq_len);
-                
-                // Print generated text
-                printf("Generated text: \"");
-                for (int i = 0; i < seq_len && generated_text[i] != 0; i++) {
-                    printf("%c", (char)generated_text[i]);
-                }
-                printf("\"\n");
                 
                 printf("--- End generation ---\n\n");
                 
