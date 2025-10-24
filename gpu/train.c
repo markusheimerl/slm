@@ -124,16 +124,16 @@ int main(int argc, char* argv[]) {
     const int d_model = num_layers * 64;
     const int hidden_dim = d_model * 4;
     
-    // Load corpus and extract BOS-delimited sections
+    // Load corpus
     size_t corpus_size;
     char* corpus = load_corpus("../corpus.txt", &corpus_size);
     
-    // Create token sequences from BOS-delimited sections
+    // Create token sequences
     unsigned char* input_tokens = NULL;
     unsigned char* target_tokens = NULL;
     int num_sections = 0;
     
-    extract_bos_sections(corpus, corpus_size, &input_tokens, &target_tokens, &num_sections, seq_len);
+    extract_sections(corpus, corpus_size, &input_tokens, &target_tokens, &num_sections, seq_len);
     
     if (num_sections == 0) {
         printf("Error: No valid sections found in corpus\n");

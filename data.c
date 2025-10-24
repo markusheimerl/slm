@@ -36,7 +36,7 @@ char* load_corpus(const char* filename, size_t* corpus_size) {
 }
 
 // Extract sections starting with <|bos|> and ending with <|eos|> (only sections <= seq_len)
-void extract_bos_sections(char* corpus, size_t corpus_size, unsigned char** input_tokens, unsigned char** target_tokens, int* num_sections, int seq_len) {
+void extract_sections(char* corpus, size_t corpus_size, unsigned char** input_tokens, unsigned char** target_tokens, int* num_sections, int seq_len) {
     const char* bos_marker = "<|bos|>";
     const char* eos_marker = "<|eos|>";
     const int bos_len = 7;
