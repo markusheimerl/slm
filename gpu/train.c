@@ -154,7 +154,7 @@ int main(int argc, char* argv[]) {
     
     // Training parameters
     const int num_epochs = 200;
-    const float learning_rate = 0.00007f;
+    const float learning_rate = 0.00001f;
     const int num_batches = num_sections / batch_size;
 
     // Allocate device memory for batch data
@@ -211,8 +211,7 @@ int main(int argc, char* argv[]) {
         save_slm(slm, checkpoint_fname);
         
         // Print epoch summary
-        epoch_loss /= num_batches;
-        printf("Epoch [%d/%d] completed, Average Loss: %.6f\n", epoch, num_epochs, epoch_loss);
+        printf("Epoch [%d/%d] completed, Average Loss: %.6f\n", epoch, num_epochs, epoch_loss / num_batches);
     }
 
     // Get timestamp for filenames and save final model
