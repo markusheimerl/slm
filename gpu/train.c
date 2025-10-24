@@ -154,7 +154,7 @@ int main(int argc, char* argv[]) {
     
     // Training parameters
     const int num_epochs = 200;
-    const float learning_rate = 0.00001f;
+    const float learning_rate = 0.00007f;
     const int num_batches = num_sections / batch_size;
 
     // Allocate device memory for batch data
