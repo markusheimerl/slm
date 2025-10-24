@@ -20,43 +20,65 @@ void handle_sigint(int signum) {
     exit(128 + signum);
 }
 
-// Text generation function
-void generate_text(SLM* slm, char* corpus, size_t corpus_size, int length, float temperature) {
-    // Start with a random seed from corpus
-    int seed_start = rand() % (corpus_size - slm->seq_len - 1);
+// Shuffle training data (Fisher-Yates)
+void shuffle_data(unsigned char* input_tokens, unsigned char* target_tokens, int num_sections, int seq_len) {
+    for (int i = num_sections - 1; i > 0; i--) {
+        int j = rand() % (i + 1);
+        // Swap sections i and j
+        for (int k = 0; k < seq_len; k++) {
+            unsigned char temp = input_tokens[i * seq_len + k];
+            input_tokens[i * seq_len + k] = input_tokens[j * seq_len + k];
+            input_tokens[j * seq_len + k] = temp;
+            
+            temp = target_tokens[i * seq_len + k];
+            target_tokens[i * seq_len + k] = target_tokens[j * seq_len + k];
+            target_tokens[j * seq_len + k] = temp;
+        }
+    }
+}
+
+// Generate text function using autoregressive sampling
+void generate_text(SLM* slm, float temperature, unsigned int seq_len) {
+    // Start with zero-initialized sequence
+    unsigned char* h_tokens = (unsigned char*)calloc(seq_len, sizeof(unsigned char));
     
-    // Copy seed to host buffer
-    unsigned char* seed_tokens = (unsigned char*)malloc(slm->seq_len * sizeof(unsigned char));
-    for (int i = 0; i < slm->seq_len; i++) seed_tokens[i] = (unsigned char)corpus[seed_start + i];
+    // Set BOS token
+    const char* bos = "<|bos|>";
+    for (int i = 0; i < 7; i++) {
+        h_tokens[i] = (unsigned char)bos[i];
+    }
     
-    printf("Seed: \"");
-    for (int i = 0; i < slm->seq_len; i++) printf("%c", (char)seed_tokens[i]);
-    printf("\" -> \"");
+    printf("Generating text character by character...\n");
+    printf("\"<|bos|>");
+    fflush(stdout);
     
-    // Generate text one token at a time
-    for (int gen = 0; gen < length; gen++) {
+    // Allocate logits buffer
+    float* h_logits = (float*)malloc(slm->vocab_size * sizeof(float));
+    
+    // Generate characters one at a time
+    for (int pos = 6; pos < (int)(seq_len - 1); pos++) {
         // Forward pass
-        forward_pass_slm(slm, seed_tokens);
+        forward_pass_slm(slm, h_tokens);
         
-        // Get logits for the last position
-        float* logits = &slm->output_mlp->output[(slm->seq_len - 1) * slm->vocab_size];
+        // Get logits for the current position
+        memcpy(h_logits, &slm->output_mlp->output[pos * slm->vocab_size], slm->vocab_size * sizeof(float));
         
         // Apply temperature and softmax
         float max_logit = -1e30f;
         for (int v = 0; v < slm->vocab_size; v++) {
-            logits[v] /= temperature;
-            if (logits[v] > max_logit) max_logit = logits[v];
+            h_logits[v] /= temperature;
+            if (h_logits[v] > max_logit) max_logit = h_logits[v];
         }
         
         float sum_exp = 0.0f;
         for (int v = 0; v < slm->vocab_size; v++) {
-            float exp_val = expf(logits[v] - max_logit);
-            logits[v] = exp_val;
+            float exp_val = expf(h_logits[v] - max_logit);
+            h_logits[v] = exp_val;
             sum_exp += exp_val;
         }
         
         for (int v = 0; v < slm->vocab_size; v++) {
-            logits[v] /= sum_exp;
+            h_logits[v] /= sum_exp;
         }
         
         // Sample from the distribution
@@ -64,24 +86,25 @@ void generate_text(SLM* slm, char* corpus, size_t corpus_size, int length, float
         unsigned char next_token = 0;
         float cumsum = 0.0f;
         for (int v = 0; v < slm->vocab_size; v++) {
-            cumsum += logits[v];
+            cumsum += h_logits[v];
             if (r <= cumsum) {
                 next_token = v;
                 break;
             }
         }
-
-        // Display character
+        
+        // Set the next character
+        h_tokens[pos + 1] = next_token;
+        
+        // Print character immediately
         printf("%c", (char)next_token);
         fflush(stdout);
-        
-        // Shift sequence left and add new token
-        for (int i = 0; i < slm->seq_len - 1; i++) seed_tokens[i] = seed_tokens[i + 1];
-        seed_tokens[slm->seq_len - 1] = next_token;
     }
     
-    printf("\"");
-    free(seed_tokens);
+    printf("\"\n");
+    
+    free(h_tokens);
+    free(h_logits);
 }
 
 int main(int argc, char* argv[]) {
@@ -90,20 +113,28 @@ int main(int argc, char* argv[]) {
     openblas_set_num_threads(4);
 
     // Parameters
-    const int seq_len = 1024;
-    const int d_model = 256;
-    const int hidden_dim = 512;
-    const int num_layers = 4;
-    const int batch_size = 4;
+    const int seq_len = 512;
+    const int num_layers = 16;
+    const int batch_size = 2;
+    const int d_model = num_layers * 64;
+    const int hidden_dim = d_model * 4;
     
     // Load corpus
     size_t corpus_size;
     char* corpus = load_corpus("corpus.txt", &corpus_size);
     
-    // Prepare training data buffers
-    const int num_sequences = (corpus_size - 1) / seq_len;
-    unsigned char* input_chars = (unsigned char*)malloc(num_sequences * seq_len * sizeof(unsigned char));
-    unsigned char* target_chars = (unsigned char*)malloc(num_sequences * seq_len * sizeof(unsigned char));
+    // Create token sequences
+    unsigned char* input_tokens = NULL;
+    unsigned char* target_tokens = NULL;
+    int num_sections = 0;
+    
+    extract_sections(corpus, corpus_size, &input_tokens, &target_tokens, &num_sections, seq_len);
+    
+    if (num_sections == 0) {
+        printf("Error: No valid sections found in corpus\n");
+        free(corpus);
+        return 1;
+    }
     
     // Initialize or load SLM
     if (argc > 1) {
@@ -114,30 +145,31 @@ int main(int argc, char* argv[]) {
         slm = init_slm(seq_len, d_model, hidden_dim, num_layers, batch_size);
     }
     
-    printf("Total parameters: ~%.1fM\n", (float)(slm->vocab_size * d_model + seq_len * d_model + d_model * slm->vocab_size + num_layers * (4 * d_model * d_model + d_model * hidden_dim + hidden_dim * d_model)) / 1e6f);
+    printf("Total parameters: ~%.1fM\n", (float)(slm->vocab_size * d_model + d_model * slm->vocab_size + num_layers * (4 * d_model * d_model + d_model * hidden_dim + hidden_dim * d_model)) / 1e6f);
     
     // Training parameters
-    const int num_epochs = 100;
-    const float learning_rate = 0.00001f;
-    const int num_batches = num_sequences / batch_size;
+    const int num_epochs = 200;
+    const float learning_rate = 0.00007f;
+    const int num_batches = num_sections / batch_size;
 
     // Training loop
     for (int epoch = 0; epoch < num_epochs + 1; epoch++) {
-        // Generate random sequences from corpus
-        generate_char_sequences_from_corpus(&input_chars, &target_chars, num_sequences, seq_len, corpus, corpus_size);
-        
         float epoch_loss = 0.0f;
+        
+        // Shuffle training data at the beginning of each epoch
+        shuffle_data(input_tokens, target_tokens, num_sections, seq_len);
         
         for (int batch = 0; batch < num_batches; batch++) {
             // Calculate batch offset
             int batch_offset = batch * batch_size * seq_len;
 
             // Forward pass
-            forward_pass_slm(slm, &input_chars[batch_offset]);
+            forward_pass_slm(slm, &input_tokens[batch_offset]);
             
             // Calculate loss
-            float loss = calculate_loss_slm(slm, &target_chars[batch_offset]);
-            if(loss >= 6.0) raise(SIGINT);
+            float loss = calculate_loss_slm(slm, &target_tokens[batch_offset]);
+            if(loss >= 8.0) raise(SIGINT);
+            
             epoch_loss += loss;
 
             // Don't update weights after final evaluation
@@ -145,62 +177,40 @@ int main(int argc, char* argv[]) {
 
             // Backward pass
             zero_gradients_slm(slm);
-            backward_pass_slm(slm, &input_chars[batch_offset]);
+            backward_pass_slm(slm, &input_tokens[batch_offset]);
             
             // Update weights
             update_weights_slm(slm, learning_rate, batch_size);
             
             // Print progress
-            if (batch % 2 == 0) {
-                printf("Epoch [%d/%d], Batch [%d/%d], Loss: %.6f\n", epoch, num_epochs, batch, num_batches, loss);
-            }
-            
-            // Generate sample text periodically
-            if (batch > 0 && batch % 200 == 0) {
-                printf("\n--- Generated sample (epoch %d, batch %d) ---\n", epoch, batch);
-                generate_text(slm, corpus, corpus_size, 128, 0.8f);
-                printf("\n--- End sample ---\n\n");
-            }
-
-            // Checkpoint model periodically
-            if (batch > 0 && batch % 1000 == 0) {
-                char checkpoint_fname[64];
-                snprintf(checkpoint_fname, sizeof(checkpoint_fname), "checkpoint_slm.bin");
-                save_slm(slm, checkpoint_fname);
-            }
+            printf("Epoch [%d/%d], Batch [%d/%d], Loss: %.6f\n", epoch, num_epochs, batch, num_batches, loss);
         }
-        
-        epoch_loss /= num_batches;
 
+        // Generate sample text
+        printf("\n--- Generating sample text ---\n");
+        generate_text(slm, 0.8f, seq_len);
+        printf("--- End generation ---\n\n");
+
+        // Checkpoint model
+        char checkpoint_fname[64];
+        snprintf(checkpoint_fname, sizeof(checkpoint_fname), "checkpoint_slm.bin");
+        save_slm(slm, checkpoint_fname);
+        
         // Print epoch summary
-        printf("Epoch [%d/%d] completed, Average Loss: %.6f\n", epoch, num_epochs, epoch_loss);
+        printf("Epoch [%d/%d] completed, Average Loss: %.6f\n", epoch, num_epochs, epoch_loss / num_batches);
     }
 
-    // Get timestamp for filenames
+    // Get timestamp for filenames and save final model
     char model_fname[64];
     time_t now = time(NULL);
     strftime(model_fname, sizeof(model_fname), "%Y%m%d_%H%M%S_slm.bin", localtime(&now));
-
-    // Save model with timestamped filename
     save_slm(slm, model_fname);
-    
-    // Load the model back and verify
-    printf("\nVerifying saved model...\n");
-
-    // Load the model back with original batch_size
-    SLM* loaded_slm = load_slm(model_fname, batch_size);
-
-    // Test loaded model with a forward pass
-    forward_pass_slm(loaded_slm, input_chars);
-    float verification_loss = calculate_loss_slm(loaded_slm, target_chars);
-    printf("Verification loss: %.6f\n", verification_loss);
     
     // Cleanup
     free(corpus);
-    free(input_chars);
-    free(target_chars);
+    free(input_tokens);
+    free(target_tokens);
     free_slm(slm);
-    free_slm(loaded_slm);
     
     return 0;
 }
