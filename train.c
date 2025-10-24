@@ -114,8 +114,8 @@ int main(int argc, char* argv[]) {
 
     // Parameters
     const int seq_len = 512;
-    const int num_layers = 16;
-    const int batch_size = 2;
+    const int num_layers = 8;
+    const int batch_size = 16;
     const int d_model = num_layers * 64;
     const int hidden_dim = d_model * 4;
     
