@@ -197,26 +197,21 @@ int main(int argc, char* argv[]) {
             update_weights_slm(slm, learning_rate, batch_size);
             
             // Print progress
-            if (batch % 2 == 0) {
-                printf("Epoch [%d/%d], Batch [%d/%d], Loss: %.6f\n", epoch, num_epochs, batch, num_batches, loss);
-            }
-            
-            if (batch > 0 && batch % 1500 == 0) {
-                // Generate sample text periodically
-                printf("\n--- Generating sample text (epoch %d, batch %d) ---\n", epoch, batch);
-                generate_text(slm, 0.8f, d_input_tokens, seq_len);
-                printf("--- End generation ---\n\n");
-
-                // Checkpoint model periodically
-                char checkpoint_fname[64];
-                snprintf(checkpoint_fname, sizeof(checkpoint_fname), "checkpoint_slm.bin");
-                save_slm(slm, checkpoint_fname);
-            }
+            printf("Epoch [%d/%d], Batch [%d/%d], Loss: %.6f\n", epoch, num_epochs, batch, num_batches, loss);
         }
-        
-        epoch_loss /= num_batches;
 
+        // Generate sample text
+        printf("\n--- Generating sample text ---\n");
+        generate_text(slm, 0.8f, d_input_tokens, seq_len);
+        printf("--- End generation ---\n\n");
+
+        // Checkpoint model
+        char checkpoint_fname[64];
+        snprintf(checkpoint_fname, sizeof(checkpoint_fname), "checkpoint_slm.bin");
+        save_slm(slm, checkpoint_fname);
+        
         // Print epoch summary
+        epoch_loss /= num_batches;
         printf("Epoch [%d/%d] completed, Average Loss: %.6f\n", epoch, num_epochs, epoch_loss);
     }
 
