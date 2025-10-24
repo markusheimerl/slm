@@ -182,7 +182,7 @@ int main(int argc, char* argv[]) {
             
             // Calculate loss
             float loss = calculate_loss_slm(slm, d_target_tokens);
-            if(loss >= 6.0) raise(SIGINT);
+            if(loss >= 8.0) raise(SIGINT);
             
             epoch_loss += loss;
 
