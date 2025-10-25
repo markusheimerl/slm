@@ -14,7 +14,7 @@ void handle_sigint(int signum) {
         char model_filename[64];
         time_t now = time(NULL);
         strftime(model_filename, sizeof(model_filename), "%Y%m%d_%H%M%S_slm.bin", localtime(&now));
-        //save_slm(slm, model_filename);
+        save_slm(slm, model_filename);
     }
     exit(128 + signum);
 }
@@ -161,6 +161,9 @@ int main(int argc, char* argv[]) {
     CHECK_CUDA(cudaMalloc(&d_input_tokens, batch_size * seq_len * sizeof(unsigned char)));
     CHECK_CUDA(cudaMalloc(&d_target_tokens, batch_size * seq_len * sizeof(unsigned char)));
     
+    // Timing for ETA
+    time_t training_start = time(NULL);
+    
     // Training loop
     for (int epoch = 0; epoch < num_epochs + 1; epoch++) {
         float epoch_loss = 0.0f;
@@ -181,7 +184,7 @@ int main(int argc, char* argv[]) {
             
             // Calculate loss
             float loss = calculate_loss_slm(slm, d_target_tokens);
-            if(loss >= 9.0) raise(SIGINT);
+            if(loss >= 12.0) raise(SIGINT);
             
             epoch_loss += loss;
 
@@ -197,6 +200,19 @@ int main(int argc, char* argv[]) {
             
             // Print progress
             printf("Epoch [%d/%d], Batch [%d/%d], Loss: %.6f\n", epoch, num_epochs, batch, num_batches, loss);
+            
+            // Print ETA
+            if ((batch + 1) % 1000 == 0) {
+                time_t current_time = time(NULL);
+                double elapsed = difftime(current_time, training_start);
+                int total_batches_done = epoch * num_batches + batch + 1;
+                int total_batches = num_epochs * num_batches;
+                double avg_time_per_batch = elapsed / total_batches_done;
+                double eta_seconds = avg_time_per_batch * (total_batches - total_batches_done);
+                int eta_hours = (int)(eta_seconds / 3600);
+                int eta_minutes = (int)((eta_seconds - eta_hours * 3600) / 60);
+                printf(">>> ETA: %dh %dm remaining <<<\n", eta_hours, eta_minutes);
+            }
         }
 
         // Generate sample text
