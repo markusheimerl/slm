@@ -118,9 +118,9 @@ int main(int argc, char* argv[]) {
 
     // Parameters
     const int seq_len = 512;
-    const int num_layers = 32;
+    const int num_layers = 16;
     const int batch_size = 24;
-    const int d_model = num_layers * 16;
+    const int d_model = num_layers * 64;
     const int hidden_dim = d_model * 4;
     
     // Load corpus
@@ -159,8 +159,8 @@ int main(int argc, char* argv[]) {
     if (num_epochs < 1) num_epochs = 1;
     
     // Training parameters
-    const float max_learning_rate = 0.00004f;
-    const float min_learning_rate = 0.000004f;
+    const float max_learning_rate = 0.00005f;
+    const float min_learning_rate = 0.000005f;
     const int num_batches = num_sections / batch_size;
     const int total_batches = num_epochs * num_batches;
 
