@@ -159,8 +159,10 @@ int main(int argc, char* argv[]) {
     if (num_epochs < 1) num_epochs = 1;
     
     // Training parameters
-    const float learning_rate = 0.00007f;
+    const float max_learning_rate = 0.00007f;
+    const float min_learning_rate = 0.000007f;
     const int num_batches = num_sections / batch_size;
+    const int total_batches = num_epochs * num_batches;
 
     // Allocate device memory for batch data
     unsigned char *d_input_tokens, *d_target_tokens;
@@ -197,6 +199,11 @@ int main(int argc, char* argv[]) {
             // Don't update weights after final evaluation
             if (epoch == num_epochs) continue;
 
+            // Cosine learning rate decay
+            int current_batch = epoch * num_batches + batch;
+            float progress = (float)current_batch / (float)total_batches;
+            float learning_rate = min_learning_rate + 0.5f * (max_learning_rate - min_learning_rate) * (1.0f + cosf(progress * M_PI));
+
             // Backward pass
             zero_gradients_slm(slm);
             backward_pass_slm(slm, d_input_tokens);
@@ -212,31 +219,24 @@ int main(int argc, char* argv[]) {
                 time_t current_time = time(NULL);
                 double elapsed = difftime(current_time, training_start);
                 int total_batches_done = epoch * num_batches + batch + 1;
-                int total_batches = num_epochs * num_batches;
                 double avg_time_per_batch = elapsed / total_batches_done;
                 double eta_seconds = avg_time_per_batch * (total_batches - total_batches_done);
                 int eta_hours = (int)(eta_seconds / 3600);
                 int eta_minutes = (int)((eta_seconds - eta_hours * 3600) / 60);
                 printf(">>> ETA: %dh %dm remaining <<<\n", eta_hours, eta_minutes);
+                printf(">>> LR: %.7f <<<\n", learning_rate);
             }
         }
 
         // Generate sample text
-        printf("\n--- Generating sample wiki text ---\n");
-        generate_text(slm, 0.8f, d_input_tokens, seq_len, "<|wiki|>");
-        printf("--- End generation ---\n\n");
+        const char* token_types[] = {"<|wiki|>", "<|web|>", "<|story|>", "<|talk|>"};
+        const char* type_names[] = {"wiki", "web", "story", "conversation"};
         
-        printf("\n--- Generating sample web text ---\n");
-        generate_text(slm, 0.8f, d_input_tokens, seq_len, "<|web|>");
-        printf("--- End generation ---\n\n");
-        
-        printf("\n--- Generating sample story text ---\n");
-        generate_text(slm, 0.8f, d_input_tokens, seq_len, "<|story|>");
-        printf("--- End generation ---\n\n");
-        
-        printf("\n--- Generating sample conversation text ---\n");
-        generate_text(slm, 0.8f, d_input_tokens, seq_len, "<|talk|>");
-        printf("--- End generation ---\n\n");
+        for (int i = 0; i < 4; i++) {
+            printf("\n--- Generating sample %s text ---\n", type_names[i]);
+            generate_text(slm, 0.8f, d_input_tokens, seq_len, token_types[i]);
+            printf("--- End generation ---\n\n");
+        }
 
         // Checkpoint model
         char checkpoint_fname[64];
