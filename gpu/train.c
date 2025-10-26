@@ -118,9 +118,9 @@ int main(int argc, char* argv[]) {
 
     // Parameters
     const int seq_len = 512;
-    const int num_layers = 32;
+    const int num_layers = 16;
     const int batch_size = 24;
-    const int d_model = num_layers * 16;
+    const int d_model = num_layers * 64;
     const int hidden_dim = d_model * 4;
     
     // Load corpus
@@ -159,8 +159,8 @@ int main(int argc, char* argv[]) {
     if (num_epochs < 1) num_epochs = 1;
     
     // Training parameters
-    const float max_learning_rate = 0.00004f;
-    const float min_learning_rate = 0.000004f;
+    const float max_learning_rate = 0.00007f;
+    const float min_learning_rate = 0.000007f;
     const int num_batches = num_sections / batch_size;
     const int total_batches = num_epochs * num_batches;
 
@@ -192,7 +192,7 @@ int main(int argc, char* argv[]) {
             
             // Calculate loss
             float loss = calculate_loss_slm(slm, d_target_tokens);
-            if(loss >= 10.0) raise(SIGINT);
+            if(loss >= 9.0) raise(SIGINT);
             
             epoch_loss += loss;
 
