@@ -38,25 +38,23 @@ void shuffle_data(unsigned char* input_tokens, unsigned char* target_tokens, int
 }
 
 // Generate text function using autoregressive sampling
-void generate_text(SLM* slm, float temperature, unsigned int seq_len) {
+void generate_text(SLM* slm, float temperature, const char* bos, unsigned int seq_len) {
     // Start with zero-initialized sequence
     unsigned char* h_tokens = (unsigned char*)calloc(seq_len, sizeof(unsigned char));
     
-    // Set BOS token
-    const char* bos = "<|bos|>";
-    for (int i = 0; i < 7; i++) {
+    // Set beginning-of-sequence
+    for (int i = 0; i < (int)strlen(bos); i++) {
         h_tokens[i] = (unsigned char)bos[i];
     }
     
-    printf("Generating text character by character...\n");
-    printf("\"<|bos|>");
+    printf("\"%s", bos);
     fflush(stdout);
     
     // Allocate logits buffer
     float* h_logits = (float*)malloc(slm->vocab_size * sizeof(float));
     
     // Generate characters one at a time
-    for (int pos = 6; pos < (int)(seq_len - 1); pos++) {
+    for (int pos = strlen(bos) - 1; pos < (int)(seq_len - 1); pos++) {
         // Forward pass
         forward_pass_slm(slm, h_tokens);
         
@@ -168,7 +166,7 @@ int main(int argc, char* argv[]) {
             
             // Calculate loss
             float loss = calculate_loss_slm(slm, &target_tokens[batch_offset]);
-            if(loss >= 8.0) raise(SIGINT);
+            if(loss >= 9.0) raise(SIGINT);
             
             epoch_loss += loss;
 
@@ -188,7 +186,7 @@ int main(int argc, char* argv[]) {
 
         // Generate sample text
         printf("\n--- Generating sample text ---\n");
-        generate_text(slm, 0.8f, seq_len);
+        generate_text(slm, 0.8f, "<|story|>", seq_len);
         printf("--- End generation ---\n\n");
 
         // Checkpoint model
