@@ -151,8 +151,8 @@ int main(int argc, char* argv[]) {
     printf("Total parameters: ~%.1fM\n", (float)(slm->vocab_size * d_model + d_model * slm->vocab_size + num_layers * (4 * d_model * d_model + d_model * hidden_dim + hidden_dim * d_model)) / 1e6f);
     
     // Training parameters
-    const int num_epochs = 200;
-    const float learning_rate = 0.00006f;
+    const int num_epochs = 5;
+    const float learning_rate = 0.00007f;
     const int num_batches = num_sections / batch_size;
 
     // Allocate device memory for batch data
@@ -191,11 +191,14 @@ int main(int argc, char* argv[]) {
             zero_gradients_slm(slm);
             backward_pass_slm(slm, d_input_tokens);
             
+            // Cosine decay learning rate
+            float current_lr = learning_rate * 0.5f * (1.0f + cosf(M_PI * (epoch * num_batches + batch) / (num_epochs * num_batches)));
+            
             // Update weights
-            update_weights_slm(slm, learning_rate, batch_size);
+            update_weights_slm(slm, current_lr, batch_size);
             
             // Print progress
-            printf("Epoch [%d/%d], Batch [%d/%d], Loss: %.6f\n", epoch, num_epochs, batch, num_batches, loss);
+            printf("Epoch [%d/%d], Batch [%d/%d], Loss: %.6f, LR: %.7f\n", epoch, num_epochs, batch, num_batches, loss, current_lr);
         }
 
         // Generate sample text

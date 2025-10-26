@@ -177,11 +177,14 @@ int main(int argc, char* argv[]) {
             zero_gradients_slm(slm);
             backward_pass_slm(slm, &input_tokens[batch_offset]);
             
+            // Cosine decay learning rate
+            float current_lr = learning_rate * 0.5f * (1.0f + cosf(M_PI * (epoch * num_batches + batch) / (num_epochs * num_batches)));
+            
             // Update weights
-            update_weights_slm(slm, learning_rate, batch_size);
+            update_weights_slm(slm, current_lr, batch_size);
             
             // Print progress
-            printf("Epoch [%d/%d], Batch [%d/%d], Loss: %.6f\n", epoch, num_epochs, batch, num_batches, loss);
+            printf("Epoch [%d/%d], Batch [%d/%d], Loss: %.6f, LR: %.7f\n", epoch, num_epochs, batch, num_batches, loss, current_lr);
         }
 
         // Generate sample text
