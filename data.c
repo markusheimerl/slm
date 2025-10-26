@@ -35,43 +35,24 @@ char* load_corpus(const char* filename, size_t* corpus_size) {
     return corpus;
 }
 
-// Check if position starts with any of our special tokens
-static bool starts_with_special_token(const char* text, size_t remaining_size, size_t* token_len) {
-    const char* tokens[] = {
-        "<|wiki|>",
-        "<|talk|>",
-        "<|story|>",
-        "<|web|>"
-    };
-    const int num_tokens = 4;
-    
-    for (int i = 0; i < num_tokens; i++) {
-        size_t len = strlen(tokens[i]);
-        if (remaining_size >= len && strncmp(text, tokens[i], len) == 0) {
-            *token_len = len;
-            return true;
-        }
-    }
-    return false;
-}
-
-// Extract sections starting with special tokens and ending with <|eos|>
+// Extract sections starting with <|bos|> and ending with <|eos|> (only sections <= seq_len)
 void extract_sections(char* corpus, size_t corpus_size, unsigned char** input_tokens, unsigned char** target_tokens, int* num_sections, int seq_len) {
+    const char* bos_marker = "<|bos|>";
     const char* eos_marker = "<|eos|>";
+    const int bos_len = 7;
     const int eos_len = 7;
     
     // First pass: count valid sections (<= seq_len)
     int valid_section_count = 0;
     
-    for (size_t i = 0; i < corpus_size; i++) {
-        size_t token_len = 0;
-        if (starts_with_special_token(&corpus[i], corpus_size - i, &token_len)) {
+    for (size_t i = 0; i <= corpus_size - bos_len; i++) {
+        if (strncmp(&corpus[i], bos_marker, bos_len) == 0) {
             size_t section_start = i;
             size_t section_end = 0;
             bool found_eos = false;
             
             // Find <|eos|> marker
-            for (size_t j = i + token_len; j <= corpus_size - eos_len; j++) {
+            for (size_t j = i + bos_len; j <= corpus_size - eos_len; j++) {
                 if (strncmp(&corpus[j], eos_marker, eos_len) == 0) {
                     section_end = j + eos_len;  // Include the <|eos|> marker
                     found_eos = true;
@@ -112,15 +93,15 @@ void extract_sections(char* corpus, size_t corpus_size, unsigned char** input_to
     // Second pass: extract valid sections
     int current_section = 0;
     
-    for (size_t i = 0; i < corpus_size; i++) {
-        size_t token_len = 0;
-        if (starts_with_special_token(&corpus[i], corpus_size - i, &token_len)) {
+    for (size_t i = 0; i <= corpus_size - bos_len; i++) {
+        // Find <|bos|> marker
+        if (strncmp(&corpus[i], bos_marker, bos_len) == 0) {
             size_t section_start = i;
             size_t section_end = 0;
             bool found_eos = false;
             
             // Find <|eos|> marker
-            for (size_t j = i + token_len; j <= corpus_size - eos_len; j++) {
+            for (size_t j = i + bos_len; j <= corpus_size - eos_len; j++) {
                 if (strncmp(&corpus[j], eos_marker, eos_len) == 0) {
                     section_end = j + eos_len;  // Include the <|eos|> marker
                     found_eos = true;
@@ -138,7 +119,7 @@ void extract_sections(char* corpus, size_t corpus_size, unsigned char** input_to
             
             // Only extract if section is short enough
             if (section_length <= (size_t)seq_len) {
-                // Copy the section (from special token to <|eos|> inclusive)
+                // Copy the section (from <|bos|> to <|eos|> inclusive)
                 memcpy(&(*input_tokens)[current_section * seq_len], &corpus[section_start], section_length);
                 
                 // Pad with whitespaces after <|eos|> until seq_len

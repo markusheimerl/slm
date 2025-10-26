@@ -14,7 +14,7 @@ void handle_sigint(int signum) {
         char model_filename[64];
         time_t now = time(NULL);
         strftime(model_filename, sizeof(model_filename), "%Y%m%d_%H%M%S_slm.bin", localtime(&now));
-        //save_slm(slm, model_filename);
+        save_slm(slm, model_filename);
     }
     exit(128 + signum);
 }
@@ -37,24 +37,25 @@ void shuffle_data(unsigned char* input_tokens, unsigned char* target_tokens, int
 }
 
 // Generate text function using autoregressive sampling
-void generate_text(SLM* slm, float temperature, unsigned char* d_input_tokens, unsigned int seq_len, const char* start_token) {
+void generate_text(SLM* slm, float temperature, unsigned char* d_input_tokens, unsigned int seq_len) {
     // Start with zero-initialized sequence
     unsigned char* h_tokens = (unsigned char*)calloc(seq_len, sizeof(unsigned char));
     
-    int start_len = strlen(start_token);
-    
-    // Set starting token
-    for (int i = 0; i < start_len; i++) h_tokens[i] = (unsigned char)start_token[i];
+    // Set BOS token
+    const char* bos = "<|bos|>";
+    for (int i = 0; i < 7; i++) {
+        h_tokens[i] = (unsigned char)bos[i];
+    }
     
     printf("Generating text character by character...\n");
-    printf("\"%s", start_token);
+    printf("\"<|bos|>");
     fflush(stdout);
     
     // Allocate logits buffer on host
     float* h_logits = (float*)malloc(slm->vocab_size * sizeof(float));
     
     // Generate characters one at a time
-    for (int pos = start_len - 1; pos < (int)(seq_len - 1); pos++) {
+    for (int pos = 6; pos < (int)(seq_len - 1); pos++) {
         // Copy current partial sequence to device
         CHECK_CUDA(cudaMemcpy(d_input_tokens, h_tokens, seq_len * sizeof(unsigned char), cudaMemcpyHostToDevice));
 
@@ -152,7 +153,7 @@ int main(int argc, char* argv[]) {
     printf("Total parameters: ~%.1fM\n", (float)(slm->vocab_size * d_model + d_model * slm->vocab_size + num_layers * (4 * d_model * d_model + d_model * hidden_dim + hidden_dim * d_model)) / 1e6f);
     
     // Training parameters
-    const int num_epochs = 10;
+    const int num_epochs = 200;
     const float learning_rate = 0.00007f;
     const int num_batches = num_sections / batch_size;
 
@@ -181,7 +182,7 @@ int main(int argc, char* argv[]) {
             
             // Calculate loss
             float loss = calculate_loss_slm(slm, d_target_tokens);
-            if(loss >= 9.0) raise(SIGINT);
+            if(loss >= 8.0) raise(SIGINT);
             
             epoch_loss += loss;
 
@@ -200,20 +201,8 @@ int main(int argc, char* argv[]) {
         }
 
         // Generate sample text
-        printf("\n--- Generating sample wiki text ---\n");
-        generate_text(slm, 0.8f, d_input_tokens, seq_len, "<|wiki|>");
-        printf("--- End generation ---\n\n");
-        
-        printf("\n--- Generating sample web text ---\n");
-        generate_text(slm, 0.8f, d_input_tokens, seq_len, "<|web|>");
-        printf("--- End generation ---\n\n");
-        
-        printf("\n--- Generating sample story text ---\n");
-        generate_text(slm, 0.8f, d_input_tokens, seq_len, "<|story|>");
-        printf("--- End generation ---\n\n");
-        
-        printf("\n--- Generating sample conversation text ---\n");
-        generate_text(slm, 0.8f, d_input_tokens, seq_len, "<|talk|>");
+        printf("\n--- Generating sample text ---\n");
+        generate_text(slm, 0.8f, d_input_tokens, seq_len);
         printf("--- End generation ---\n\n");
 
         // Checkpoint model
