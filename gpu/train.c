@@ -149,16 +149,10 @@ int main(int argc, char* argv[]) {
         slm = init_slm(seq_len, d_model, hidden_dim, num_layers, batch_size, cublaslt_handle);
     }
     
-    long long total_params = slm->vocab_size * d_model + d_model * slm->vocab_size + num_layers * (4LL * d_model * d_model + d_model * hidden_dim + hidden_dim * d_model);
-    printf("Total parameters: ~%.1fM\n", (float)total_params / 1e6f);
-    
-    // Calculate optimal training tokens using Chinchilla scaling laws
-    long long dataset_tokens = (long long)num_sections * seq_len;
-    long long optimal_tokens = 20LL * total_params;
-    int num_epochs = (int)((optimal_tokens + dataset_tokens - 1) / dataset_tokens);
-    if (num_epochs < 1) num_epochs = 1;
+    printf("Total parameters: ~%.1fM\n", (float)(slm->vocab_size * d_model + d_model * slm->vocab_size + num_layers * (4 * d_model * d_model + d_model * hidden_dim + hidden_dim * d_model)) / 1e6f);
     
     // Training parameters
+    const int num_epochs = 10;
     const float learning_rate = 0.00007f;
     const int num_batches = num_sections / batch_size;
 
@@ -190,7 +184,7 @@ int main(int argc, char* argv[]) {
             
             // Calculate loss
             float loss = calculate_loss_slm(slm, d_target_tokens);
-            if(loss >= 9.0) raise(SIGINT);
+            if(loss >= 12.0) raise(SIGINT);
             
             epoch_loss += loss;
 
@@ -208,7 +202,7 @@ int main(int argc, char* argv[]) {
             printf("Epoch [%d/%d], Batch [%d/%d], Loss: %.6f\n", epoch, num_epochs, batch, num_batches, loss);
             
             // Print ETA
-            if ((batch + 1) % 10 == 0) {
+            if ((batch + 1) % 1000 == 0) {
                 time_t current_time = time(NULL);
                 double elapsed = difftime(current_time, training_start);
                 int total_batches_done = epoch * num_batches + batch + 1;
