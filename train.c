@@ -166,7 +166,7 @@ int main(int argc, char* argv[]) {
             
             // Calculate loss
             float loss = calculate_loss_slm(slm, &target_tokens[batch_offset]);
-            if(loss >= 6.0) raise(SIGINT);
+            if(loss >= 7.0) raise(SIGINT);
             
             epoch_loss += loss;
 
