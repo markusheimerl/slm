@@ -146,7 +146,7 @@ int main(int argc, char* argv[]) {
     printf("Total parameters: ~%.1fM\n", (float)(slm->vocab_size * d_model + d_model * slm->vocab_size + num_layers * (4 * d_model * d_model + d_model * hidden_dim + hidden_dim * d_model)) / 1e6f);
     
     // Training parameters
-    const int num_epochs = 5;
+    const int num_epochs = 10;
     const float learning_rate = 0.00005f;
     const int num_batches = num_sections / batch_size;
 
@@ -166,7 +166,7 @@ int main(int argc, char* argv[]) {
             
             // Calculate loss
             float loss = calculate_loss_slm(slm, &target_tokens[batch_offset]);
-            if(loss >= 10.0) raise(SIGINT);
+            if(loss >= 9.0) raise(SIGINT);
             
             epoch_loss += loss;
 
@@ -178,7 +178,7 @@ int main(int argc, char* argv[]) {
             backward_pass_slm(slm, &input_tokens[batch_offset]);
             
             // Cosine decay learning rate
-            float current_lr = learning_rate * 0.5f * (1.0f + cosf(M_PI * (epoch * num_batches + batch) / (num_epochs * num_batches)));
+            float current_lr = learning_rate * (0.5f * (1.0f + cosf(M_PI * (epoch * num_batches + batch) / (num_epochs * num_batches))));
             
             // Update weights
             update_weights_slm(slm, current_lr, batch_size);
