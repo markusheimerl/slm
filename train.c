@@ -189,7 +189,7 @@ int main(int argc, char* argv[]) {
 
         // Generate sample text
         printf("\n--- Generating sample text ---\n");
-        generate_text(slm, 0.4f, "<|story|>", seq_len);
+        generate_text(slm, 0.9f, "<|story|>", seq_len);
         printf("--- End generation ---\n\n");
 
         // Checkpoint model
