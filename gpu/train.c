@@ -217,8 +217,8 @@ int main(int argc, char* argv[]) {
         extract_random_sequences(pretrain_corpus, pretrain_corpus_size, &pretrain_input_tokens, &pretrain_target_tokens, num_pretrain_sequences, seq_len);
         
         // Pretraining parameters
-        const int pretrain_epochs = 5;
-        const float pretrain_learning_rate = 0.0001f;
+        const int pretrain_epochs = 1;
+        const float pretrain_learning_rate = 0.00003f;
         const int pretrain_num_batches = num_pretrain_sequences / batch_size;
         
         printf("Pretraining: %d sequences, %d batches, %d epochs\n\n", num_pretrain_sequences, pretrain_num_batches, pretrain_epochs);
@@ -257,8 +257,8 @@ int main(int argc, char* argv[]) {
                 // Update weights
                 update_weights_slm(slm, current_lr, batch_size);
                 
-                // Print progress (less frequently for pretraining)
-                printf("[PRETRAIN] Epoch [%d/%d], Batch [%d/%d], Loss: %.6f, LR: %.7f\n", epoch + 1, pretrain_epochs, batch + 1, pretrain_num_batches, loss, current_lr);
+                // Print progress
+                printf("Epoch [%d/%d], Batch [%d/%d], Loss: %.6f, LR: %.7f\n", epoch + 1, pretrain_epochs, batch + 1, pretrain_num_batches, loss, current_lr);
             }
 
             // Generate sample text after each pretraining epoch
@@ -323,7 +323,7 @@ int main(int argc, char* argv[]) {
     
     // Fine-tuning parameters
     const int finetune_epochs = 20;
-    const float finetune_learning_rate = 0.00004f;
+    const float finetune_learning_rate = 0.00002f;
     const int num_batches = num_sections / batch_size;
 
     printf("Fine-tuning: %d sections, %d batches, %d epochs\n\n", num_sections, num_batches, finetune_epochs);
@@ -348,7 +348,7 @@ int main(int argc, char* argv[]) {
             
             // Calculate loss
             float loss = calculate_loss_slm(slm, d_target_tokens);
-            if(loss >= 7.0) raise(SIGINT);
+            if(loss >= 8.0) raise(SIGINT);
             
             epoch_loss += loss;
 
@@ -366,7 +366,7 @@ int main(int argc, char* argv[]) {
             update_weights_slm(slm, current_lr, batch_size);
             
             // Print progress
-            printf("[FINETUNE] Epoch [%d/%d], Batch [%d/%d], Loss: %.6f, LR: %.7f\n", 
+            printf("Epoch [%d/%d], Batch [%d/%d], Loss: %.6f, LR: %.7f\n", 
                    epoch, finetune_epochs, batch, num_batches, loss, current_lr);
         }
 
