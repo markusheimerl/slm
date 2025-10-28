@@ -35,7 +35,7 @@ char* load_corpus(const char* filename, size_t* corpus_size) {
     return corpus;
 }
 
-// Extract valid sections
+// Extract structured sections for fine-tuning (existing function)
 void extract_sections(char* corpus, size_t corpus_size, unsigned char** input_tokens, unsigned char** target_tokens, int* num_sections, int seq_len) {
     const char* eos_marker = "<|eos|>";
     const int eos_len = 7;
@@ -108,4 +108,43 @@ void extract_sections(char* corpus, size_t corpus_size, unsigned char** input_to
     
     *num_sections = current_section;
     printf("Extracted %d valid sections (seq_len=%d)\n", *num_sections, seq_len);
+}
+
+// Extract random overlapping sequences for pretraining (new function)
+void extract_random_sequences(char* corpus, size_t corpus_size, unsigned char** input_tokens, unsigned char** target_tokens, int num_sequences, int seq_len) {
+    if (corpus_size < (size_t)seq_len) {
+        printf("Error: Corpus is smaller than sequence length\n");
+        return;
+    }
+    
+    // Allocate memory for sequences
+    *input_tokens = (unsigned char*)malloc(num_sequences * seq_len * sizeof(unsigned char));
+    *target_tokens = (unsigned char*)malloc(num_sequences * seq_len * sizeof(unsigned char));
+    
+    // Extract random sequences
+    size_t max_start = corpus_size - seq_len;
+    
+    for (int i = 0; i < num_sequences; i++) {
+        // Pick a random starting position
+        size_t start_pos = rand() % (max_start + 1);
+        
+        // Copy the sequence
+        for (int j = 0; j < seq_len; j++) {
+            (*input_tokens)[i * seq_len + j] = (unsigned char)corpus[start_pos + j];
+        }
+        
+        // Create target tokens (shifted by 1 position)
+        for (int j = 0; j < seq_len - 1; j++) {
+            (*target_tokens)[i * seq_len + j] = (unsigned char)corpus[start_pos + j + 1];
+        }
+        
+        // Last target token: use next character if available, otherwise space
+        if (start_pos + seq_len < corpus_size) {
+            (*target_tokens)[i * seq_len + seq_len - 1] = (unsigned char)corpus[start_pos + seq_len];
+        } else {
+            (*target_tokens)[i * seq_len + seq_len - 1] = (unsigned char)' ';
+        }
+    }
+    
+    printf("Extracted %d random sequences (seq_len=%d)\n", num_sequences, seq_len);
 }
