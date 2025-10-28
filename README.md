@@ -15,6 +15,7 @@ The implementation uses BLAS (Basic Linear Algebra Subprograms) for efficient ma
 
 ## How to run
 ```
+wget -O - 'https://drive.google.com/uc?export=download&id=1FAKnVb4O4Lf_3JgyMb0YAk5wMXdHT7iA' | gzip -d > corpus.txt
 sudo apt update
 sudo apt install clang time libopenblas-dev
 make run

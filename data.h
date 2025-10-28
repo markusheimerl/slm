@@ -4,9 +4,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdbool.h>
 
 // Function prototypes
 char* load_corpus(const char* filename, size_t* corpus_size);
-void generate_char_sequences_from_corpus(unsigned char** input_chars, unsigned char** target_chars, int num_sequences, int seq_len, char* corpus, size_t corpus_size);
+void extract_sections(char* corpus, size_t corpus_size, unsigned char** input_tokens, unsigned char** target_tokens, int* num_sections, int seq_len);
 
 #endif

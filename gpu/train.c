@@ -19,32 +19,49 @@ void handle_sigint(int signum) {
     exit(128 + signum);
 }
 
-// Text generation function
-void generate_text(SLM* slm, char* corpus, size_t corpus_size, int length, float temperature, unsigned char* d_input_tokens) {
-    // Start with a random seed from corpus
-    int seed_start = rand() % (corpus_size - slm->seq_len - 1);
+// Shuffle training data (Fisher-Yates)
+void shuffle_data(unsigned char* input_tokens, unsigned char* target_tokens, int num_sections, int seq_len) {
+    for (int i = num_sections - 1; i > 0; i--) {
+        int j = rand() % (i + 1);
+        // Swap sections i and j
+        for (int k = 0; k < seq_len; k++) {
+            unsigned char temp = input_tokens[i * seq_len + k];
+            input_tokens[i * seq_len + k] = input_tokens[j * seq_len + k];
+            input_tokens[j * seq_len + k] = temp;
+            
+            temp = target_tokens[i * seq_len + k];
+            target_tokens[i * seq_len + k] = target_tokens[j * seq_len + k];
+            target_tokens[j * seq_len + k] = temp;
+        }
+    }
+}
+
+// Generate text function using autoregressive sampling
+void generate_text(SLM* slm, float temperature, unsigned char* d_input_tokens, const char* bos, unsigned int seq_len) {
+    // Start with zero-initialized sequence
+    unsigned char* h_tokens = (unsigned char*)calloc(seq_len, sizeof(unsigned char));
+
+    // Set beginning of sequence
+    for (int i = 0; i < (int)strlen(bos); i++) {
+        h_tokens[i] = (unsigned char)bos[i];
+    }
     
-    // Copy seed to host buffer
-    unsigned char* h_seed_tokens = (unsigned char*)malloc(slm->seq_len * sizeof(unsigned char));
-    for (int i = 0; i < slm->seq_len; i++) h_seed_tokens[i] = (unsigned char)corpus[seed_start + i];
+    printf("\"%s", bos);
+    fflush(stdout);
     
-    // Copy seed to d_input_tokens
-    CHECK_CUDA(cudaMemcpy(d_input_tokens, h_seed_tokens, slm->seq_len * sizeof(unsigned char), cudaMemcpyHostToDevice));
-    
-    printf("Seed: \"");
-    for (int i = 0; i < slm->seq_len; i++) printf("%c", (char)h_seed_tokens[i]);
-    printf("\" -> \"");
-    
-    // Allocate logits buffer
+    // Allocate logits buffer on host
     float* h_logits = (float*)malloc(slm->vocab_size * sizeof(float));
     
-    // Generate text one token at a time
-    for (int gen = 0; gen < length; gen++) {
+    // Generate characters one at a time
+    for (int pos = strlen(bos) - 1; pos < (int)(seq_len - 1); pos++) {
+        // Copy current partial sequence to device
+        CHECK_CUDA(cudaMemcpy(d_input_tokens, h_tokens, seq_len * sizeof(unsigned char), cudaMemcpyHostToDevice));
+
         // Forward pass
         forward_pass_slm(slm, d_input_tokens);
         
-        // Get logits
-        CHECK_CUDA(cudaMemcpy(h_logits, &slm->output_mlp->d_output[(slm->seq_len - 1) * slm->vocab_size], slm->vocab_size * sizeof(float), cudaMemcpyDeviceToHost));
+        // Get logits for the current position
+        CHECK_CUDA(cudaMemcpy(h_logits, &slm->output_mlp->d_output[pos * slm->vocab_size], slm->vocab_size * sizeof(float), cudaMemcpyDeviceToHost));
         
         // Apply temperature and softmax
         float max_logit = -1e30f;
@@ -75,21 +92,18 @@ void generate_text(SLM* slm, char* corpus, size_t corpus_size, int length, float
                 break;
             }
         }
-
-        // Display character
+        
+        // Set the next character
+        h_tokens[pos + 1] = next_token;
+        
+        // Print character immediately
         printf("%c", (char)next_token);
         fflush(stdout);
-        
-        // Shift sequence left and add new token
-        for (int i = 0; i < slm->seq_len - 1; i++) h_seed_tokens[i] = h_seed_tokens[i + 1];
-        h_seed_tokens[slm->seq_len - 1] = next_token;
-        
-        // Update with the new sequence
-        CHECK_CUDA(cudaMemcpy(d_input_tokens, h_seed_tokens, slm->seq_len * sizeof(unsigned char), cudaMemcpyHostToDevice));
     }
     
-    printf("\"");
-    free(h_seed_tokens);
+    printf("\"\n");
+    
+    free(h_tokens);
     free(h_logits);
 }
 
@@ -102,20 +116,28 @@ int main(int argc, char* argv[]) {
     CHECK_CUBLASLT(cublasLtCreate(&cublaslt_handle));
 
     // Parameters
-    const int seq_len = 2048;
-    const int d_model = 1024;
-    const int hidden_dim = 4096;
-    const int num_layers = 32;
-    const int batch_size = 2;
+    const int seq_len = 512;
+    const int num_layers = 16;
+    const int batch_size = 24;
+    const int d_model = num_layers * 64;
+    const int hidden_dim = d_model * 4;
     
     // Load corpus
     size_t corpus_size;
     char* corpus = load_corpus("../corpus.txt", &corpus_size);
     
-    // Prepare training data buffers
-    const int num_sequences = (corpus_size - 1) / seq_len;
-    unsigned char* input_chars = (unsigned char*)malloc(num_sequences * seq_len * sizeof(unsigned char));
-    unsigned char* target_chars = (unsigned char*)malloc(num_sequences * seq_len * sizeof(unsigned char));
+    // Create token sequences
+    unsigned char* input_tokens = NULL;
+    unsigned char* target_tokens = NULL;
+    int num_sections = 0;
+    
+    extract_sections(corpus, corpus_size, &input_tokens, &target_tokens, &num_sections, seq_len);
+    
+    if (num_sections == 0) {
+        printf("Error: No valid sections found in corpus\n");
+        free(corpus);
+        return 1;
+    }
     
     // Initialize or load SLM
     if (argc > 1) {
@@ -126,13 +148,12 @@ int main(int argc, char* argv[]) {
         slm = init_slm(seq_len, d_model, hidden_dim, num_layers, batch_size, cublaslt_handle);
     }
     
-    printf("Total parameters: ~%.1fM\n", (float)(slm->vocab_size * d_model + seq_len * d_model + d_model * slm->vocab_size + num_layers * (4 * d_model * d_model + d_model * hidden_dim + hidden_dim * d_model)) / 1e6f);
+    printf("Total parameters: ~%.1fM\n", (float)(slm->vocab_size * d_model + d_model * slm->vocab_size + num_layers * (4 * d_model * d_model + d_model * hidden_dim + hidden_dim * d_model)) / 1e6f);
     
     // Training parameters
-    const int num_epochs = 100;
-    const float learning_rate = 0.00001f;
-    const int num_batches = num_sequences / batch_size;
-    const int accumulation_steps = 1;
+    const int num_epochs = 20;
+    const float learning_rate = 0.00004f;
+    const int num_batches = num_sections / batch_size;
 
     // Allocate device memory for batch data
     unsigned char *d_input_tokens, *d_target_tokens;
@@ -141,96 +162,72 @@ int main(int argc, char* argv[]) {
     
     // Training loop
     for (int epoch = 0; epoch < num_epochs + 1; epoch++) {
-        // Generate random sequences from corpus
-        generate_char_sequences_from_corpus(&input_chars, &target_chars, num_sequences, seq_len, corpus, corpus_size);
-        
         float epoch_loss = 0.0f;
+        
+        // Shuffle training data at the beginning of each epoch
+        shuffle_data(input_tokens, target_tokens, num_sections, seq_len);
         
         for (int batch = 0; batch < num_batches; batch++) {
             // Calculate batch offset
             int batch_offset = batch * batch_size * seq_len;
 
             // Copy batch data to device
-            CHECK_CUDA(cudaMemcpy(d_input_tokens, &input_chars[batch_offset], batch_size * seq_len * sizeof(unsigned char), cudaMemcpyHostToDevice));
-            CHECK_CUDA(cudaMemcpy(d_target_tokens, &target_chars[batch_offset], batch_size * seq_len * sizeof(unsigned char), cudaMemcpyHostToDevice));
+            CHECK_CUDA(cudaMemcpy(d_input_tokens, &input_tokens[batch_offset], batch_size * seq_len * sizeof(unsigned char), cudaMemcpyHostToDevice));
+            CHECK_CUDA(cudaMemcpy(d_target_tokens, &target_tokens[batch_offset], batch_size * seq_len * sizeof(unsigned char), cudaMemcpyHostToDevice));
             
             // Forward pass
             forward_pass_slm(slm, d_input_tokens);
             
             // Calculate loss
             float loss = calculate_loss_slm(slm, d_target_tokens);
-            if(loss >= 7.5) raise(SIGINT);
+            if(loss >= 7.0) raise(SIGINT);
             
             epoch_loss += loss;
 
             // Don't update weights after final evaluation
             if (epoch == num_epochs) continue;
 
-            // Zero gradients
-            if (batch % accumulation_steps == 0) zero_gradients_slm(slm);
-            
             // Backward pass
+            zero_gradients_slm(slm);
             backward_pass_slm(slm, d_input_tokens);
             
+            // Cosine decay learning rate
+            float current_lr = learning_rate * (0.5f * (1.0f + cosf(M_PI * (epoch * num_batches + batch) / (num_epochs * num_batches))));
+            
             // Update weights
-            if ((batch + 1) % accumulation_steps == 0) update_weights_slm(slm, learning_rate, batch_size * accumulation_steps);
+            update_weights_slm(slm, current_lr, batch_size);
             
             // Print progress
-            if (batch % 2 == 0) {
-                printf("Epoch [%d/%d], Batch [%d/%d], Loss: %.6f\n", epoch, num_epochs, batch, num_batches, loss);
-            }
-            
-            // Generate sample text periodically
-            if (batch > 0 && batch % 200 == 0) {
-                printf("\n--- Generated sample (epoch %d, batch %d) ---\n", epoch, batch);
-                generate_text(slm, corpus, corpus_size, 128, 0.8f, d_input_tokens);
-                printf("\n--- End sample ---\n\n");
-            }
-
-            // Checkpoint model periodically
-            if (batch > 0 && batch % 1000 == 0) {
-                char checkpoint_fname[64];
-                snprintf(checkpoint_fname, sizeof(checkpoint_fname), "checkpoint_slm.bin");
-                save_slm(slm, checkpoint_fname);
-            }
+            printf("Epoch [%d/%d], Batch [%d/%d], Loss: %.6f, LR: %.7f\n", epoch, num_epochs, batch, num_batches, loss, current_lr);
         }
-        
-        epoch_loss /= num_batches;
 
+        // Generate sample text
+        printf("\n--- Generating sample text ---\n");
+        generate_text(slm, 0.9f, d_input_tokens, "<|story|>", seq_len);
+        printf("--- End generation ---\n\n");
+
+        // Checkpoint model
+        char checkpoint_fname[64];
+        snprintf(checkpoint_fname, sizeof(checkpoint_fname), "checkpoint_slm.bin");
+        save_slm(slm, checkpoint_fname);
+        
         // Print epoch summary
-        printf("Epoch [%d/%d] completed, Average Loss: %.6f\n", epoch, num_epochs, epoch_loss);
+        printf("Epoch [%d/%d] completed, Average Loss: %.6f\n", epoch, num_epochs, epoch_loss / num_batches);
     }
 
-    // Get timestamp for filenames
+    // Get timestamp for filenames and save final model
     char model_fname[64];
     time_t now = time(NULL);
     strftime(model_fname, sizeof(model_fname), "%Y%m%d_%H%M%S_slm.bin", localtime(&now));
-
-    // Save model with timestamped filename
     save_slm(slm, model_fname);
-    
-    // Load the model back and verify
-    printf("\nVerifying saved model...\n");
-
-    // Load the model back with original batch_size
-    SLM* loaded_slm = load_slm(model_fname, batch_size, cublaslt_handle);
-
-    // Test loaded model with a forward pass
-    CHECK_CUDA(cudaMemcpy(d_input_tokens, input_chars, batch_size * seq_len * sizeof(unsigned char), cudaMemcpyHostToDevice));
-    CHECK_CUDA(cudaMemcpy(d_target_tokens, target_chars, batch_size * seq_len * sizeof(unsigned char), cudaMemcpyHostToDevice));
-    
-    forward_pass_slm(loaded_slm, d_input_tokens);
-    float verification_loss = calculate_loss_slm(loaded_slm, d_target_tokens);
-    printf("Verification loss: %.6f\n", verification_loss);
     
     // Cleanup
     free(corpus);
-    free(input_chars);
-    free(target_chars);
+    free(input_tokens);
+    free(target_tokens);
     CHECK_CUDA(cudaFree(d_input_tokens));
     CHECK_CUDA(cudaFree(d_target_tokens));
     free_slm(slm);
-    free_slm(loaded_slm);
     CHECK_CUBLASLT(cublasLtDestroy(cublaslt_handle));
     
     return 0;
