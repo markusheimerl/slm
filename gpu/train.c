@@ -322,7 +322,7 @@ int main(int argc, char* argv[]) {
     }
     
     // Fine-tuning parameters
-    const int finetune_epochs = 20;
+    const int finetune_epochs = 5;
     const float finetune_learning_rate = 0.00002f;
     const int num_batches = num_sections / batch_size;
 
