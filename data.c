@@ -1,5 +1,4 @@
 #include "data.h"
-#include <math.h>
 
 // Get the total size of a file
 size_t get_file_size(const char* filename) {
@@ -17,8 +16,9 @@ size_t read_chunk(FILE* f, char* buffer, size_t size) {
 }
 
 // Generate random training sequences from a corpus chunk
-void generate_sequences(unsigned char* input_tokens, unsigned char* target_tokens, 
-                       int num_sequences, int seq_len, char* chunk, size_t chunk_size) {
+void generate_sequences(unsigned char* input_tokens, unsigned char* target_tokens, int seq_len, char* chunk, size_t chunk_size) {
+    int num_sequences = chunk_size / seq_len;
+
     for (int i = 0; i < num_sequences; i++) {
         // Pick a random starting position in the chunk
         size_t start = rand() % (chunk_size - seq_len);
@@ -38,14 +38,6 @@ size_t calculate_total_batches(const char* filename, int seq_len, int batch_size
     size_t sequences_per_chunk = chunk_size / seq_len;
     size_t batches_per_chunk = sequences_per_chunk / batch_size;
     return num_complete_chunks * batches_per_chunk;
-}
-
-// Calculate learning rate based on position
-float calculate_learning_rate(FILE* f, size_t chunk_size, int current_batch_in_chunk, int seq_len, int batch_size, size_t total_size, float base_lr) {
-    size_t chunks_completed = (ftell(f) / chunk_size) - 1;
-    size_t position = chunks_completed * chunk_size + current_batch_in_chunk * batch_size * seq_len;
-    float progress = (float)position / (float)total_size;
-    return base_lr * (0.5f * (1.0f + cosf(M_PI * progress)));
 }
 
 // Calculate current batch number

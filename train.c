@@ -106,12 +106,8 @@ int main(int argc, char* argv[]) {
     // Open corpus file
     FILE* f = fopen("corpus.txt", "rb");
     
-    // Training parameters
-    size_t chunk_size = 1024 * 1024 * 1024;
-    size_t total_batches = calculate_total_batches("corpus.txt", seq_len, batch_size, chunk_size);
-    size_t total_size = get_file_size("corpus.txt");
-    
     // Allocate buffers
+    size_t chunk_size = 1024 * 1024 * 1024;
     char* chunk = (char*)malloc(chunk_size);
     int max_sequences = chunk_size / seq_len;
     unsigned char* input_tokens = (unsigned char*)malloc(max_sequences * seq_len);
@@ -124,34 +120,31 @@ int main(int argc, char* argv[]) {
         if (loaded < chunk_size) break;
         
         // Generate random training sequences from chunk
-        int num_sequences = loaded / seq_len;
-        generate_sequences(input_tokens, target_tokens, num_sequences, seq_len, chunk, loaded);
+        generate_sequences(input_tokens, target_tokens, seq_len, chunk, loaded);
         
         // Train on all batches in this chunk
-        for (int batch = 0; batch < num_sequences / batch_size; batch++) {
-            int offset = batch * batch_size * seq_len;
-            
+        for (int batch = 0; batch < ((int)loaded / seq_len) / batch_size; batch++) {
             // Forward pass
-            forward_pass_slm(slm, &input_tokens[offset]);
+            forward_pass_slm(slm, &input_tokens[batch * batch_size * seq_len]);
             
             // Calculate loss
-            float loss = calculate_loss_slm(slm, &target_tokens[offset]);
+            float loss = calculate_loss_slm(slm, &target_tokens[batch * batch_size * seq_len]);
             if (loss >= 7.0) raise(SIGINT);
             
             // Backward pass
             zero_gradients_slm(slm);
-            backward_pass_slm(slm, &input_tokens[offset]);
+            backward_pass_slm(slm, &input_tokens[batch * batch_size * seq_len]);
             
             // Update weights with cosine learning rate schedule
-            float lr = calculate_learning_rate(f, chunk_size, batch, seq_len, batch_size, total_size, learning_rate);
+            float lr = learning_rate * (0.5f * (1.0f + cosf(M_PI * ((float)((calculate_batch_number(f, chunk_size, batch, seq_len, batch_size)) - 1) / (float)(calculate_total_batches("corpus.txt", seq_len, batch_size, chunk_size))))));
             update_weights_slm(slm, lr, batch_size);
             
-            printf("Batch [%zu/%zu], Loss: %.6f, LR: %.7f\n", calculate_batch_number(f, chunk_size, batch, seq_len, batch_size), total_batches, loss, lr);
+            printf("Batch [%zu/%zu], Loss: %.6f, LR: %.7f\n", calculate_batch_number(f, chunk_size, batch, seq_len, batch_size), calculate_total_batches("corpus.txt", seq_len, batch_size, chunk_size), loss, lr);
         }
         
         // Generate sample text
         printf("\n--- Sample ---\n");
-        generate_text(slm, 0.9f, "Once upon a time", slm->seq_len);
+        generate_text(slm, 0.9f, "The opposite of hot is ", slm->seq_len);
         printf("--- End ---\n\n");
         
         // Save checkpoint
