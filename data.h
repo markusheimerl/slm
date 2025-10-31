@@ -17,4 +17,10 @@ void generate_sequences(unsigned char* input_tokens, unsigned char* target_token
 // Calculate total number of batches we'll train on
 size_t calculate_total_batches(const char* filename, int seq_len, int batch_size, size_t chunk_size);
 
+// Calculate learning rate based on position
+float calculate_learning_rate(FILE* f, size_t chunk_size, int current_batch_in_chunk, int seq_len, int batch_size, size_t total_size, float base_lr);
+
+// Calculate current batch number
+size_t calculate_batch_number(FILE* f, size_t chunk_size, int current_batch_in_chunk, int seq_len, int batch_size);
+
 #endif

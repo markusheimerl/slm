@@ -107,18 +107,15 @@ int main(int argc, char* argv[]) {
     FILE* f = fopen("corpus.txt", "rb");
     
     // Training parameters
-    size_t chunk_size = 1024 * 1024 * 1024;  // 1GB chunks
+    size_t chunk_size = 1024 * 1024 * 1024;
     size_t total_batches = calculate_total_batches("corpus.txt", seq_len, batch_size, chunk_size);
+    size_t total_size = get_file_size("corpus.txt");
     
     // Allocate buffers
     char* chunk = (char*)malloc(chunk_size);
     int max_sequences = chunk_size / seq_len;
     unsigned char* input_tokens = (unsigned char*)malloc(max_sequences * seq_len);
     unsigned char* target_tokens = (unsigned char*)malloc(max_sequences * seq_len);
-    
-    size_t batch_num = 0;
-    size_t position = 0;
-    size_t total_size = get_file_size("corpus.txt");
     
     // Training loop: process corpus in chunks
     while (1) {
@@ -146,26 +143,20 @@ int main(int argc, char* argv[]) {
             backward_pass_slm(slm, &input_tokens[offset]);
             
             // Update weights with cosine learning rate schedule
-            float progress = (float)position / (float)total_size;
-            float lr = learning_rate * (0.5f * (1.0f + cosf(M_PI * progress)));
+            float lr = calculate_learning_rate(f, chunk_size, batch, seq_len, batch_size, total_size, learning_rate);
             update_weights_slm(slm, lr, batch_size);
             
-            batch_num++;
-            printf("Batch [%zu/%zu], Loss: %.6f, LR: %.7f\n", batch_num, total_batches, loss, lr);
+            printf("Batch [%zu/%zu], Loss: %.6f, LR: %.7f\n", calculate_batch_number(f, chunk_size, batch, seq_len, batch_size), total_batches, loss, lr);
         }
-        
-        position += loaded;
         
         // Generate sample text
         printf("\n--- Sample ---\n");
-        generate_text(slm, 0.9f, "Once upon a time", 200);
+        generate_text(slm, 0.9f, "Once upon a time", slm->seq_len);
         printf("--- End ---\n\n");
         
         // Save checkpoint
         save_slm(slm, "checkpoint_slm.bin");
     }
-    
-    fclose(f);
     
     // Save final model with timestamp
     char filename[64];
@@ -174,6 +165,7 @@ int main(int argc, char* argv[]) {
     save_slm(slm, filename);
     
     // Cleanup
+    fclose(f);
     free(chunk);
     free(input_tokens);
     free(target_tokens);

@@ -1,4 +1,9 @@
 #include "data.h"
+#include <math.h>
+
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
 
 // Get the total size of a file
 size_t get_file_size(const char* filename) {
@@ -37,4 +42,19 @@ size_t calculate_total_batches(const char* filename, int seq_len, int batch_size
     size_t sequences_per_chunk = chunk_size / seq_len;
     size_t batches_per_chunk = sequences_per_chunk / batch_size;
     return num_complete_chunks * batches_per_chunk;
+}
+
+// Calculate learning rate based on position
+float calculate_learning_rate(FILE* f, size_t chunk_size, int current_batch_in_chunk, int seq_len, int batch_size, size_t total_size, float base_lr) {
+    size_t chunks_completed = (ftell(f) / chunk_size) - 1;
+    size_t position = chunks_completed * chunk_size + current_batch_in_chunk * batch_size * seq_len;
+    float progress = (float)position / (float)total_size;
+    return base_lr * (0.5f * (1.0f + cosf(M_PI * progress)));
+}
+
+// Calculate current batch number
+size_t calculate_batch_number(FILE* f, size_t chunk_size, int current_batch_in_chunk, int seq_len, int batch_size) {
+    size_t chunks_completed = (ftell(f) / chunk_size) - 1;
+    size_t batches_per_chunk = (chunk_size / seq_len) / batch_size;
+    return chunks_completed * batches_per_chunk + current_batch_in_chunk + 1;
 }
