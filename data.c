@@ -1,66 +1,40 @@
 #include "data.h"
 
-size_t get_corpus_size(const char* filename) {
-    FILE* file = fopen(filename, "rb");
-    if (!file) return 0;
-    
-    fseek(file, 0, SEEK_END);
-    size_t size = ftell(file);
-    fclose(file);
+// Get the total size of a file
+size_t get_file_size(const char* filename) {
+    FILE* f = fopen(filename, "rb");
+    if (!f) return 0;
+    fseek(f, 0, SEEK_END);
+    size_t size = ftell(f);
+    fclose(f);
     return size;
 }
 
-char* load_corpus_chunk(const char* filename, size_t offset, size_t chunk_size, size_t* loaded_size) {
-    FILE* file = fopen(filename, "rb");
-    if (!file) return NULL;
-    
-    fseek(file, 0, SEEK_END);
-    size_t file_size = ftell(file);
-    
-    if (offset >= file_size) {
-        fclose(file);
-        return NULL;
-    }
-    
-    size_t to_read = chunk_size;
-    if (offset + to_read > file_size) {
-        to_read = file_size - offset;
-    }
-    
-    char* buffer = (char*)malloc(to_read + 1);
-    if (!buffer) {
-        fclose(file);
-        return NULL;
-    }
-    
-    fseek(file, offset, SEEK_SET);
-    *loaded_size = fread(buffer, 1, to_read, file);
-    buffer[*loaded_size] = '\0';
-    
-    fclose(file);
-    return buffer;
+// Read a chunk from an open file
+size_t read_chunk(FILE* f, char* buffer, size_t size) {
+    return fread(buffer, 1, size, f);
 }
 
-void generate_sequences(unsigned char* input_tokens, unsigned char* target_tokens, int num_sequences, int seq_len, char* corpus, size_t corpus_size) {
-    if (corpus_size < (size_t)seq_len) return;
-    
-    size_t max_start = corpus_size - seq_len;
-    
+// Generate random training sequences from a corpus chunk
+void generate_sequences(unsigned char* input_tokens, unsigned char* target_tokens, 
+                       int num_sequences, int seq_len, char* chunk, size_t chunk_size) {
     for (int i = 0; i < num_sequences; i++) {
-        size_t start = rand() % (max_start + 1);
+        // Pick a random starting position in the chunk
+        size_t start = rand() % (chunk_size - seq_len);
         
+        // Copy input sequence and target sequence (shifted by 1)
         for (int j = 0; j < seq_len; j++) {
-            input_tokens[i * seq_len + j] = (unsigned char)corpus[start + j];
-        }
-        
-        for (int j = 0; j < seq_len - 1; j++) {
-            target_tokens[i * seq_len + j] = (unsigned char)corpus[start + j + 1];
-        }
-        
-        if (start + seq_len < corpus_size) {
-            target_tokens[i * seq_len + seq_len - 1] = (unsigned char)corpus[start + seq_len];
-        } else {
-            target_tokens[i * seq_len + seq_len - 1] = (unsigned char)' ';
+            input_tokens[i * seq_len + j] = chunk[start + j];
+            target_tokens[i * seq_len + j] = chunk[start + j + 1];
         }
     }
+}
+
+// Calculate total number of batches we'll train on
+size_t calculate_total_batches(const char* filename, int seq_len, int batch_size, size_t chunk_size) {
+    size_t total_size = get_file_size(filename);
+    size_t num_complete_chunks = total_size / chunk_size;
+    size_t sequences_per_chunk = chunk_size / seq_len;
+    size_t batches_per_chunk = sequences_per_chunk / batch_size;
+    return num_complete_chunks * batches_per_chunk;
 }
