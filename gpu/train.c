@@ -408,7 +408,8 @@ int main(int argc, char* argv[]) {
         
         // Generate sample text
         printf("\n--- Sample ---\n");
-        generate_text(slm, 0.9f, d_input_tokens, "The opposite of hot is ", 32);
+        char* prompt = "The opposite of hot is ";
+        generate_text(slm, 0.9f, d_input_tokens, prompt, strlen(prompt) + 32);
         printf("--- End ---\n\n");
         
         // Evaluate on HellaSwag
