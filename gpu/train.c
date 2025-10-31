@@ -88,17 +88,15 @@ void generate_text(SLM* slm, float temperature, unsigned char* d_input_tokens, c
     free(h_logits);
 }
 
-// Simplified HellaSwag evaluation with extensive debug printing
-float evaluate_hellaswag_simple(SLM* slm, const char* filename, unsigned char* d_tokens, int max_examples) {
+// HellaSwag evaluation
+float evaluate_hellaswag(SLM* slm, const char* filename, unsigned char* d_tokens, int max_examples) {
     FILE* f = fopen(filename, "r");
     if (!f) {
         printf("Warning: Could not open HellaSwag file: %s\n", filename);
         return -1.0f;
     }
     
-    printf("\n========================================\n");
-    printf("Starting HellaSwag Evaluation\n");
-    printf("========================================\n\n");
+    printf("\n=== HellaSwag Evaluation ===\n\n");
     
     int correct = 0;
     int total = 0;
@@ -108,9 +106,9 @@ float evaluate_hellaswag_simple(SLM* slm, const char* filename, unsigned char* d
     
     char line[8192];
     while (fgets(line, sizeof(line), f) && total < max_examples) {
-        // Parse the line manually - simple arrays, no structs
+        // Parse the line manually
         char context[2048] = {0};
-        char endings[4][2048] = {0};
+        char endings[4][2048] = {{0}};
         int correct_label = -1;
         
         // Extract context
@@ -128,7 +126,7 @@ float evaluate_hellaswag_simple(SLM* slm, const char* filename, unsigned char* d
             strncpy(context, ctx_start, ctx_len);
             context[ctx_len] = '\0';
             
-            // Unescape special characters
+            // Unescape
             char* src = context;
             char* dst = context;
             while (*src) {
@@ -187,132 +185,129 @@ float evaluate_hellaswag_simple(SLM* slm, const char* filename, unsigned char* d
         }
         
         // Skip if parsing failed
-        if (context[0] == '\0' || correct_label < 0) {
-            printf("Warning: Failed to parse line, skipping\n");
-            continue;
-        }
+        if (context[0] == '\0' || correct_label < 0) continue;
         
-        // Print example info
-        printf("========================================\n");
-        printf("Example %d:\n", total + 1);
-        printf("----------------------------------------\n");
-        printf("Context: \"%s\"\n\n", context);
+        // Print context (truncated if too long)
+        printf("[%d] Context: \"%.80s%s\"\n", total + 1, context, strlen(context) > 80 ? "..." : "");
         
+        float scores[4];
         float best_score = -1e30f;
         int best_ending = -1;
         
         // Evaluate each ending
         for (int e = 0; e < 4; e++) {
-            printf("  Ending %d: \"%s\"\n", e, endings[e]);
+            // Print ending (truncated if too long)
+            printf("    [%d] \"%.60s%s\"\n", e, endings[e], strlen(endings[e]) > 60 ? "..." : "");
             
-            // Construct full text: context + ending
-            char full_text[4096];
-            snprintf(full_text, sizeof(full_text), "%s%s", context, endings[e]);
+            // Conditionally insert a single space between context and ending
+            int ctx_len = strlen(context);
+            int ending_len = strlen(endings[e]);
             
-            int text_len = strlen(full_text);
-            if (text_len > slm->seq_len) {
-                printf("    [!] Text too long (%d chars), truncating to %d\n", text_len, slm->seq_len);
-                text_len = slm->seq_len;
+            int insert_space = 0;
+            if (ctx_len > 0 && ending_len > 0) {
+                unsigned char last_ctx = (unsigned char)context[ctx_len - 1];
+                unsigned char first_end = (unsigned char)endings[e][0];
+                if (!isspace(last_ctx) && !isspace(first_end)) {
+                    insert_space = 1;
+                }
             }
             
-            int ctx_len = strlen(context);
-            printf("    [i] Context: %d chars, Full text: %d chars, Ending: %d chars\n", 
-                   ctx_len, text_len, text_len - ctx_len);
+            char full_text[4096];
+            if (insert_space) {
+                snprintf(full_text, sizeof(full_text), "%s %s", context, endings[e]);
+            } else {
+                snprintf(full_text, sizeof(full_text), "%s%s", context, endings[e]);
+            }
             
-            // Convert to tokens (just byte values)
+            int text_len = strlen(full_text);
+            if (text_len > slm->seq_len) text_len = slm->seq_len;
+            
+            // Effective context length in full_text (including inserted space)
+            int ctx_len_effective = ctx_len + (insert_space ? 1 : 0);
+            
+            // Convert to tokens
             memset(h_tokens, 0, slm->seq_len);
             for (int j = 0; j < text_len; j++) {
                 h_tokens[j] = (unsigned char)full_text[j];
             }
             
-            printf("    [i] First 20 tokens: ");
-            for (int j = 0; j < 20 && j < text_len; j++) {
-                printf("%d ", h_tokens[j]);
-            }
-            printf("\n");
+            // Zero the entire device input buffer for safety, then copy the first sequence
+            CHECK_CUDA(cudaMemset(d_tokens, 0, slm->batch_size * slm->seq_len * sizeof(unsigned char)));
+            CHECK_CUDA(cudaMemcpy(d_tokens, h_tokens, slm->seq_len * sizeof(unsigned char), cudaMemcpyHostToDevice));
             
             // Run model
-            CHECK_CUDA(cudaMemcpy(d_tokens, h_tokens, slm->seq_len * sizeof(unsigned char), cudaMemcpyHostToDevice));
             forward_pass_slm(slm, d_tokens);
             CHECK_CUDA(cudaMemcpy(h_logits, slm->output_mlp->d_output, slm->seq_len * slm->vocab_size * sizeof(float), cudaMemcpyDeviceToHost));
             
-            // Compute score for ending tokens only (not context)
-            if (ctx_len >= text_len - 1) {
-                printf("    [!] No ending tokens to evaluate (context fills entire text)!\n\n");
+            // Score ending tokens only
+            // Start from ctx_len_effective (skip context and optional space)
+            int i_start = ctx_len_effective;
+            if (i_start <= 0) i_start = 1; // Need at least one token of context
+            
+            if (i_start >= text_len) {
+                scores[e] = -1e30f;
                 continue;
             }
             
             float total_log_prob = 0.0f;
             int count = 0;
             
-            printf("    [i] Computing log probabilities for ending tokens (positions %d to %d):\n", 
-                   ctx_len, text_len - 2);
-            
-            // Show first 5 token predictions in detail
-            for (int t = ctx_len; t < text_len - 1; t++) {
-                float* logits_t = &h_logits[t * slm->vocab_size];
+            // Score token at position i using logits from position i-1
+            for (int i = i_start; i < text_len; i++) {
+                int j = i - 1; // logits at j predict token at i
+                float* logits_j = &h_logits[j * slm->vocab_size];
                 
-                // Find max logit for numerical stability
+                // Find max for numerical stability
                 float max_logit = -1e30f;
                 for (int v = 0; v < slm->vocab_size; v++) {
-                    if (logits_t[v] > max_logit) max_logit = logits_t[v];
+                    if (logits_j[v] > max_logit) max_logit = logits_j[v];
                 }
                 
-                // Compute log softmax denominator
+                // Compute log softmax
                 float sum_exp = 0.0f;
                 for (int v = 0; v < slm->vocab_size; v++) {
-                    sum_exp += expf(logits_t[v] - max_logit);
+                    sum_exp += expf(logits_j[v] - max_logit);
                 }
                 float log_sum_exp = logf(sum_exp);
                 
-                // Get log probability of the actual next token
-                unsigned char next_token = h_tokens[t + 1];
-                float log_prob = (logits_t[next_token] - max_logit) - log_sum_exp;
-                float prob = expf(log_prob);
-                
+                // Get log probability of token at position i
+                unsigned char tok_i = h_tokens[i];
+                float log_prob = (logits_j[tok_i] - max_logit) - log_sum_exp;
                 total_log_prob += log_prob;
                 count++;
-                
-                // Show detail for first 5 tokens
-                if (count <= 5) {
-                    char display_char = (next_token >= 32 && next_token < 127) ? next_token : '?';
-                    printf("        Token %d: '%c' (byte %3d) -> logit=%.2f, prob=%.4f, log_prob=%.4f\n", 
-                           count, display_char, next_token, logits_t[next_token], prob, log_prob);
-                }
-            }
-            
-            if (count > 5) {
-                printf("        ... (%d more tokens)\n", count - 5);
             }
             
             float avg_log_prob = (count > 0) ? total_log_prob / count : -1e30f;
-            
-            printf("    [i] Evaluated %d tokens\n", count);
-            printf("    [i] Total log prob: %.6f\n", total_log_prob);
-            printf("    [i] Average log prob: %.6f\n", avg_log_prob);
-            printf("    [i] Perplexity: %.2f\n", expf(-avg_log_prob));
+            scores[e] = avg_log_prob;
             
             if (avg_log_prob > best_score) {
                 best_score = avg_log_prob;
                 best_ending = e;
-                printf("    >>> NEW BEST SCORE <<<\n");
             }
-            printf("\n");
         }
         
-        printf("  Model's choice: Ending %d (avg log prob: %.6f)\n", best_ending, best_score);
-        printf("  Correct answer: Ending %d\n", correct_label);
+        // Print all scores with markers
+        printf("  Scores: ");
+        for (int e = 0; e < 4; e++) {
+            printf("[%d]: %.3f", e, scores[e]);
+            if (e == correct_label && e == best_ending) {
+                printf(" ✓✓"); // Both correct label and model choice
+            } else if (e == correct_label) {
+                printf(" ✓ "); // Correct label only
+            } else if (e == best_ending) {
+                printf(" ← "); // Model choice only
+            } else {
+                printf("   ");
+            }
+            if (e < 3) printf(" | ");
+        }
         
         if (best_ending == correct_label) {
             correct++;
-            printf("  ✓✓✓ CORRECT ✓✓✓\n");
+            printf(" → CORRECT\n\n");
         } else {
-            printf("  ✗✗✗ WRONG ✗✗✗\n");
+            printf(" → WRONG (correct was %d)\n\n", correct_label);
         }
-        
-        printf("\n  Running accuracy: %.2f%% (%d correct out of %d)\n", 
-               100.0f * correct / (total + 1), correct, total + 1);
-        printf("========================================\n\n");
         
         total++;
     }
@@ -326,19 +321,10 @@ float evaluate_hellaswag_simple(SLM* slm, const char* filename, unsigned char* d
         return -1.0f;
     }
     
-    printf("\n");
-    printf("╔════════════════════════════════════════╗\n");
-    printf("║       HELLASWAG FINAL RESULTS          ║\n");
-    printf("╚════════════════════════════════════════╝\n");
-    printf("  Total examples:  %d\n", total);
-    printf("  Correct:         %d\n", correct);
-    printf("  Wrong:           %d\n", total - correct);
-    printf("  Accuracy:        %.2f%%\n", 100.0f * correct / total);
-    printf("  Random baseline: 25.00%%\n");
-    printf("  Improvement:     %.2f%%\n", (100.0f * correct / total) - 25.0f);
-    printf("════════════════════════════════════════\n\n");
+    float accuracy = (float)correct / total;
+    printf("=== Results: %d/%d correct (%.2f%%, baseline 25.00%%) ===\n\n", correct, total, accuracy * 100.0f);
     
-    return (float)correct / total;
+    return accuracy;
 }
 
 int main(int argc, char* argv[]) {
@@ -426,7 +412,7 @@ int main(int argc, char* argv[]) {
         printf("--- End ---\n\n");
         
         // Evaluate on HellaSwag
-        evaluate_hellaswag_simple(slm, "../hellaswag_val.jsonl", d_input_tokens, 16);
+        evaluate_hellaswag(slm, "../hellaswag_val.jsonl", d_input_tokens, 256);
         
         // Save checkpoint
         save_slm(slm, "checkpoint_slm.bin");
