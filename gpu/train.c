@@ -113,8 +113,11 @@ int main(int argc, char* argv[]) {
     // Open corpus file
     FILE* f = fopen("../corpus.txt", "rb");
     
-    // Allocate host buffers
+    // Calculate total chunks
     size_t chunk_size = 1024 * 1024 * 1024;
+    size_t total_chunks = get_file_size("../corpus.txt") / chunk_size;
+    
+    // Allocate host buffers
     char* chunk = (char*)malloc(chunk_size);
     int max_sequences = chunk_size / seq_len;
     unsigned char* input_tokens = (unsigned char*)malloc(max_sequences * seq_len);
@@ -126,7 +129,7 @@ int main(int argc, char* argv[]) {
     CHECK_CUDA(cudaMalloc(&d_target_tokens, batch_size * seq_len));
     
     // Training loop: process corpus in chunks
-    while (1) {
+    for (size_t chunk_idx = 0; chunk_idx < total_chunks; chunk_idx++) {
         // Read next chunk
         size_t loaded = read_chunk(f, chunk, chunk_size);
         if (loaded < chunk_size) break;
@@ -134,8 +137,11 @@ int main(int argc, char* argv[]) {
         // Generate random training sequences from chunk
         generate_sequences(input_tokens, target_tokens, seq_len, chunk, loaded);
         
+        // Calculate batches in this chunk
+        int batches_in_chunk = ((int)loaded / seq_len) / batch_size;
+        
         // Train on all batches in this chunk
-        for (int batch = 0; batch < ((int)loaded / seq_len) / batch_size; batch++) {
+        for (int batch = 0; batch < batches_in_chunk; batch++) {
             // Copy batch to device
             CHECK_CUDA(cudaMemcpy(d_input_tokens, &input_tokens[batch * batch_size * seq_len], batch_size * seq_len, cudaMemcpyHostToDevice));
             CHECK_CUDA(cudaMemcpy(d_target_tokens, &target_tokens[batch * batch_size * seq_len], batch_size * seq_len, cudaMemcpyHostToDevice));
@@ -155,7 +161,7 @@ int main(int argc, char* argv[]) {
             float lr = learning_rate * (0.5f * (1.0f + cosf(M_PI * ((float)((calculate_batch_number(f, chunk_size, batch, seq_len, batch_size)) - 1) / (float)(calculate_total_batches("../corpus.txt", seq_len, batch_size, chunk_size))))));
             update_weights_slm(slm, lr, batch_size);
             
-            printf("Batch [%zu/%zu], Loss: %.6f, LR: %.7f\n", calculate_batch_number(f, chunk_size, batch, seq_len, batch_size), calculate_total_batches("../corpus.txt", seq_len, batch_size, chunk_size), loss, lr);
+            printf("Chunk [%zu/%zu], Batch [%d/%d], Loss: %.6f, LR: %.7f\n", chunk_idx, total_chunks, batch, batches_in_chunk, loss, lr);
         }
         
         // Generate sample text
