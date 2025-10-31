@@ -114,7 +114,7 @@ int main(int argc, char* argv[]) {
     FILE* f = fopen("../corpus.txt", "rb");
     
     // Calculate total chunks
-    size_t chunk_size = 1024 * 1024 * 1024;
+    size_t chunk_size = 128 * 1024 * 1024;
     size_t total_chunks = get_file_size("../corpus.txt") / chunk_size;
     
     // Allocate host buffers
