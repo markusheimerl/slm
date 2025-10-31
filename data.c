@@ -1,10 +1,6 @@
 #include "data.h"
 #include <math.h>
 
-#ifndef M_PI
-#define M_PI 3.14159265358979323846
-#endif
-
 // Get the total size of a file
 size_t get_file_size(const char* filename) {
     FILE* f = fopen(filename, "rb");
