@@ -17,6 +17,6 @@ The implementation uses BLAS (Basic Linear Algebra Subprograms) for efficient ma
 ```
 wget "https://drive.usercontent.google.com/download?confirm=t&id=1staEGnDgzu6ViHFtGNMdhOkw_u_4Jntj" -O - | gzip -d > corpus.txt
 sudo apt update
-sudo apt install clang time libopenblas-dev
-make run
+sudo apt install clang time libopenblas-dev nvidia-cuda-toolkit
+make run -C gpu -j 4
 ```
