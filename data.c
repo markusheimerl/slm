@@ -1,111 +1,70 @@
 #include "data.h"
 
-// Load the text corpus from a file
-char* load_corpus(const char* filename, size_t* corpus_size) {
-    FILE* file = fopen(filename, "r");
-    if (!file) {
-        printf("Error: Could not open corpus file: %s\n", filename);
-        return NULL;
-    }
-
-    // Get file size
-    fseek(file, 0, SEEK_END);
-    *corpus_size = ftell(file);
-    fseek(file, 0, SEEK_SET);
-
-    if (*corpus_size == 0) {
-        printf("Error: Corpus file is empty: %s\n", filename);
-        fclose(file);
-        return NULL;
-    }
-
-    char* corpus = (char*)malloc((*corpus_size + 1) * sizeof(char));
-    if (!corpus) {
-        printf("Error: Could not allocate memory for corpus\n");
-        fclose(file);
-        return NULL;
-    }
-
-    size_t read_size = fread(corpus, 1, *corpus_size, file);
-    corpus[read_size] = '\0';
-    *corpus_size = read_size;
-
-    fclose(file);
-    printf("Loaded corpus: %zu characters\n", *corpus_size);
-    return corpus;
+// Get the total size of a file
+size_t get_file_size(const char* filename) {
+    FILE* f = fopen(filename, "rb");
+    if (!f) return 0;
+    fseek(f, 0, SEEK_END);
+    size_t size = ftell(f);
+    fclose(f);
+    return size;
 }
 
-// Extract valid sections
-void extract_sections(char* corpus, size_t corpus_size, unsigned char** input_tokens, unsigned char** target_tokens, int* num_sections, int seq_len) {
-    const char* eos_marker = "<|eos|>";
-    const int eos_len = 7;
+// Read a chunk from an open file
+size_t read_chunk(FILE* f, char* buffer, size_t size) {
+    return fread(buffer, 1, size, f);
+}
+
+// Generate training sequences from a corpus chunk
+void generate_sequences(unsigned char* input_tokens, unsigned char* target_tokens, int seq_len, char* chunk, size_t chunk_size) {
+    // Calculate number of complete non-overlapping sequences
+    // Each sequence needs seq_len chars for input, plus 1 more for the last target
+    int num_sequences = (chunk_size - 1) / seq_len;
     
-    // First pass: count valid sections by finding all <|eos|> markers
-    int valid_section_count = 0;
-    size_t section_start = 0;
-    
-    for (size_t i = 0; i <= corpus_size - eos_len; i++) {
-        if (strncmp(&corpus[i], eos_marker, eos_len) == 0) {
-            size_t section_end = i + eos_len;  // Include the <|eos|> marker
-            size_t section_length = section_end - section_start;
-            
-            // Only count non-empty sections that fit within seq_len
-            if (section_length > 0 && section_length <= (size_t)seq_len) {
-                valid_section_count++;
-            }
-            
-            // Next section starts right after this <|eos|>
-            section_start = section_end;
-            i = section_end - 1;
+    if (num_sequences <= 0) return;
+
+    // Extract non-overlapping sequences sequentially
+    for (int i = 0; i < num_sequences; i++) {
+        size_t start = i * seq_len;
+        
+        // Copy input sequence and target sequence (shifted by 1)
+        for (int j = 0; j < seq_len; j++) {
+            input_tokens[i * seq_len + j] = (unsigned char)chunk[start + j];
+            target_tokens[i * seq_len + j] = (unsigned char)chunk[start + j + 1];
         }
     }
     
-    if (valid_section_count == 0) {
-        printf("Error: No sections <= %d characters found in corpus\n", seq_len);
-        *num_sections = 0;
-        return;
-    }
-    
-    // Allocate memory for valid sections
-    *input_tokens = (unsigned char*)malloc(valid_section_count * seq_len * sizeof(unsigned char));
-    *target_tokens = (unsigned char*)malloc(valid_section_count * seq_len * sizeof(unsigned char));
-    
-    // Second pass: extract valid sections
-    int current_section = 0;
-    section_start = 0;
-    
-    for (size_t i = 0; i <= corpus_size - eos_len; i++) {
-        if (strncmp(&corpus[i], eos_marker, eos_len) == 0) {
-            size_t section_end = i + eos_len;
-            size_t section_length = section_end - section_start;
+    // Fisher-Yates shuffle the sequences
+    for (int i = num_sequences - 1; i > 0; i--) {
+        int j = rand() % (i + 1);
+        
+        // Swap sequence i with sequence j
+        for (int k = 0; k < seq_len; k++) {
+            // Swap input tokens
+            unsigned char temp = input_tokens[i * seq_len + k];
+            input_tokens[i * seq_len + k] = input_tokens[j * seq_len + k];
+            input_tokens[j * seq_len + k] = temp;
             
-            if (section_length > 0 && section_length <= (size_t)seq_len) {
-                // Copy the section (from start to <|eos|> inclusive)
-                memcpy(&(*input_tokens)[current_section * seq_len], 
-                       &corpus[section_start], 
-                       section_length);
-                
-                // Pad remaining space with spaces
-                for (size_t k = section_length; k < (size_t)seq_len; k++) {
-                    (*input_tokens)[current_section * seq_len + k] = (unsigned char)' ';
-                }
-                
-                // Create target_tokens
-                memcpy(&(*target_tokens)[current_section * seq_len], 
-                       &(*input_tokens)[current_section * seq_len] + 1, 
-                       (seq_len - 1) * sizeof(unsigned char));
-                
-                // Last target token is a space (padding continuation)
-                (*target_tokens)[current_section * seq_len + seq_len - 1] = (unsigned char)' ';
-                
-                current_section++;
-            }
-            
-            section_start = section_end;
-            i = section_end - 1;
+            // Swap target tokens
+            temp = target_tokens[i * seq_len + k];
+            target_tokens[i * seq_len + k] = target_tokens[j * seq_len + k];
+            target_tokens[j * seq_len + k] = temp;
         }
     }
-    
-    *num_sections = current_section;
-    printf("Extracted %d valid sections (seq_len=%d)\n", *num_sections, seq_len);
+}
+
+// Calculate total number of batches we'll train on
+size_t calculate_total_batches(const char* filename, int seq_len, int batch_size, size_t chunk_size) {
+    size_t total_size = get_file_size(filename);
+    size_t num_complete_chunks = total_size / chunk_size;
+    size_t sequences_per_chunk = (chunk_size - 1) / seq_len;
+    size_t batches_per_chunk = sequences_per_chunk / batch_size;
+    return num_complete_chunks * batches_per_chunk;
+}
+
+// Calculate current batch number
+size_t calculate_batch_number(FILE* f, size_t chunk_size, int current_batch_in_chunk, int seq_len, int batch_size) {
+    size_t chunks_completed = (ftell(f) / chunk_size) - 1;
+    size_t batches_per_chunk = ((chunk_size - 1) / seq_len) / batch_size;
+    return chunks_completed * batches_per_chunk + current_batch_in_chunk + 1;
 }

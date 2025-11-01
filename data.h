@@ -4,10 +4,20 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <stdbool.h>
 
-// Function prototypes
-char* load_corpus(const char* filename, size_t* corpus_size);
-void extract_sections(char* corpus, size_t corpus_size, unsigned char** input_tokens, unsigned char** target_tokens, int* num_sections, int seq_len);
+// Get the total size of a file
+size_t get_file_size(const char* filename);
+
+// Read a chunk from an open file
+size_t read_chunk(FILE* f, char* buffer, size_t size);
+
+// Generate training sequences from a corpus chunk
+void generate_sequences(unsigned char* input_tokens, unsigned char* target_tokens, int seq_len, char* chunk, size_t chunk_size);
+
+// Calculate total number of batches we'll train on
+size_t calculate_total_batches(const char* filename, int seq_len, int batch_size, size_t chunk_size);
+
+// Calculate current batch number
+size_t calculate_batch_number(FILE* f, size_t chunk_size, int current_batch_in_chunk, int seq_len, int batch_size);
 
 #endif
