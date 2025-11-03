@@ -15,8 +15,10 @@ The implementation uses BLAS (Basic Linear Algebra Subprograms) for efficient ma
 
 ## How to run
 ```
-wget "https://drive.usercontent.google.com/download?confirm=t&id=1staEGnDgzu6ViHFtGNMdhOkw_u_4Jntj" -O - | gzip -d > corpus.txt
 sudo apt update
 sudo apt install clang time libopenblas-dev nvidia-cuda-toolkit
+git clone --recurse-submodules https://github.com/markusheimerl/slm
+cd slm/
+wget "https://drive.usercontent.google.com/download?confirm=t&id=1staEGnDgzu6ViHFtGNMdhOkw_u_4Jntj" -O - | gzip -d > corpus.txt
 make run -C gpu -j 4
 ```
