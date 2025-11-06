@@ -114,11 +114,8 @@ int main(int argc, char* argv[]) {
     size_t total_sequences = (get_file_size("../corpus.txt") - 1) / seq_len;
     size_t* shuffled_indices = create_shuffled_indices(total_sequences);
     
-    // Calculate chunk size and total chunks
-    size_t sequences_per_chunk = (128 * 1024 * 1024) / seq_len;
-    size_t total_chunks = total_sequences / sequences_per_chunk;
-
     // Allocate host buffers for sequences
+    size_t sequences_per_chunk = (128 * 1024 * 1024) / seq_len;
     unsigned char* input_tokens = (unsigned char*)malloc(sequences_per_chunk * seq_len);
     unsigned char* target_tokens = (unsigned char*)malloc(sequences_per_chunk * seq_len);
     
@@ -128,7 +125,7 @@ int main(int argc, char* argv[]) {
     CHECK_CUDA(cudaMalloc(&d_target_tokens, batch_size * seq_len));
     
     // Training loop: process corpus in chunks with random sampling
-    for (size_t chunk_idx = 0; chunk_idx < total_chunks; chunk_idx++) {
+    for (size_t chunk_idx = 0; chunk_idx < total_sequences / sequences_per_chunk; chunk_idx++) {
         // Sample next chunk of sequences from shuffled corpus
         sample_sequences("../corpus.txt", &shuffled_indices[chunk_idx * sequences_per_chunk], seq_len, input_tokens, target_tokens, sequences_per_chunk);
         
@@ -153,7 +150,7 @@ int main(int argc, char* argv[]) {
             float lr = learning_rate * (0.5f * (1.0f + cosf(M_PI * ((float)((chunk_idx * (sequences_per_chunk / batch_size) + batch)) / (float)(total_sequences / batch_size)))));
             update_weights_slm(slm, lr, batch_size);
             
-            printf("Chunk [%zu/%zu], Batch [%d/%d], Loss: %.6f, LR: %.7f\n", chunk_idx, total_chunks, batch, (int)(sequences_per_chunk / batch_size), loss, lr);
+            printf("Chunk [%zu/%zu], Batch [%d/%d], Loss: %.6f, LR: %.7f\n", chunk_idx, total_sequences / sequences_per_chunk, batch, (int)(sequences_per_chunk / batch_size), loss, lr);
         }
         
         // Generate sample text
