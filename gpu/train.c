@@ -132,11 +132,8 @@ int main(int argc, char* argv[]) {
         // Sample next chunk of sequences from shuffled corpus
         sample_sequences("../corpus.txt", &shuffled_indices[chunk_idx * sequences_per_chunk], seq_len, input_tokens, target_tokens, sequences_per_chunk);
         
-        // Calculate batches in this chunk
-        int batches_in_chunk = sequences_per_chunk / batch_size;
-        
         // Train on all batches in this chunk
-        for (int batch = 0; batch < batches_in_chunk; batch++) {
+        for (int batch = 0; batch < (int)(sequences_per_chunk / batch_size); batch++) {
             // Copy batch to device
             CHECK_CUDA(cudaMemcpy(d_input_tokens, &input_tokens[batch * batch_size * seq_len], batch_size * seq_len, cudaMemcpyHostToDevice));
             CHECK_CUDA(cudaMemcpy(d_target_tokens, &target_tokens[batch * batch_size * seq_len], batch_size * seq_len, cudaMemcpyHostToDevice));
@@ -156,7 +153,7 @@ int main(int argc, char* argv[]) {
             float lr = learning_rate * (0.5f * (1.0f + cosf(M_PI * ((float)((chunk_idx * (sequences_per_chunk / batch_size) + batch)) / (float)(total_sequences / batch_size)))));
             update_weights_slm(slm, lr, batch_size);
             
-            printf("Chunk [%zu/%zu], Batch [%d/%d], Loss: %.6f, LR: %.7f\n", chunk_idx, total_chunks, batch, batches_in_chunk, loss, lr);
+            printf("Chunk [%zu/%zu], Batch [%d/%d], Loss: %.6f, LR: %.7f\n", chunk_idx, total_chunks, batch, (int)(sequences_per_chunk / batch_size), loss, lr);
         }
         
         // Generate sample text
