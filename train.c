@@ -63,7 +63,7 @@ void generate_text(SLM* slm, float temperature, const char* bos, int gen_len) {
         unsigned char next_token = 0;
         float cumsum = 0.0f;
         for (int v = 0; v < slm->vocab_size; v++) {
-            cumsum += h_logits[v];
+            cumsum += logits[v];
             if (r <= cumsum) {
                 next_token = v;
                 break;
@@ -118,11 +118,10 @@ int main(int argc, char* argv[]) {
     // Training loop: process corpus in chunks with random sampling
     for (size_t chunk_idx = 0; chunk_idx < total_chunks; chunk_idx++) {
         // Sample next chunk of sequences from shuffled corpus
-        size_t sequences_sampled = sample_sequences("corpus.txt", shuffled_indices, chunk_idx * sequences_per_chunk, seq_len, input_tokens, target_tokens, sequences_per_chunk);
-        if (sequences_sampled == 0) break;
+        sample_sequences("corpus.txt", &shuffled_indices[chunk_idx * sequences_per_chunk], seq_len, input_tokens, target_tokens, sequences_per_chunk);
         
         // Calculate batches in this chunk
-        int batches_in_chunk = sequences_sampled / batch_size;
+        int batches_in_chunk = sequences_per_chunk / batch_size;
         
         // Train on all batches in this chunk
         for (int batch = 0; batch < batches_in_chunk; batch++) {

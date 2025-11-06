@@ -31,20 +31,16 @@ size_t* create_shuffled_indices(size_t total_sequences) {
 }
 
 // Sample sequences using shuffled indices
-size_t sample_sequences(const char* filename, size_t* indices, size_t start_idx, int seq_len, unsigned char* input_tokens, unsigned char* target_tokens, size_t num_sequences) {
+void sample_sequences(const char* filename, size_t* indices, int seq_len, unsigned char* input_tokens, unsigned char* target_tokens, size_t num_sequences) {
     FILE* f = fopen(filename, "rb");
-    if (!f) return 0;
+    if (!f) return;
     
     unsigned char* buffer = (unsigned char*)malloc((seq_len + 1) * sizeof(unsigned char));
     
     for (size_t i = 0; i < num_sequences; i++) {
-        fseek(f, indices[start_idx + i] * seq_len, SEEK_SET);
+        fseek(f, indices[i] * seq_len, SEEK_SET);
         
-        if (fread(buffer, 1, seq_len + 1, f) < (size_t)(seq_len + 1)) {
-            free(buffer);
-            fclose(f);
-            return i;
-        }
+        if (fread(buffer, 1, seq_len + 1, f) < (size_t)(seq_len + 1)) break;
         
         for (int j = 0; j < seq_len; j++) {
             input_tokens[i * seq_len + j] = buffer[j];
@@ -54,5 +50,4 @@ size_t sample_sequences(const char* filename, size_t* indices, size_t start_idx,
     
     free(buffer);
     fclose(f);
-    return num_sequences;
 }
