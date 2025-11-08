@@ -103,33 +103,22 @@ int main(int argc, char* argv[]) {
     
     printf("Parameters: ~%.1fM\n", (float)(slm->vocab_size * d_model + d_model * slm->vocab_size + num_layers * (4 * d_model * d_model + d_model * hidden_dim + hidden_dim * d_model)) / 1e6f);
     
-    // Open corpus file
-    FILE* f = fopen("corpus.txt", "rb");
+    // Create shuffled indices for random sampling without replacement
+    size_t total_sequences = (get_file_size("corpus.txt") - 1) / seq_len;
+    size_t* shuffled_indices = create_shuffled_indices(total_sequences);
     
-    // Calculate total chunks
-    size_t chunk_size = 128 * 1024 * 1024;
-    size_t total_chunks = get_file_size("corpus.txt") / chunk_size;
+    // Allocate buffers for sequences
+    size_t sequences_per_chunk = (128 * 1024 * 1024) / seq_len;
+    unsigned char* input_tokens = (unsigned char*)malloc(sequences_per_chunk * seq_len);
+    unsigned char* target_tokens = (unsigned char*)malloc(sequences_per_chunk * seq_len);
     
-    // Allocate buffers
-    char* chunk = (char*)malloc(chunk_size);
-    int max_sequences = chunk_size / seq_len;
-    unsigned char* input_tokens = (unsigned char*)malloc(max_sequences * seq_len);
-    unsigned char* target_tokens = (unsigned char*)malloc(max_sequences * seq_len);
-    
-    // Training loop: process corpus in chunks
-    for (size_t chunk_idx = 0; chunk_idx < total_chunks; chunk_idx++) {
-        // Read next chunk
-        size_t loaded = read_chunk(f, chunk, chunk_size);
-        if (loaded < chunk_size) break;
-        
-        // Generate random training sequences from chunk
-        generate_sequences(input_tokens, target_tokens, seq_len, chunk, loaded);
-        
-        // Calculate batches in this chunk
-        int batches_in_chunk = ((int)loaded / seq_len) / batch_size;
+    // Training loop: process corpus in chunks with random sampling
+    for (size_t chunk_idx = 0; chunk_idx < total_sequences / sequences_per_chunk; chunk_idx++) {
+        // Sample next chunk of sequences from shuffled corpus
+        sample_sequences("corpus.txt", &shuffled_indices[chunk_idx * sequences_per_chunk], seq_len, input_tokens, target_tokens, sequences_per_chunk);
         
         // Train on all batches in this chunk
-        for (int batch = 0; batch < batches_in_chunk; batch++) {
+        for (int batch = 0; batch < (int)(sequences_per_chunk / batch_size); batch++) {
             // Forward pass
             forward_pass_slm(slm, &input_tokens[batch * batch_size * seq_len]);
             
@@ -142,10 +131,10 @@ int main(int argc, char* argv[]) {
             backward_pass_slm(slm, &input_tokens[batch * batch_size * seq_len]);
             
             // Update weights with cosine learning rate schedule
-            float lr = learning_rate * (0.5f * (1.0f + cosf(M_PI * ((float)((calculate_batch_number(f, chunk_size, batch, seq_len, batch_size)) - 1) / (float)(calculate_total_batches("corpus.txt", seq_len, batch_size, chunk_size))))));
+            float lr = learning_rate * (0.5f * (1.0f + cosf(M_PI * ((float)((chunk_idx * (sequences_per_chunk / batch_size) + batch)) / (float)(total_sequences / batch_size)))));
             update_weights_slm(slm, lr, batch_size);
             
-            printf("Chunk [%zu/%zu], Batch [%d/%d], Loss: %.6f, LR: %.7f\n", chunk_idx, total_chunks, batch, batches_in_chunk, loss, lr);
+            printf("Chunk [%zu/%zu], Batch [%d/%d], Loss: %.6f, LR: %.7f\n", chunk_idx, total_sequences / sequences_per_chunk, batch, (int)(sequences_per_chunk / batch_size), loss, lr);
         }
         
         // Generate sample text
@@ -164,10 +153,9 @@ int main(int argc, char* argv[]) {
     save_slm(slm, filename);
     
     // Cleanup
-    fclose(f);
-    free(chunk);
     free(input_tokens);
     free(target_tokens);
+    free(shuffled_indices);
     free_slm(slm);
     
     return 0;

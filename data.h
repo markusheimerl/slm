@@ -8,16 +8,10 @@
 // Get the total size of a file
 size_t get_file_size(const char* filename);
 
-// Read a chunk from an open file
-size_t read_chunk(FILE* f, char* buffer, size_t size);
+// Create shuffled sequence indices for entire corpus
+size_t* create_shuffled_indices(size_t total_sequences);
 
-// Generate training sequences from a corpus chunk
-void generate_sequences(unsigned char* input_tokens, unsigned char* target_tokens, int seq_len, char* chunk, size_t chunk_size);
-
-// Calculate total number of batches we'll train on
-size_t calculate_total_batches(const char* filename, int seq_len, int batch_size, size_t chunk_size);
-
-// Calculate current batch number
-size_t calculate_batch_number(FILE* f, size_t chunk_size, int current_batch_in_chunk, int seq_len, int batch_size);
+// Sample sequences using shuffled indices
+void sample_sequences(const char* filename, size_t* indices, int seq_len, unsigned char* input_tokens, unsigned char* target_tokens, size_t num_sequences);
 
 #endif
