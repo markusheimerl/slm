@@ -140,7 +140,7 @@ int main(int argc, char* argv[]) {
             
             // Calculate loss
             float loss = calculate_loss_slm(slm, d_target_tokens);
-            if (loss >= 7.0) raise(SIGINT);
+            if (loss >= 12.0) raise(SIGINT);
             
             // Backward pass
             zero_gradients_slm(slm);
