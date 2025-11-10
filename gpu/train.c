@@ -43,7 +43,7 @@ void generate_text(SLM* slm, float temperature, unsigned char* d_input_tokens, c
         forward_pass_slm(slm, d_input_tokens);
         
         // Copy logits for current position back to host
-        CHECK_CUDA(cudaMemcpy(h_logits, &slm->output_mlp->d_output[pos * slm->vocab_size], slm->vocab_size * sizeof(float), cudaMemcpyDeviceToHost));
+        CHECK_CUDA(cudaMemcpy(h_logits, &slm->d_output[pos * slm->vocab_size], slm->vocab_size * sizeof(float), cudaMemcpyDeviceToHost));
         
         // Apply temperature scaling and find max for numerical stability
         float max_logit = -1e30f;
@@ -140,7 +140,7 @@ int main(int argc, char* argv[]) {
             
             // Calculate loss
             float loss = calculate_loss_slm(slm, d_target_tokens);
-            if (loss >= 7.0) raise(SIGINT);
+            if (loss >= 12.0) raise(SIGINT);
             
             // Backward pass
             zero_gradients_slm(slm);
