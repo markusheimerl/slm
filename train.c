@@ -39,7 +39,7 @@ void generate_text(SLM* slm, float temperature, const char* bos, int gen_len) {
     for (int pos = strlen(bos) - 1; pos < gen_len; pos++) {
         // Forward pass to get logits
         forward_pass_slm(slm, tokens);
-        memcpy(logits, &slm->output_mlp->output[pos * slm->vocab_size], slm->vocab_size * sizeof(float));
+        memcpy(logits, &slm->output[pos * slm->vocab_size], slm->vocab_size * sizeof(float));
         
         // Apply temperature scaling and find max for numerical stability
         float max_logit = -1e30f;
