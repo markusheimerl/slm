@@ -20,13 +20,15 @@ void handle_sigint(int signum) {
 }
 
 // Generate text autoregressively from a prompt
-void generate_text(SLM* slm, float temperature, unsigned char* d_input_tokens, const char* bos, int gen_len) {
+void generate_text(SLM* slm, float temperature, unsigned short* d_input_tokens, const char* bos, int gen_len) {
+    if (strlen(bos) % 2 == 1) return;
+    
     // Start with zero-initialized sequence
-    unsigned char* h_tokens = (unsigned char*)calloc(slm->seq_len, sizeof(unsigned char));
+    unsigned short* h_tokens = (unsigned short*)calloc(slm->seq_len, sizeof(unsigned short));
     
     // Set beginning of sequence (prompt)
-    for (int i = 0; i < (int)strlen(bos); i++) {
-        h_tokens[i] = (unsigned char)bos[i];
+    for (int i = 0; i < (int)strlen(bos) / 2; i++) {
+        h_tokens[i] = (unsigned short)((unsigned char)bos[i * 2] << 8) | (unsigned char)bos[i * 2 + 1];
     }
     
     printf("\"%s", bos);
@@ -34,10 +36,10 @@ void generate_text(SLM* slm, float temperature, unsigned char* d_input_tokens, c
     
     float* h_logits = (float*)malloc(slm->vocab_size * sizeof(float));
     
-    // Generate characters one at a time
-    for (int pos = strlen(bos) - 1; pos < gen_len; pos++) {
+    // Generate tokens one at a time
+    for (int pos = strlen(bos) / 2 - 1; pos < gen_len; pos++) {
         // Copy current sequence to device
-        CHECK_CUDA(cudaMemcpy(d_input_tokens, h_tokens, slm->seq_len * sizeof(unsigned char), cudaMemcpyHostToDevice));
+        CHECK_CUDA(cudaMemcpy(d_input_tokens, h_tokens, slm->seq_len * sizeof(unsigned short), cudaMemcpyHostToDevice));
         
         // Forward pass to get logits
         forward_pass_slm(slm, d_input_tokens);
@@ -64,7 +66,7 @@ void generate_text(SLM* slm, float temperature, unsigned char* d_input_tokens, c
         
         // Sample from the distribution
         float r = (float)rand() / (float)RAND_MAX;
-        unsigned char next_token = 0;
+        unsigned short next_token = 0;
         float cumsum = 0.0f;
         for (int v = 0; v < slm->vocab_size; v++) {
             cumsum += h_logits[v];
@@ -76,7 +78,7 @@ void generate_text(SLM* slm, float temperature, unsigned char* d_input_tokens, c
         
         // Add sampled token to sequence
         h_tokens[pos + 1] = next_token;
-        printf("%c", (char)next_token);
+        printf("%c%c", (char)(next_token >> 8), (char)(next_token & 0xFF));
         fflush(stdout);
     }
     
@@ -111,18 +113,18 @@ int main(int argc, char* argv[]) {
     printf("Parameters: ~%.1fM\n", (float)(slm->vocab_size * d_model + d_model * slm->vocab_size + num_layers * (4 * d_model * d_model + d_model * hidden_dim + hidden_dim * d_model)) / 1e6f);
     
     // Create shuffled indices for random sampling without replacement
-    size_t total_sequences = (get_file_size("../corpus.txt") - 1) / seq_len;
+    size_t total_sequences = (get_file_size("../corpus.txt") - 2) / (2 * seq_len);
     size_t* shuffled_indices = create_shuffled_indices(total_sequences);
     
     // Allocate host buffers for sequences
-    size_t sequences_per_chunk = (128 * 1024 * 1024) / seq_len;
-    unsigned char* input_tokens = (unsigned char*)malloc(sequences_per_chunk * seq_len);
-    unsigned char* target_tokens = (unsigned char*)malloc(sequences_per_chunk * seq_len);
+    size_t sequences_per_chunk = (128 * 1024 * 1024) / (seq_len * 2);
+    unsigned short* input_tokens = (unsigned short*)malloc(sequences_per_chunk * seq_len * sizeof(unsigned short));
+    unsigned short* target_tokens = (unsigned short*)malloc(sequences_per_chunk * seq_len * sizeof(unsigned short));
     
     // Allocate device buffers
-    unsigned char *d_input_tokens, *d_target_tokens;
-    CHECK_CUDA(cudaMalloc(&d_input_tokens, batch_size * seq_len));
-    CHECK_CUDA(cudaMalloc(&d_target_tokens, batch_size * seq_len));
+    unsigned short *d_input_tokens, *d_target_tokens;
+    CHECK_CUDA(cudaMalloc(&d_input_tokens, batch_size * seq_len * sizeof(unsigned short)));
+    CHECK_CUDA(cudaMalloc(&d_target_tokens, batch_size * seq_len * sizeof(unsigned short)));
     
     // Training loop: process corpus in chunks with random sampling
     for (size_t chunk_idx = 0; chunk_idx < total_sequences / sequences_per_chunk; chunk_idx++) {
@@ -132,8 +134,8 @@ int main(int argc, char* argv[]) {
         // Train on all batches in this chunk
         for (int batch = 0; batch < (int)(sequences_per_chunk / batch_size); batch++) {
             // Copy batch to device
-            CHECK_CUDA(cudaMemcpy(d_input_tokens, &input_tokens[batch * batch_size * seq_len], batch_size * seq_len, cudaMemcpyHostToDevice));
-            CHECK_CUDA(cudaMemcpy(d_target_tokens, &target_tokens[batch * batch_size * seq_len], batch_size * seq_len, cudaMemcpyHostToDevice));
+            CHECK_CUDA(cudaMemcpy(d_input_tokens, &input_tokens[batch * batch_size * seq_len], batch_size * seq_len * sizeof(unsigned short), cudaMemcpyHostToDevice));
+            CHECK_CUDA(cudaMemcpy(d_target_tokens, &target_tokens[batch * batch_size * seq_len], batch_size * seq_len * sizeof(unsigned short), cudaMemcpyHostToDevice));
             
             // Forward pass
             forward_pass_slm(slm, d_input_tokens);
@@ -155,7 +157,7 @@ int main(int argc, char* argv[]) {
         
         // Generate sample text
         printf("\n--- Sample ---\n");
-        generate_text(slm, 0.9f, d_input_tokens, "The opposite of hot is ", slm->seq_len);
+        generate_text(slm, 0.9f, d_input_tokens, "The opposite of hot is", slm->seq_len);
         printf("--- End ---\n\n");
         
         // Save checkpoint
