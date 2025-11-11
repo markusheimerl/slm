@@ -58,7 +58,7 @@ SLM* init_slm(int seq_len, int d_model, int hidden_dim, int num_layers, int batc
     }
     
     // Initialize transformer
-    slm->transformer = init_transformer(seq_len, d_model, hidden_dim, num_layers, batch_size, true);
+    slm->transformer = init_transformer(seq_len, d_model, hidden_dim, num_layers, batch_size, true, true);
     
     return slm;
 }
@@ -90,26 +90,6 @@ static void token_embedding_lookup(float* embedded, float* token_embedding, unsi
             
             for (int d = 0; d < d_model; d++) {
                 embedded[emb_offset + d] = token_embedding[token_emb_offset + d];
-            }
-        }
-    }
-}
-
-// Sinusoidal position encoding addition
-static void sinusoidal_position_encoding(float* embedded, int batch_size, int seq_len, int d_model) {
-    for (int b = 0; b < batch_size; b++) {
-        for (int t = 0; t < seq_len; t++) {
-            for (int d = 0; d < d_model; d++) {
-                int idx = b * seq_len * d_model + t * d_model + d;
-                float pos_encoding;
-                
-                if (d % 2 == 0) {
-                    pos_encoding = sinf(t / powf(10000.0f, (2.0f * (d / 2)) / d_model));
-                } else {
-                    pos_encoding = cosf(t / powf(10000.0f, (2.0f * ((d - 1) / 2)) / d_model));
-                }
-                
-                embedded[idx] += pos_encoding;
             }
         }
     }
@@ -181,13 +161,10 @@ void forward_pass_slm(SLM* slm, unsigned char* input_tokens) {
     token_embedding_lookup(slm->embedded_input, slm->token_embedding, input_tokens,
                           slm->batch_size, slm->seq_len, slm->d_model);
     
-    // Step 2: Add sinusoidal position encodings
-    sinusoidal_position_encoding(slm->embedded_input, slm->batch_size, slm->seq_len, slm->d_model);
-    
-    // Step 3: Forward pass through transformer
+    // Step 2: Forward pass through transformer
     forward_pass_transformer(slm->transformer, slm->embedded_input);
     
-    // Step 4: Output projection: output = transformer_output * W_output
+    // Step 3: Output projection: output = transformer_output * W_output
     cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
                 slm->batch_size * slm->seq_len, slm->vocab_size, slm->d_model,
                 1.0f, slm->transformer->mlp_layers[slm->num_layers-1]->output, slm->d_model,
@@ -217,7 +194,7 @@ void zero_gradients_slm(SLM* slm) {
 
 // Backward pass
 void backward_pass_slm(SLM* slm, unsigned char* input_tokens) {
-    // Step 4 (backward): Backward pass through output projection
+    // Step 3 (backward): Backward pass through output projection
     // grad_W_output = transformer_output^T * grad_output
     cblas_sgemm(CblasRowMajor, CblasTrans, CblasNoTrans,
                 slm->d_model, slm->vocab_size, slm->batch_size * slm->seq_len,
@@ -232,11 +209,8 @@ void backward_pass_slm(SLM* slm, unsigned char* input_tokens) {
                 slm->W_output, slm->vocab_size,
                 0.0f, slm->transformer->mlp_layers[slm->num_layers-1]->grad_output, slm->d_model);
     
-    // Step 3 (backward): Backward pass through transformer
+    // Step 2 (backward): Backward pass through transformer
     backward_pass_transformer(slm->transformer, slm->embedded_input, slm->embedded_input);
-    
-    // Step 2 (backward): Position encoding gradients pass through unchanged
-    // (no learnable parameters, gradients flow through to token embeddings)
     
     // Step 1 (backward): Token embedding gradients
     token_embedding_grad_accumulation(slm->token_embedding_grad, slm->embedded_input, input_tokens,
