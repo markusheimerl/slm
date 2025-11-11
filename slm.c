@@ -10,7 +10,7 @@ SLM* init_slm(int seq_len, int d_model, int hidden_dim, int num_layers, int batc
     slm->batch_size = batch_size;
     slm->hidden_dim = hidden_dim;
     slm->num_layers = num_layers;
-    slm->vocab_size = 256;
+    slm->vocab_size = 65536;
     
     // Initialize Adam parameters
     slm->beta1 = 0.9f;
@@ -80,7 +80,7 @@ void free_slm(SLM* slm) {
 }
 
 // Token embedding lookup
-static void token_embedding_lookup(float* embedded, float* token_embedding, unsigned char* tokens, int batch_size, int seq_len, int d_model) {
+static void token_embedding_lookup(float* embedded, float* token_embedding, unsigned short* tokens, int batch_size, int seq_len, int d_model) {
     for (int b = 0; b < batch_size; b++) {
         for (int t = 0; t < seq_len; t++) {
             int token_idx = b * seq_len + t;
@@ -96,7 +96,7 @@ static void token_embedding_lookup(float* embedded, float* token_embedding, unsi
 }
 
 // Softmax and cross-entropy loss computation
-static float softmax_cross_entropy(float* grad_logits, float* logits, unsigned char* targets, int batch_size, int seq_len, int vocab_size) {
+static float softmax_cross_entropy(float* grad_logits, float* logits, unsigned short* targets, int batch_size, int seq_len, int vocab_size) {
     float total_loss = 0.0f;
     
     for (int b = 0; b < batch_size; b++) {
@@ -140,7 +140,7 @@ static float softmax_cross_entropy(float* grad_logits, float* logits, unsigned c
 }
 
 // Token embedding gradient accumulation
-static void token_embedding_grad_accumulation(float* token_embedding_grad, float* grad_embedded, unsigned char* tokens, int batch_size, int seq_len, int d_model) {
+static void token_embedding_grad_accumulation(float* token_embedding_grad, float* grad_embedded, unsigned short* tokens, int batch_size, int seq_len, int d_model) {
     for (int b = 0; b < batch_size; b++) {
         for (int t = 0; t < seq_len; t++) {
             int token_idx = b * seq_len + t;
@@ -156,7 +156,7 @@ static void token_embedding_grad_accumulation(float* token_embedding_grad, float
 }
 
 // Forward pass
-void forward_pass_slm(SLM* slm, unsigned char* input_tokens) {
+void forward_pass_slm(SLM* slm, unsigned short* input_tokens) {
     // Step 1: Token embedding lookup
     token_embedding_lookup(slm->embedded_input, slm->token_embedding, input_tokens,
                           slm->batch_size, slm->seq_len, slm->d_model);
@@ -173,7 +173,7 @@ void forward_pass_slm(SLM* slm, unsigned char* input_tokens) {
 }
 
 // Calculate loss
-float calculate_loss_slm(SLM* slm, unsigned char* target_tokens) {
+float calculate_loss_slm(SLM* slm, unsigned short* target_tokens) {
     // Compute softmax and cross-entropy loss
     float total_loss = softmax_cross_entropy(slm->grad_output, slm->output, 
                                             target_tokens, slm->batch_size, slm->seq_len, slm->vocab_size);
@@ -193,7 +193,7 @@ void zero_gradients_slm(SLM* slm) {
 }
 
 // Backward pass
-void backward_pass_slm(SLM* slm, unsigned char* input_tokens) {
+void backward_pass_slm(SLM* slm, unsigned short* input_tokens) {
     // Step 3 (backward): Backward pass through output projection
     // grad_W_output = transformer_output^T * grad_output
     cblas_sgemm(CblasRowMajor, CblasTrans, CblasNoTrans,
