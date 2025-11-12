@@ -57,6 +57,6 @@ void zero_gradients_slm(SLM* slm);
 void backward_pass_slm(SLM* slm, unsigned short* input_tokens);
 void update_weights_slm(SLM* slm, float learning_rate, int effective_batch_size);
 void save_slm(SLM* slm, const char* filename);
-SLM* load_slm(const char* filename, int custom_batch_size);
+SLM* load_slm(const char* filename, int batch_size);
 
 #endif

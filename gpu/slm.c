@@ -342,7 +342,6 @@ static void serialize_slm(SLM* slm, FILE* file) {
     // Write dimensions
     fwrite(&slm->seq_len, sizeof(int), 1, file);
     fwrite(&slm->d_model, sizeof(int), 1, file);
-    fwrite(&slm->batch_size, sizeof(int), 1, file);
     fwrite(&slm->hidden_dim, sizeof(int), 1, file);
     fwrite(&slm->num_layers, sizeof(int), 1, file);
     fwrite(&slm->vocab_size, sizeof(int), 1, file);
@@ -390,18 +389,14 @@ static void serialize_slm(SLM* slm, FILE* file) {
 }
 
 // Deserialize SLM from a file
-static SLM* deserialize_slm(FILE* file, int custom_batch_size, cublasLtHandle_t cublaslt_handle) {
+static SLM* deserialize_slm(FILE* file, int batch_size, cublasLtHandle_t cublaslt_handle) {
     // Read dimensions
-    int seq_len, d_model, stored_batch_size, hidden_dim, num_layers, vocab_size;
+    int seq_len, d_model, hidden_dim, num_layers, vocab_size;
     fread(&seq_len, sizeof(int), 1, file);
     fread(&d_model, sizeof(int), 1, file);
-    fread(&stored_batch_size, sizeof(int), 1, file);
     fread(&hidden_dim, sizeof(int), 1, file);
     fread(&num_layers, sizeof(int), 1, file);
     fread(&vocab_size, sizeof(int), 1, file);
-    
-    // Use custom batch size if provided
-    int batch_size = (custom_batch_size > 0) ? custom_batch_size : stored_batch_size;
     
     // Initialize SLM
     SLM* slm = init_slm(seq_len, d_model, hidden_dim, num_layers, batch_size, cublaslt_handle);
@@ -467,14 +462,14 @@ void save_slm(SLM* slm, const char* filename) {
 }
 
 // Load SLM from a file
-SLM* load_slm(const char* filename, int custom_batch_size, cublasLtHandle_t cublaslt_handle) {
+SLM* load_slm(const char* filename, int batch_size, cublasLtHandle_t cublaslt_handle) {
     FILE* file = fopen(filename, "rb");
     if (!file) {
         printf("Error opening file for reading: %s\n", filename);
         return NULL;
     }
     
-    SLM* slm = deserialize_slm(file, custom_batch_size, cublaslt_handle);
+    SLM* slm = deserialize_slm(file, batch_size, cublaslt_handle);
     
     fclose(file);
     printf("Model loaded from %s\n", filename);
