@@ -1,5 +1,5 @@
-#ifndef SLM_H
-#define SLM_H
+#ifndef GPT_H
+#define GPT_H
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -36,13 +36,13 @@
 
 // cuBLASLt matrix multiplication macro
 #ifndef LT_MATMUL
-#define LT_MATMUL(slm, opA, opB, alpha, A, layA, B, layB, beta, C, layC) do { \
+#define LT_MATMUL(gpt, opA, opB, alpha, A, layA, B, layB, beta, C, layC) do { \
     cublasOperation_t _opA = opA, _opB = opB; \
-    CHECK_CUBLASLT(cublasLtMatmulDescSetAttribute(slm->matmul_desc, \
+    CHECK_CUBLASLT(cublasLtMatmulDescSetAttribute(gpt->matmul_desc, \
                    CUBLASLT_MATMUL_DESC_TRANSA, &_opA, sizeof(_opA))); \
-    CHECK_CUBLASLT(cublasLtMatmulDescSetAttribute(slm->matmul_desc, \
+    CHECK_CUBLASLT(cublasLtMatmulDescSetAttribute(gpt->matmul_desc, \
                    CUBLASLT_MATMUL_DESC_TRANSB, &_opB, sizeof(_opB))); \
-    CHECK_CUBLASLT(cublasLtMatmul(slm->cublaslt_handle, slm->matmul_desc, \
+    CHECK_CUBLASLT(cublasLtMatmul(gpt->cublaslt_handle, gpt->matmul_desc, \
                                   alpha, A, layA, B, layB, \
                                   beta, C, layC, \
                                   C, layC, NULL, NULL, 0, 0)); \
@@ -98,17 +98,17 @@ typedef struct {
     int hidden_dim;
     int num_layers;
     int vocab_size;
-} SLM;
+} GPT;
 
 // Function prototypes
-SLM* init_slm(int seq_len, int d_model, int hidden_dim, int num_layers, int batch_size, cublasLtHandle_t cublaslt_handle);
-void free_slm(SLM* slm);
-void forward_pass_slm(SLM* slm, unsigned short* d_input_tokens);
-float calculate_loss_slm(SLM* slm, unsigned short* d_target_tokens);
-void zero_gradients_slm(SLM* slm);
-void backward_pass_slm(SLM* slm, unsigned short* d_input_tokens);
-void update_weights_slm(SLM* slm, float learning_rate, int effective_batch_size);
-void save_slm(SLM* slm, const char* filename);
-SLM* load_slm(const char* filename, int batch_size, cublasLtHandle_t cublaslt_handle);
+GPT* init_gpt(int seq_len, int d_model, int hidden_dim, int num_layers, int batch_size, cublasLtHandle_t cublaslt_handle);
+void free_gpt(GPT* gpt);
+void forward_pass_gpt(GPT* gpt, unsigned short* d_input_tokens);
+float calculate_loss_gpt(GPT* gpt, unsigned short* d_target_tokens);
+void zero_gradients_gpt(GPT* gpt);
+void backward_pass_gpt(GPT* gpt, unsigned short* d_input_tokens);
+void update_weights_gpt(GPT* gpt, float learning_rate, int effective_batch_size);
+void save_gpt(GPT* gpt, const char* filename);
+GPT* load_gpt(const char* filename, int batch_size, cublasLtHandle_t cublaslt_handle);
 
 #endif

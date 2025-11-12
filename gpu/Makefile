@@ -6,11 +6,11 @@ ARCH ?= sm_86
 CUDAFLAGS = --cuda-gpu-arch=$(ARCH) -x cuda
 CUDALIBS = -L/usr/local/cuda/lib64 -lcudart -lcublasLt
 
-train.out: slm.o ../transformer/gpu/transformer.o ../transformer/attention/gpu/attention.o ../transformer/mlp/gpu/mlp.o ../data.o train.o
-	$(CC) slm.o ../transformer/gpu/transformer.o ../transformer/attention/gpu/attention.o ../transformer/mlp/gpu/mlp.o ../data.o train.o $(CUDALIBS) $(LDFLAGS) -o $@
+train.out: gpt.o ../transformer/gpu/transformer.o ../transformer/attention/gpu/attention.o ../transformer/mlp/gpu/mlp.o ../data.o train.o
+	$(CC) gpt.o ../transformer/gpu/transformer.o ../transformer/attention/gpu/attention.o ../transformer/mlp/gpu/mlp.o ../data.o train.o $(CUDALIBS) $(LDFLAGS) -o $@
 
-slm.o: slm.c slm.h
-	$(CC) $(CFLAGS) $(CUDAFLAGS) -c slm.c -o $@
+gpt.o: gpt.c gpt.h
+	$(CC) $(CFLAGS) $(CUDAFLAGS) -c gpt.c -o $@
 
 ../transformer/gpu/transformer.o:
 	$(MAKE) -C ../transformer/gpu transformer.o
@@ -24,14 +24,14 @@ slm.o: slm.c slm.h
 ../data.o: ../data.c ../data.h
 	$(CC) $(CFLAGS) $(CUDAFLAGS) -c ../data.c -o $@
 
-train.o: train.c slm.h ../data.h
+train.o: train.c gpt.h ../data.h
 	$(CC) $(CFLAGS) $(CUDAFLAGS) -c train.c -o $@
 
 run: train.out
 	@time ./train.out
 
 cont: train.out
-	@time ./train.out $$(ls -t *_slm.bin 2>/dev/null | head -n1)
+	@time ./train.out $$(ls -t *_gpt.bin 2>/dev/null | head -n1)
 
 clean:
 	rm -f *.out *.o *.csv

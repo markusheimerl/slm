@@ -1,5 +1,5 @@
-# slm
-A small language model implementation
+# gpt
+A generative pretrained transformer implementation
 
 This project implements a byte-pair-level language model using a transformer architecture. The model processes sequences of byte-pairs (16-bit tokens) rather than word tokens, learning to predict the next byte-pair given previous context.
 
@@ -14,11 +14,11 @@ The training process uses the AdamW optimizer, which enhances the standard Adam 
 The implementation uses BLAS (Basic Linear Algebra Subprograms) for efficient matrix operations, allowing the model to train effectively on modern hardware.
 
 ## How to run
-```
+```bash
 sudo apt update
 sudo apt install clang time libopenblas-dev nvidia-cuda-toolkit
-git clone --recurse-submodules https://github.com/markusheimerl/slm
-cd slm/
+git clone --recurse-submodules https://github.com/markusheimerl/gpt
+cd gpt/
 wget "https://drive.usercontent.google.com/download?confirm=t&id=1staEGnDgzu6ViHFtGNMdhOkw_u_4Jntj" -O - | gzip -d > corpus.txt
 make run -C gpu -j 4
 ```

@@ -1,5 +1,5 @@
-#ifndef SLM_H
-#define SLM_H
+#ifndef GPT_H
+#define GPT_H
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -46,17 +46,17 @@ typedef struct {
     int hidden_dim;
     int num_layers;
     int vocab_size;
-} SLM;
+} GPT;
 
 // Function prototypes
-SLM* init_slm(int seq_len, int d_model, int hidden_dim, int num_layers, int batch_size);
-void free_slm(SLM* slm);
-void forward_pass_slm(SLM* slm, unsigned short* input_tokens);
-float calculate_loss_slm(SLM* slm, unsigned short* target_tokens);
-void zero_gradients_slm(SLM* slm);
-void backward_pass_slm(SLM* slm, unsigned short* input_tokens);
-void update_weights_slm(SLM* slm, float learning_rate, int effective_batch_size);
-void save_slm(SLM* slm, const char* filename);
-SLM* load_slm(const char* filename, int batch_size);
+GPT* init_gpt(int seq_len, int d_model, int hidden_dim, int num_layers, int batch_size);
+void free_gpt(GPT* gpt);
+void forward_pass_gpt(GPT* gpt, unsigned short* input_tokens);
+float calculate_loss_gpt(GPT* gpt, unsigned short* target_tokens);
+void zero_gradients_gpt(GPT* gpt);
+void backward_pass_gpt(GPT* gpt, unsigned short* input_tokens);
+void update_weights_gpt(GPT* gpt, float learning_rate, int effective_batch_size);
+void save_gpt(GPT* gpt, const char* filename);
+GPT* load_gpt(const char* filename, int batch_size);
 
 #endif
