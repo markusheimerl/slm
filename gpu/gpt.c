@@ -59,8 +59,8 @@ GPT* init_gpt(int seq_len, int d_model, int hidden_dim, int num_layers, int batc
     CHECK_CUDA(cudaMalloc(&gpt->d_embedded_input, embedded_size * sizeof(float)));
     CHECK_CUDA(cudaMalloc(&gpt->d_output, output_size * sizeof(float)));
     
-    // Allocate device memory for backward pass buffers
-    CHECK_CUDA(cudaMalloc(&gpt->d_grad_output, output_size * sizeof(float)));
+    // Alias device memory for backward pass buffers
+    gpt->d_grad_output = gpt->d_output;
     
     // Allocate single device float for loss computation
     CHECK_CUDA(cudaMalloc(&gpt->d_loss_result, sizeof(float)));
