@@ -10,7 +10,7 @@ SLM* init_slm(int seq_len, int d_model, int hidden_dim, int num_layers, int batc
     slm->batch_size = batch_size;
     slm->hidden_dim = hidden_dim;
     slm->num_layers = num_layers;
-    slm->vocab_size = 256;
+    slm->vocab_size = 65536;
     slm->cublaslt_handle = cublaslt_handle;
     
     // Initialize Adam parameters
@@ -132,7 +132,7 @@ void free_slm(SLM* slm) {
 }
 
 // CUDA kernel for token embedding lookup
-__global__ static void token_embedding_lookup_kernel(float* embedded, float* token_embedding, unsigned char* tokens, int batch_size, int seq_len, int d_model) {
+__global__ static void token_embedding_lookup_kernel(float* embedded, float* token_embedding, unsigned short* tokens, int batch_size, int seq_len, int d_model) {
     int b = blockIdx.x;
     int t = blockIdx.y;
     int d = threadIdx.x;
@@ -147,7 +147,7 @@ __global__ static void token_embedding_lookup_kernel(float* embedded, float* tok
 }
 
 // CUDA kernel for softmax and cross-entropy loss computation
-__global__ static void softmax_cross_entropy_kernel(float* loss_result, float* grad_logits, float* logits, unsigned char* targets, int batch_size, int seq_len, int vocab_size) {
+__global__ static void softmax_cross_entropy_kernel(float* loss_result, float* grad_logits, float* logits, unsigned short* targets, int batch_size, int seq_len, int vocab_size) {
     int b = blockIdx.x;
     int t = blockIdx.y;
     
@@ -188,7 +188,7 @@ __global__ static void softmax_cross_entropy_kernel(float* loss_result, float* g
 }
 
 // CUDA kernel for token embedding gradient accumulation
-__global__ static void token_embedding_grad_kernel(float* token_embedding_grad, float* grad_embedded, unsigned char* tokens, int batch_size, int seq_len, int d_model) {
+__global__ static void token_embedding_grad_kernel(float* token_embedding_grad, float* grad_embedded, unsigned short* tokens, int batch_size, int seq_len, int d_model) {
     int b = blockIdx.x;
     int t = blockIdx.y;
     int d = threadIdx.x;
@@ -203,7 +203,7 @@ __global__ static void token_embedding_grad_kernel(float* token_embedding_grad, 
 }
 
 // Forward pass
-void forward_pass_slm(SLM* slm, unsigned char* d_input_tokens) {
+void forward_pass_slm(SLM* slm, unsigned short* d_input_tokens) {
     const float alpha = 1.0f;
     const float beta = 0.0f;
     
@@ -226,7 +226,7 @@ void forward_pass_slm(SLM* slm, unsigned char* d_input_tokens) {
 }
 
 // Calculate loss
-float calculate_loss_slm(SLM* slm, unsigned char* d_target_tokens) {
+float calculate_loss_slm(SLM* slm, unsigned short* d_target_tokens) {
     // Reset loss accumulator
     CHECK_CUDA(cudaMemset(slm->d_loss_result, 0, sizeof(float)));
     
@@ -256,7 +256,7 @@ void zero_gradients_slm(SLM* slm) {
 }
 
 // Backward pass
-void backward_pass_slm(SLM* slm, unsigned char* d_input_tokens) {
+void backward_pass_slm(SLM* slm, unsigned short* d_input_tokens) {
     const float alpha = 1.0f;
     const float beta = 0.0f;
     
