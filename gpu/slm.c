@@ -337,18 +337,11 @@ void update_weights_slm(SLM* slm, float learning_rate, int effective_batch_size)
     update_weights_transformer(slm->transformer, learning_rate, effective_batch_size);
 }
 
-// Save SLM to binary file
-void save_slm(SLM* slm, const char* filename) {
-    FILE* file = fopen(filename, "wb");
-    if (!file) {
-        printf("Error opening file for writing: %s\n", filename);
-        return;
-    }
-    
-    // Save dimensions
+// Serialize SLM to a file
+static void serialize_slm(SLM* slm, FILE* file) {
+    // Write dimensions
     fwrite(&slm->seq_len, sizeof(int), 1, file);
     fwrite(&slm->d_model, sizeof(int), 1, file);
-    fwrite(&slm->batch_size, sizeof(int), 1, file);
     fwrite(&slm->hidden_dim, sizeof(int), 1, file);
     fwrite(&slm->num_layers, sizeof(int), 1, file);
     fwrite(&slm->vocab_size, sizeof(int), 1, file);
@@ -363,10 +356,14 @@ void save_slm(SLM* slm, const char* filename) {
     CHECK_CUDA(cudaMemcpy(h_token_embedding, slm->d_token_embedding, token_emb_size * sizeof(float), cudaMemcpyDeviceToHost));
     CHECK_CUDA(cudaMemcpy(h_W_output, slm->d_W_output, output_weight_size * sizeof(float), cudaMemcpyDeviceToHost));
     
+    // Write embeddings and weights
     fwrite(h_token_embedding, sizeof(float), token_emb_size, file);
     fwrite(h_W_output, sizeof(float), output_weight_size, file);
     
-    // Save Adam state
+    free(h_token_embedding);
+    free(h_W_output);
+    
+    // Write optimizer state
     fwrite(&slm->t, sizeof(int), 1, file);
     
     float* h_token_embedding_m = (float*)malloc(token_emb_size * sizeof(float));
@@ -384,53 +381,22 @@ void save_slm(SLM* slm, const char* filename) {
     fwrite(h_W_output_m, sizeof(float), output_weight_size, file);
     fwrite(h_W_output_v, sizeof(float), output_weight_size, file);
     
-    fclose(file);
-    
-    // Save transformer
-    char transformer_filename[256];
-    char base_filename[256];
-    
-    // Remove .bin extension from filename to create base name
-    strncpy(base_filename, filename, sizeof(base_filename) - 1);
-    base_filename[sizeof(base_filename) - 1] = '\0';
-    
-    // Find and remove .bin extension if it exists
-    char* dot_pos = strrchr(base_filename, '.');
-    if (dot_pos && strcmp(dot_pos, ".bin") == 0) {
-        *dot_pos = '\0';
-    }
-    
-    snprintf(transformer_filename, sizeof(transformer_filename), "%s_transformer.bin", base_filename);
-    save_transformer(slm->transformer, transformer_filename);
-    
-    // Free temporary host memory
-    free(h_token_embedding);
-    free(h_W_output);
     free(h_token_embedding_m); free(h_token_embedding_v);
     free(h_W_output_m); free(h_W_output_v);
-
-    printf("Model saved to %s\n", filename);
+    
+    // Serialize transformer
+    serialize_transformer(slm->transformer, file);
 }
 
-// Load SLM from binary file
-SLM* load_slm(const char* filename, int custom_batch_size, cublasLtHandle_t cublaslt_handle) {
-    FILE* file = fopen(filename, "rb");
-    if (!file) {
-        printf("Error opening file for reading: %s\n", filename);
-        return NULL;
-    }
-    
+// Deserialize SLM from a file
+static SLM* deserialize_slm(FILE* file, int batch_size, cublasLtHandle_t cublaslt_handle) {
     // Read dimensions
-    int seq_len, d_model, stored_batch_size, hidden_dim, num_layers, vocab_size;
+    int seq_len, d_model, hidden_dim, num_layers, vocab_size;
     fread(&seq_len, sizeof(int), 1, file);
     fread(&d_model, sizeof(int), 1, file);
-    fread(&stored_batch_size, sizeof(int), 1, file);
     fread(&hidden_dim, sizeof(int), 1, file);
     fread(&num_layers, sizeof(int), 1, file);
     fread(&vocab_size, sizeof(int), 1, file);
-    
-    // Use custom_batch_size if provided, otherwise use stored value
-    int batch_size = (custom_batch_size > 0) ? custom_batch_size : stored_batch_size;
     
     // Initialize SLM
     SLM* slm = init_slm(seq_len, d_model, hidden_dim, num_layers, batch_size, cublaslt_handle);
@@ -448,7 +414,10 @@ SLM* load_slm(const char* filename, int custom_batch_size, cublasLtHandle_t cubl
     CHECK_CUDA(cudaMemcpy(slm->d_token_embedding, h_token_embedding, token_emb_size * sizeof(float), cudaMemcpyHostToDevice));
     CHECK_CUDA(cudaMemcpy(slm->d_W_output, h_W_output, output_weight_size * sizeof(float), cudaMemcpyHostToDevice));
     
-    // Load Adam state
+    free(h_token_embedding);
+    free(h_W_output);
+    
+    // Load optimizer state
     fread(&slm->t, sizeof(int), 1, file);
     
     float* h_token_embedding_m = (float*)malloc(token_emb_size * sizeof(float));
@@ -466,36 +435,43 @@ SLM* load_slm(const char* filename, int custom_batch_size, cublasLtHandle_t cubl
     CHECK_CUDA(cudaMemcpy(slm->d_W_output_m, h_W_output_m, output_weight_size * sizeof(float), cudaMemcpyHostToDevice));
     CHECK_CUDA(cudaMemcpy(slm->d_W_output_v, h_W_output_v, output_weight_size * sizeof(float), cudaMemcpyHostToDevice));
     
-    fclose(file);
-    
-    // Load transformer
-    char transformer_filename[256];
-    char base_filename[256];
-    
-    // Remove .bin extension from filename to create base name  
-    strncpy(base_filename, filename, sizeof(base_filename) - 1);
-    base_filename[sizeof(base_filename) - 1] = '\0';
-    
-    // Find and remove .bin extension if it exists
-    char* dot_pos = strrchr(base_filename, '.');
-    if (dot_pos && strcmp(dot_pos, ".bin") == 0) {
-        *dot_pos = '\0';
-    }
-    
-    snprintf(transformer_filename, sizeof(transformer_filename), "%s_transformer.bin", base_filename);
+    free(h_token_embedding_m); free(h_token_embedding_v);
+    free(h_W_output_m); free(h_W_output_v);
     
     // Free the initialized transformer
     free_transformer(slm->transformer);
     
-    // Load the saved transformer
-    slm->transformer = load_transformer(transformer_filename, batch_size, cublaslt_handle);
+    // Deserialize transformer
+    slm->transformer = deserialize_transformer(file, batch_size, cublaslt_handle);
     
-    // Free temporary host memory
-    free(h_token_embedding);
-    free(h_W_output);
-    free(h_token_embedding_m); free(h_token_embedding_v);
-    free(h_W_output_m); free(h_W_output_v);
+    return slm;
+}
+
+// Save SLM to a file
+void save_slm(SLM* slm, const char* filename) {
+    FILE* file = fopen(filename, "wb");
+    if (!file) {
+        printf("Error opening file for writing: %s\n", filename);
+        return;
+    }
     
+    serialize_slm(slm, file);
+    
+    fclose(file);
+    printf("Model saved to %s\n", filename);
+}
+
+// Load SLM from a file
+SLM* load_slm(const char* filename, int batch_size, cublasLtHandle_t cublaslt_handle) {
+    FILE* file = fopen(filename, "rb");
+    if (!file) {
+        printf("Error opening file for reading: %s\n", filename);
+        return NULL;
+    }
+    
+    SLM* slm = deserialize_slm(file, batch_size, cublaslt_handle);
+    
+    fclose(file);
     printf("Model loaded from %s\n", filename);
     return slm;
 }
