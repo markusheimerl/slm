@@ -4,27 +4,27 @@
 #include <time.h>
 #include <signal.h>
 #include "../data.h"
-#include "slm.h"
+#include "gpt.h"
 
-SLM* slm = NULL;
+GPT* gpt = NULL;
 
 // Signal handler to save model on Ctrl+C
 void handle_sigint(int signum) {
-    if (slm) {
+    if (gpt) {
         char filename[64];
         time_t now = time(NULL);
-        strftime(filename, sizeof(filename), "%Y%m%d_%H%M%S_slm.bin", localtime(&now));
-        save_slm(slm, filename);
+        strftime(filename, sizeof(filename), "%Y%m%d_%H%M%S_gpt.bin", localtime(&now));
+        save_gpt(gpt, filename);
     }
     exit(128 + signum);
 }
 
 // Generate text autoregressively from a prompt
-void generate_text(SLM* slm, float temperature, unsigned short* d_input_tokens, const char* bos, int gen_len) {
+void generate_text(GPT* gpt, float temperature, unsigned short* d_input_tokens, const char* bos, int gen_len) {
     if (strlen(bos) % 2 == 1) return;
     
     // Start with zero-initialized sequence
-    unsigned short* h_tokens = (unsigned short*)calloc(slm->seq_len, sizeof(unsigned short));
+    unsigned short* h_tokens = (unsigned short*)calloc(gpt->seq_len, sizeof(unsigned short));
     
     // Set beginning of sequence (prompt)
     for (int i = 0; i < (int)strlen(bos) / 2; i++) {
@@ -34,33 +34,33 @@ void generate_text(SLM* slm, float temperature, unsigned short* d_input_tokens, 
     printf("\"%s", bos);
     fflush(stdout);
     
-    float* h_logits = (float*)malloc(slm->vocab_size * sizeof(float));
+    float* h_logits = (float*)malloc(gpt->vocab_size * sizeof(float));
     
     // Generate tokens one at a time
     for (int pos = strlen(bos) / 2 - 1; pos < gen_len; pos++) {
         // Copy current sequence to device
-        CHECK_CUDA(cudaMemcpy(d_input_tokens, h_tokens, slm->seq_len * sizeof(unsigned short), cudaMemcpyHostToDevice));
+        CHECK_CUDA(cudaMemcpy(d_input_tokens, h_tokens, gpt->seq_len * sizeof(unsigned short), cudaMemcpyHostToDevice));
         
         // Forward pass to get logits
-        forward_pass_slm(slm, d_input_tokens);
+        forward_pass_gpt(gpt, d_input_tokens);
         
         // Copy logits for current position back to host
-        CHECK_CUDA(cudaMemcpy(h_logits, &slm->d_output[pos * slm->vocab_size], slm->vocab_size * sizeof(float), cudaMemcpyDeviceToHost));
+        CHECK_CUDA(cudaMemcpy(h_logits, &gpt->d_output[pos * gpt->vocab_size], gpt->vocab_size * sizeof(float), cudaMemcpyDeviceToHost));
         
         // Apply temperature scaling and find max for numerical stability
         float max_logit = -1e30f;
-        for (int v = 0; v < slm->vocab_size; v++) {
+        for (int v = 0; v < gpt->vocab_size; v++) {
             h_logits[v] /= temperature;
             if (h_logits[v] > max_logit) max_logit = h_logits[v];
         }
         
         // Compute softmax probabilities
         float sum_exp = 0.0f;
-        for (int v = 0; v < slm->vocab_size; v++) {
+        for (int v = 0; v < gpt->vocab_size; v++) {
             h_logits[v] = expf(h_logits[v] - max_logit);
             sum_exp += h_logits[v];
         }
-        for (int v = 0; v < slm->vocab_size; v++) {
+        for (int v = 0; v < gpt->vocab_size; v++) {
             h_logits[v] /= sum_exp;
         }
         
@@ -68,7 +68,7 @@ void generate_text(SLM* slm, float temperature, unsigned short* d_input_tokens, 
         float r = (float)rand() / (float)RAND_MAX;
         unsigned short next_token = 0;
         float cumsum = 0.0f;
-        for (int v = 0; v < slm->vocab_size; v++) {
+        for (int v = 0; v < gpt->vocab_size; v++) {
             cumsum += h_logits[v];
             if (r <= cumsum) {
                 next_token = v;
@@ -105,12 +105,12 @@ int main(int argc, char* argv[]) {
     
     // Initialize or load model
     if (argc > 1) {
-        slm = load_slm(argv[1], batch_size, cublaslt_handle);
+        gpt = load_gpt(argv[1], batch_size, cublaslt_handle);
     } else {
-        slm = init_slm(seq_len, d_model, hidden_dim, num_layers, batch_size, cublaslt_handle);
+        gpt = init_gpt(seq_len, d_model, hidden_dim, num_layers, batch_size, cublaslt_handle);
     }
     
-    printf("Parameters: ~%.1fM\n", (float)(slm->vocab_size * d_model + d_model * slm->vocab_size + num_layers * (4 * d_model * d_model + d_model * hidden_dim + hidden_dim * d_model)) / 1e6f);
+    printf("Parameters: ~%.1fM\n", (float)(gpt->vocab_size * d_model + d_model * gpt->vocab_size + num_layers * (4 * d_model * d_model + d_model * hidden_dim + hidden_dim * d_model)) / 1e6f);
     
     // Create shuffled indices for random sampling without replacement
     size_t total_sequences = (get_file_size("../corpus.txt") - 2) / (2 * seq_len);
@@ -138,37 +138,37 @@ int main(int argc, char* argv[]) {
             CHECK_CUDA(cudaMemcpy(d_target_tokens, &target_tokens[batch * batch_size * seq_len], batch_size * seq_len * sizeof(unsigned short), cudaMemcpyHostToDevice));
             
             // Forward pass
-            forward_pass_slm(slm, d_input_tokens);
+            forward_pass_gpt(gpt, d_input_tokens);
             
             // Calculate loss
-            float loss = calculate_loss_slm(slm, d_target_tokens);
+            float loss = calculate_loss_gpt(gpt, d_target_tokens);
             if (loss >= 12.0) raise(SIGINT);
             
             // Backward pass
-            zero_gradients_slm(slm);
-            backward_pass_slm(slm, d_input_tokens);
+            zero_gradients_gpt(gpt);
+            backward_pass_gpt(gpt, d_input_tokens);
             
             // Update weights with cosine learning rate schedule
             float lr = learning_rate * (0.5f * (1.0f + cosf(M_PI * ((float)((chunk_idx * (sequences_per_chunk / batch_size) + batch)) / (float)(total_sequences / batch_size)))));
-            update_weights_slm(slm, lr, batch_size);
+            update_weights_gpt(gpt, lr, batch_size);
             
             printf("Chunk [%zu/%zu], Batch [%d/%d], Loss: %.6f, LR: %.7f\n", chunk_idx, total_sequences / sequences_per_chunk, batch, (int)(sequences_per_chunk / batch_size), loss, lr);
         }
         
         // Generate sample text
         printf("\n--- Sample ---\n");
-        generate_text(slm, 0.9f, d_input_tokens, "The opposite of hot is", slm->seq_len);
+        generate_text(gpt, 0.9f, d_input_tokens, "The opposite of hot is", gpt->seq_len);
         printf("--- End ---\n\n");
         
         // Save checkpoint
-        save_slm(slm, "checkpoint_slm.bin");
+        save_gpt(gpt, "checkpoint_gpt.bin");
     }
     
     // Save final model with timestamp
     char filename[64];
     time_t now = time(NULL);
-    strftime(filename, sizeof(filename), "%Y%m%d_%H%M%S_slm.bin", localtime(&now));
-    save_slm(slm, filename);
+    strftime(filename, sizeof(filename), "%Y%m%d_%H%M%S_gpt.bin", localtime(&now));
+    save_gpt(gpt, filename);
     
     // Cleanup
     free(input_tokens);
@@ -176,7 +176,7 @@ int main(int argc, char* argv[]) {
     CHECK_CUDA(cudaFree(d_input_tokens));
     CHECK_CUDA(cudaFree(d_target_tokens));
     free(shuffled_indices);
-    free_slm(slm);
+    free_gpt(gpt);
     CHECK_CUBLASLT(cublasLtDestroy(cublaslt_handle));
     
     return 0;
