@@ -1,7 +1,8 @@
 name: Training
 
 on:
-  workflow_dispatch:
+  push:
+    branches: [ runners ]
 
 jobs:
   train:
