@@ -9,6 +9,24 @@ jobs:
     runs-on: ubuntu-latest
     
     steps:
+    - name: Inspect hardware
+      run: |
+        echo "=== CPU Info ==="
+        lscpu
+        echo ""
+        echo "=== CPU Count ==="
+        nproc
+        echo ""
+        echo "=== Memory ==="
+        free -h
+        echo ""
+        echo "=== Disk Space ==="
+        df -h
+        echo ""
+        echo "=== GPU Check ==="
+        lspci | grep -i vga || echo "No VGA devices found"
+        nvidia-smi 2>/dev/null || echo "No NVIDIA GPU available"
+    
     - name: Checkout code
       uses: actions/checkout@v4
       with:
@@ -21,7 +39,11 @@ jobs:
     
     - name: Download corpus
       run: |
-        wget "https://drive.usercontent.google.com/download?confirm=t&id=1staEGnDgzu6ViHFtGNMdhOkw_u_4Jntj" -O - | gzip -d > corpus.txt
+        echo "Downloading corpus..."
+        wget -q --show-progress --progress=dot:mega \
+          "https://drive.usercontent.google.com/download?confirm=t&id=1staEGnDgzu6ViHFtGNMdhOkw_u_4Jntj" \
+          -O - | gzip -d > corpus.txt
+        echo "Corpus downloaded: $(du -h corpus.txt | cut -f1)"
     
     - name: Run training
       run: make run -j 4
