@@ -12,20 +12,13 @@ jobs:
     - name: Inspect hardware
       run: |
         echo "=== CPU Info ==="
-        lscpu
-        echo ""
-        echo "=== CPU Count ==="
-        nproc
+        lscpu | grep -E "Model name|CPU\(s\)|Thread|Core"
         echo ""
         echo "=== Memory ==="
         free -h
         echo ""
         echo "=== Disk Space ==="
-        df -h
-        echo ""
-        echo "=== GPU Check ==="
-        lspci | grep -i vga || echo "No VGA devices found"
-        nvidia-smi 2>/dev/null || echo "No NVIDIA GPU available"
+        df -h | grep -E "Filesystem|/dev/root"
     
     - name: Checkout code
       uses: actions/checkout@v4
@@ -34,7 +27,7 @@ jobs:
     
     - name: Install dependencies
       run: |
-        sudo apt update
+        sudo apt update -qq
         sudo apt install -y clang time libopenblas-dev
     
     - name: Download corpus
@@ -45,13 +38,20 @@ jobs:
           -O - | gzip -d > corpus.txt
         echo "Corpus downloaded: $(du -h corpus.txt | cut -f1)"
     
-    - name: Run training
-      run: make run -j 4
+    - name: Build
+      run: make -j$(nproc)
     
-    - name: Upload model
+    - name: Run training
+      run: |
+        echo "Starting training..."
+        stdbuf -oL ./train.out 2>&1 | tee training.log
+    
+    - name: Upload artifacts
       if: always()
       uses: actions/upload-artifact@v4
       with:
-        name: trained-model
-        path: "*.bin"
+        name: training-artifacts
+        path: |
+          *.bin
+          training.log
         retention-days: 7
