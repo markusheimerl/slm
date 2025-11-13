@@ -1,0 +1,34 @@
+name: Training
+
+on:
+  workflow_dispatch:
+
+jobs:
+  train:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        submodules: recursive
+    
+    - name: Install dependencies
+      run: |
+        sudo apt update
+        sudo apt install -y clang time libopenblas-dev
+    
+    - name: Download corpus
+      run: |
+        wget "https://drive.usercontent.google.com/download?confirm=t&id=1staEGnDgzu6ViHFtGNMdhOkw_u_4Jntj" -O - | gzip -d > corpus.txt
+    
+    - name: Run training
+      run: make run -j 4
+    
+    - name: Upload model
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: trained-model
+        path: "*.bin"
+        retention-days: 7
