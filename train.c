@@ -4,6 +4,7 @@
 #include <time.h>
 #include <signal.h>
 #include <cblas.h>
+#include <omp.h>
 #include "data.h"
 #include "gpt.h"
 
@@ -86,7 +87,8 @@ void generate_text(GPT* gpt, float temperature, const char* bos, int gen_len) {
 int main(int argc, char* argv[]) {
     srand(time(NULL));
     signal(SIGINT, handle_sigint);
-    openblas_set_num_threads(4);
+    omp_set_num_threads(4);
+    openblas_set_num_threads(1);
 
     // Model hyperparameters
     const int seq_len = 512;
@@ -110,7 +112,7 @@ int main(int argc, char* argv[]) {
     size_t* shuffled_indices = create_shuffled_indices(total_sequences);
     
     // Allocate buffers for sequences
-    size_t sequences_per_chunk = (128 * 1024 * 1024) / (seq_len * 2);
+    size_t sequences_per_chunk = (1 * 1024 * 1024) / (seq_len * 2);
     unsigned short* input_tokens = (unsigned short*)malloc(sequences_per_chunk * seq_len * sizeof(unsigned short));
     unsigned short* target_tokens = (unsigned short*)malloc(sequences_per_chunk * seq_len * sizeof(unsigned short));
     
