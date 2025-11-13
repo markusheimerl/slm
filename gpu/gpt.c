@@ -123,7 +123,7 @@ void free_gpt(GPT* gpt) {
     cudaFree(gpt->d_W_output); cudaFree(gpt->d_W_output_grad);
     cudaFree(gpt->d_W_output_m); cudaFree(gpt->d_W_output_v);
     cudaFree(gpt->d_embedded_input);
-    cudaFree(gpt->d_output); cudaFree(gpt->d_grad_output);
+    cudaFree(gpt->d_output);
     
     // Free loss computation buffer
     cudaFree(gpt->d_loss_result);

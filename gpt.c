@@ -42,8 +42,8 @@ GPT* init_gpt(int seq_len, int d_model, int hidden_dim, int num_layers, int batc
     gpt->embedded_input = (float*)malloc(embedded_size * sizeof(float));
     gpt->output = (float*)malloc(output_size * sizeof(float));
     
-    // Allocate memory for backward pass buffers
-    gpt->grad_output = (float*)malloc(output_size * sizeof(float));
+    // Alias memory for backward pass buffers
+    gpt->grad_output = gpt->output;
     
     // Initialize token embeddings
     float token_scale = 1.0f / sqrtf(d_model);
@@ -74,7 +74,7 @@ void free_gpt(GPT* gpt) {
     free(gpt->W_output); free(gpt->W_output_grad);
     free(gpt->W_output_m); free(gpt->W_output_v);
     free(gpt->embedded_input);
-    free(gpt->output); free(gpt->grad_output);
+    free(gpt->output);
     
     free(gpt);
 }
