@@ -1,6 +1,6 @@
 CC = clang
 CFLAGS = -O3 -march=native -ffast-math -fopenmp -Wall -Wextra
-LDFLAGS = -lopenblas -lm -flto -fopenmp
+LDFLAGS = -lopenblas -lm -fopenmp -flto
 
 train.out: gpt.o transformer/transformer.o transformer/attention/attention.o transformer/mlp/mlp.o data.o train.o
 	$(CC) gpt.o transformer/transformer.o transformer/attention/attention.o transformer/mlp/mlp.o data.o train.o $(LDFLAGS) -o $@
