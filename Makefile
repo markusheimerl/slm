@@ -5,6 +5,9 @@ LDFLAGS = -lopenblas -lm -flto
 train.out: gpt.o transformer/transformer.o transformer/attention/attention.o transformer/mlp/mlp.o data.o train.o
 	$(CC) gpt.o transformer/transformer.o transformer/attention/attention.o transformer/mlp/mlp.o data.o train.o $(LDFLAGS) -o $@
 
+eval.out: gpt.o transformer/transformer.o transformer/attention/attention.o transformer/mlp/mlp.o eval.o
+	$(CC) gpt.o transformer/transformer.o transformer/attention/attention.o transformer/mlp/mlp.o eval.o $(LDFLAGS) -o $@
+
 gpt.o: gpt.c gpt.h
 	$(CC) $(CFLAGS) -c gpt.c -o $@
 
@@ -23,11 +26,17 @@ data.o: data.c data.h
 train.o: train.c gpt.h data.h
 	$(CC) $(CFLAGS) -c train.c -o $@
 
+eval.o: eval.c gpt.h
+	$(CC) $(CFLAGS) -c eval.c -o $@
+
 run: train.out
 	@time ./train.out
 
 cont: train.out
 	@time ./train.out $$(ls -t *_gpt.bin 2>/dev/null | head -n1)
+
+eval: eval.out
+	@time ./eval.out $$(ls -t *_gpt.bin 2>/dev/null | head -n1)
 
 clean:
 	rm -f *.out *.o *.csv
