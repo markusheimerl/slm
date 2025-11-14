@@ -188,9 +188,7 @@ int main(int argc, char* argv[]) {
         total++;
         if (best == label) correct++;
         
-        if (total % 100 == 0) {
-            printf("Progress: %d examples, accuracy: %.2f%%\n", total, 100.0f * correct / total);
-        }
+        printf("Progress: %d examples, accuracy: %.2f%%\n", total, 100.0f * correct / total);
     }
     
     fclose(f);
