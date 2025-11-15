@@ -19,10 +19,10 @@ GPT* init_gpt(int seq_len, int d_model, int hidden_dim, int num_layers, int batc
     gpt->t = 0;
     gpt->weight_decay = 0.01f;
     
-    int token_emb_size = gpt->vocab_size * d_model;
-    int output_weight_size = d_model * gpt->vocab_size;
-    int embedded_size = batch_size * seq_len * d_model;
-    int output_size = batch_size * seq_len * gpt->vocab_size;
+    unsigned int token_emb_size = gpt->vocab_size * d_model;
+    unsigned int output_weight_size = d_model * gpt->vocab_size;
+    unsigned int embedded_size = batch_size * seq_len * d_model;
+    unsigned int output_size = batch_size * seq_len * gpt->vocab_size;
     
     // Allocate memory for embeddings and gradients
     gpt->token_embedding = (float*)malloc(token_emb_size * sizeof(float));
@@ -48,12 +48,12 @@ GPT* init_gpt(int seq_len, int d_model, int hidden_dim, int num_layers, int batc
     // Initialize token embeddings
     float token_scale = 1.0f / sqrtf(d_model);
     
-    for (int i = 0; i < token_emb_size; i++) {
+    for (unsigned int i = 0; i < token_emb_size; i++) {
         gpt->token_embedding[i] = ((float)rand() / (float)RAND_MAX * 2.0f - 1.0f) * token_scale;
     }
     
     // Initialize output weights
-    for (int i = 0; i < output_weight_size; i++) {
+    for (unsigned int i = 0; i < output_weight_size; i++) {
         gpt->W_output[i] = ((float)rand() / (float)RAND_MAX * 2.0f - 1.0f) * token_scale;
     }
     
