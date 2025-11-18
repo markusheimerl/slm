@@ -10,21 +10,13 @@ size_t get_file_size(const char* filename) {
     return size;
 }
 
-// Create shuffled sequence indices for entire corpus
+// Create sequential indices for entire corpus (no shuffling)
 size_t* create_shuffled_indices(size_t total_sequences) {
     size_t* indices = (size_t*)malloc(total_sequences * sizeof(size_t));
     
-    // Initialize sequentially
+    // Initialize sequentially (no shuffling)
     for (size_t i = 0; i < total_sequences; i++) {
         indices[i] = i;
-    }
-    
-    // Fisher-Yates shuffle
-    for (size_t i = total_sequences - 1; i > 0; i--) {
-        size_t j = rand() % (i + 1);
-        size_t temp = indices[i];
-        indices[i] = indices[j];
-        indices[j] = temp;
     }
     
     return indices;
