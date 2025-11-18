@@ -21,54 +21,113 @@ void handle_sigint(int signum) {
 }
 
 // Generate text autoregressively from a prompt
-void generate_text(GPT* gpt, float temperature, const char* bos, int gen_len) {
-    if (strlen(bos) % 2 == 1) return;
+void generate_text(GPT* gpt, float temperature, int top_k, const char* bos, int gen_len) {
+    size_t bos_len = strlen(bos);
+    char* prompt = NULL;
+    
+    // Handle odd-length prompt by appending a space
+    if (bos_len % 2 == 1) {
+        prompt = (char*)malloc(bos_len + 2);
+        strcpy(prompt, bos);
+        strcat(prompt, " ");
+        bos_len++;
+    } else {
+        prompt = (char*)malloc(bos_len + 1);
+        strcpy(prompt, bos);
+    }
     
     // Start with zero-initialized sequence
     unsigned short* tokens = (unsigned short*)calloc(gpt->seq_len, sizeof(unsigned short));
     
     // Set beginning of sequence (prompt)
-    for (int i = 0; i < (int)strlen(bos) / 2; i++) {
-        tokens[i] = (unsigned short)((unsigned char)bos[i * 2] << 8) | (unsigned char)bos[i * 2 + 1];
+    for (int i = 0; i < (int)bos_len / 2; i++) {
+        tokens[i] = (unsigned short)((unsigned char)prompt[i * 2] << 8) | (unsigned char)prompt[i * 2 + 1];
     }
     
-    printf("\"%s", bos);
+    printf("\"%s", prompt);
     fflush(stdout);
     
     float* logits = (float*)malloc(gpt->vocab_size * sizeof(float));
     
     // Generate tokens one at a time
-    for (int pos = strlen(bos) / 2 - 1; pos < gen_len; pos++) {
+    for (int pos = bos_len / 2 - 1; pos < gen_len; pos++) {
         // Forward pass to get logits
         forward_pass_gpt(gpt, tokens);
         memcpy(logits, &gpt->output[pos * gpt->vocab_size], gpt->vocab_size * sizeof(float));
         
-        // Apply temperature scaling and find max for numerical stability
-        float max_logit = -1e30f;
-        for (int v = 0; v < gpt->vocab_size; v++) {
-            logits[v] /= temperature;
-            if (logits[v] > max_logit) max_logit = logits[v];
-        }
-        
-        // Compute softmax probabilities
-        float sum_exp = 0.0f;
-        for (int v = 0; v < gpt->vocab_size; v++) {
-            logits[v] = expf(logits[v] - max_logit);
-            sum_exp += logits[v];
-        }
-        for (int v = 0; v < gpt->vocab_size; v++) {
-            logits[v] /= sum_exp;
-        }
-        
-        // Sample from the distribution
-        float r = (float)rand() / (float)RAND_MAX;
         unsigned short next_token = 0;
-        float cumsum = 0.0f;
-        for (int v = 0; v < gpt->vocab_size; v++) {
-            cumsum += logits[v];
-            if (r <= cumsum) {
-                next_token = v;
-                break;
+        
+        if (temperature == 0.0f) {
+            // Greedy decoding: select argmax
+            float max_logit = -1e30f;
+            for (int v = 0; v < gpt->vocab_size; v++) {
+                if (logits[v] > max_logit) {
+                    max_logit = logits[v];
+                    next_token = v;
+                }
+            }
+        } else {
+            // Apply temperature scaling
+            for (int v = 0; v < gpt->vocab_size; v++) {
+                logits[v] /= temperature;
+            }
+            
+            // Apply top-k filtering if specified
+            if (top_k > 0 && top_k < gpt->vocab_size) {
+                // Find the k-th largest value using partial selection
+                float* logits_copy = (float*)malloc(gpt->vocab_size * sizeof(float));
+                memcpy(logits_copy, logits, gpt->vocab_size * sizeof(float));
+                
+                // Find top k values (simple selection, not fully sorted)
+                for (int i = 0; i < top_k; i++) {
+                    int max_idx = i;
+                    for (int j = i + 1; j < gpt->vocab_size; j++) {
+                        if (logits_copy[j] > logits_copy[max_idx]) {
+                            max_idx = j;
+                        }
+                    }
+                    // Swap
+                    float tmp = logits_copy[i];
+                    logits_copy[i] = logits_copy[max_idx];
+                    logits_copy[max_idx] = tmp;
+                }
+                
+                float threshold = logits_copy[top_k - 1];
+                free(logits_copy);
+                
+                // Set logits below threshold to very negative
+                for (int v = 0; v < gpt->vocab_size; v++) {
+                    if (logits[v] < threshold) {
+                        logits[v] = -1e30f;
+                    }
+                }
+            }
+            
+            // Find max for numerical stability
+            float max_logit = -1e30f;
+            for (int v = 0; v < gpt->vocab_size; v++) {
+                if (logits[v] > max_logit) max_logit = logits[v];
+            }
+            
+            // Compute softmax probabilities
+            float sum_exp = 0.0f;
+            for (int v = 0; v < gpt->vocab_size; v++) {
+                logits[v] = expf(logits[v] - max_logit);
+                sum_exp += logits[v];
+            }
+            for (int v = 0; v < gpt->vocab_size; v++) {
+                logits[v] /= sum_exp;
+            }
+            
+            // Sample from the distribution
+            float r = (float)rand() / (float)RAND_MAX;
+            float cumsum = 0.0f;
+            for (int v = 0; v < gpt->vocab_size; v++) {
+                cumsum += logits[v];
+                if (r <= cumsum) {
+                    next_token = v;
+                    break;
+                }
             }
         }
         
@@ -79,6 +138,7 @@ void generate_text(GPT* gpt, float temperature, const char* bos, int gen_len) {
     }
     
     printf("\"\n");
+    free(prompt);
     free(tokens);
     free(logits);
 }
@@ -94,7 +154,7 @@ int main(int argc, char* argv[]) {
     const int batch_size = 16;
     const int d_model = num_layers * 64;
     const int hidden_dim = d_model * 4;
-    const float learning_rate = 0.00003f;
+    const float learning_rate = 0.0003f;
     
     // Initialize or load model
     if (argc > 1) {
@@ -133,7 +193,7 @@ int main(int argc, char* argv[]) {
             backward_pass_gpt(gpt, &input_tokens[batch * batch_size * seq_len]);
             
             // Update weights with cosine learning rate schedule
-            float lr = learning_rate * (0.5f * (1.0f + cosf(M_PI * ((float)((chunk_idx * (sequences_per_chunk / batch_size) + batch)) / (float)(total_sequences / batch_size)))));
+            float lr = learning_rate * fminf(1.0f, (float)(chunk_idx * (sequences_per_chunk / batch_size) + batch) / 1000.0f) * (0.5f * (1.0f + cosf(M_PI * ((float)(chunk_idx * (sequences_per_chunk / batch_size) + batch) / (float)(total_sequences / batch_size)))));
             update_weights_gpt(gpt, lr, batch_size);
             
             printf("Chunk [%zu/%zu], Batch [%d/%d], Loss: %.6f, LR: %.7f\n", chunk_idx, total_sequences / sequences_per_chunk, batch, (int)(sequences_per_chunk / batch_size), loss, lr);
@@ -141,7 +201,7 @@ int main(int argc, char* argv[]) {
         
         // Generate sample text
         printf("\n--- Sample ---\n");
-        generate_text(gpt, 0.9f, "The opposite of hot is", gpt->seq_len);
+        generate_text(gpt, 0.0f, 50, "<|bos|>The opposite of hot is", gpt->seq_len);
         printf("--- End ---\n\n");
         
         // Save checkpoint
