@@ -244,6 +244,24 @@ float calculate_loss_gpt(GPT* gpt, unsigned short* d_target_tokens) {
     return total_loss / (gpt->batch_size * gpt->seq_len);
 }
 
+// Reset optimizer state
+void reset_optimizer_gpt(GPT* gpt) {
+    int token_emb_size = gpt->vocab_size * gpt->d_model;
+    int output_weight_size = gpt->d_model * gpt->vocab_size;
+    
+    // Reset Adam moment estimates to zero on device
+    CHECK_CUDA(cudaMemset(gpt->d_token_embedding_m, 0, token_emb_size * sizeof(float)));
+    CHECK_CUDA(cudaMemset(gpt->d_token_embedding_v, 0, token_emb_size * sizeof(float)));
+    CHECK_CUDA(cudaMemset(gpt->d_W_output_m, 0, output_weight_size * sizeof(float)));
+    CHECK_CUDA(cudaMemset(gpt->d_W_output_v, 0, output_weight_size * sizeof(float)));
+    
+    // Reset time step
+    gpt->t = 0;
+    
+    // Reset transformer optimizer state
+    reset_optimizer_transformer(gpt->transformer);
+}
+
 // Zero gradients
 void zero_gradients_gpt(GPT* gpt) {
     int token_emb_size = gpt->vocab_size * gpt->d_model;

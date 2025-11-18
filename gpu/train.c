@@ -101,11 +101,12 @@ int main(int argc, char* argv[]) {
     const int batch_size = 30;
     const int d_model = num_layers * 64;
     const int hidden_dim = d_model * 4;
-    const float learning_rate = 0.00003f;
+    const float learning_rate = 0.00001f;
     
     // Initialize or load model
     if (argc > 1) {
         gpt = load_gpt(argv[1], batch_size, cublaslt_handle);
+        reset_optimizer_gpt(gpt);
     } else {
         gpt = init_gpt(seq_len, d_model, hidden_dim, num_layers, batch_size, cublaslt_handle);
     }
