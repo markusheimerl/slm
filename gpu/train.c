@@ -161,7 +161,7 @@ int main(int argc, char* argv[]) {
     const int batch_size = 30;
     const int d_model = num_layers * 64;
     const int hidden_dim = d_model * 4;
-    const float learning_rate = 0.0003f;
+    const float learning_rate = 0.00004f;
     
     // Initialize or load model
     if (argc > 1) {
@@ -209,7 +209,7 @@ int main(int argc, char* argv[]) {
             backward_pass_gpt(gpt, d_input_tokens);
             
             // Update weights with cosine learning rate schedule
-            float lr = learning_rate * fminf(1.0f, (float)(chunk_idx * (sequences_per_chunk / batch_size) + batch) / 1000.0f) * (0.5f * (1.0f + cosf(M_PI * ((float)(chunk_idx * (sequences_per_chunk / batch_size) + batch) / (float)(total_sequences / batch_size)))));
+            float lr = learning_rate * fminf(1.0f, (float)(chunk_idx * (sequences_per_chunk / batch_size) + batch) / 100.0f) * (0.5f * (1.0f + cosf(M_PI * ((float)(chunk_idx * (sequences_per_chunk / batch_size) + batch) / (float)(total_sequences / batch_size)))));
             update_weights_gpt(gpt, lr, batch_size);
             
             printf("Chunk [%zu/%zu], Batch [%d/%d], Loss: %.6f, LR: %.7f\n", chunk_idx, total_sequences / sequences_per_chunk, batch, (int)(sequences_per_chunk / batch_size), loss, lr);
@@ -217,7 +217,13 @@ int main(int argc, char* argv[]) {
         
         // Generate sample text
         printf("\n--- Sample ---\n");
-        generate_text(gpt, 0.0f, 50, d_input_tokens, "<|bos|>The opposite of hot is", gpt->seq_len);
+        generate_text(gpt, 0.0f, 50, d_input_tokens, "<|bos|>The capital of France is", 64);
+        generate_text(gpt, 0.0f, 50, d_input_tokens, "<|bos|>The chemical symbol of gold is", 64);
+        generate_text(gpt, 0.0f, 50, d_input_tokens, "<|bos|>If yesterday was Friday, then tomorrow will be", 64);
+        generate_text(gpt, 0.0f, 50, d_input_tokens, "<|bos|>The opposite of hot is", 64);
+        generate_text(gpt, 0.0f, 50, d_input_tokens, "<|bos|>The planets of the solar system are:", 64);
+        generate_text(gpt, 0.0f, 50, d_input_tokens, "<|bos|>My favorite color is", 64);
+        generate_text(gpt, 0.0f, 50, d_input_tokens, "<|bos|>If 5*x + 3 = 13, then x is", 64);
         printf("--- End ---\n\n");
         
         // Save checkpoint
