@@ -101,7 +101,7 @@ int main(int argc, char* argv[]) {
     const int batch_size = 30;
     const int d_model = num_layers * 64;
     const int hidden_dim = d_model * 4;
-    const float learning_rate = 0.00003f;
+    const float learning_rate = 0.0003f;
     
     // Initialize or load model
     if (argc > 1) {
@@ -149,7 +149,7 @@ int main(int argc, char* argv[]) {
             backward_pass_gpt(gpt, d_input_tokens);
             
             // Update weights with cosine learning rate schedule
-            float lr = learning_rate * (0.5f * (1.0f + cosf(M_PI * ((float)((chunk_idx * (sequences_per_chunk / batch_size) + batch)) / (float)(total_sequences / batch_size)))));
+            float lr = learning_rate * fminf(1.0f, (float)(chunk_idx * (sequences_per_chunk / batch_size) + batch) / 100.0f) * (0.5f * (1.0f + cosf(M_PI * ((float)(chunk_idx * (sequences_per_chunk / batch_size) + batch) / (float)(total_sequences / batch_size)))));
             update_weights_gpt(gpt, lr, batch_size);
             
             printf("Chunk [%zu/%zu], Batch [%d/%d], Loss: %.6f, LR: %.7f\n", chunk_idx, total_sequences / sequences_per_chunk, batch, (int)(sequences_per_chunk / batch_size), loss, lr);
