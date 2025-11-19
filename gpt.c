@@ -218,7 +218,7 @@ void backward_pass_gpt(GPT* gpt, unsigned short* input_tokens) {
 }
 
 // Update weights
-void update_weights_gpt(GPT* gpt, float learning_rate, int effective_batch_size) {
+void update_weights_gpt(GPT* gpt, float learning_rate, int batch_size) {
     gpt->t++;
     
     float beta1_t = powf(gpt->beta1, gpt->t);
@@ -230,7 +230,7 @@ void update_weights_gpt(GPT* gpt, float learning_rate, int effective_batch_size)
     
     // Update token embeddings
     for (int i = 0; i < token_emb_size; i++) {
-        float grad = gpt->token_embedding_grad[i] / effective_batch_size;
+        float grad = gpt->token_embedding_grad[i] / batch_size;
         
         // m = β₁m + (1-β₁)(∂L/∂W)
         gpt->token_embedding_m[i] = gpt->beta1 * gpt->token_embedding_m[i] + (1.0f - gpt->beta1) * grad;
@@ -244,7 +244,7 @@ void update_weights_gpt(GPT* gpt, float learning_rate, int effective_batch_size)
     
     // Update output weights
     for (int i = 0; i < output_weight_size; i++) {
-        float grad = gpt->W_output_grad[i] / effective_batch_size;
+        float grad = gpt->W_output_grad[i] / batch_size;
         
         // m = β₁m + (1-β₁)(∂L/∂W)
         gpt->W_output_m[i] = gpt->beta1 * gpt->W_output_m[i] + (1.0f - gpt->beta1) * grad;
@@ -257,7 +257,7 @@ void update_weights_gpt(GPT* gpt, float learning_rate, int effective_batch_size)
     }
     
     // Update transformer weights
-    update_weights_transformer(gpt->transformer, learning_rate, effective_batch_size);
+    update_weights_transformer(gpt->transformer, learning_rate, batch_size);
 }
 
 // Serialize GPT to a file

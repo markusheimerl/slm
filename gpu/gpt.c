@@ -306,7 +306,7 @@ __global__ static void adamw_update_kernel_gpt(float* weight, float* grad, float
 }
 
 // Update weights
-void update_weights_gpt(GPT* gpt, float learning_rate, int effective_batch_size) {
+void update_weights_gpt(GPT* gpt, float learning_rate, int batch_size) {
     gpt->t++;
     
     float beta1_t = powf(gpt->beta1, gpt->t);
@@ -321,7 +321,7 @@ void update_weights_gpt(GPT* gpt, float learning_rate, int effective_batch_size)
     adamw_update_kernel_gpt<<<token_blocks, block_size>>>(
         gpt->d_token_embedding, gpt->d_token_embedding_grad, gpt->d_token_embedding_m, gpt->d_token_embedding_v,
         gpt->beta1, gpt->beta2, gpt->epsilon, learning_rate, gpt->weight_decay,
-        alpha_t, token_emb_size, effective_batch_size
+        alpha_t, token_emb_size, batch_size
     );
     
     // Update output weights
@@ -330,11 +330,11 @@ void update_weights_gpt(GPT* gpt, float learning_rate, int effective_batch_size)
     adamw_update_kernel_gpt<<<output_blocks, block_size>>>(
         gpt->d_W_output, gpt->d_W_output_grad, gpt->d_W_output_m, gpt->d_W_output_v,
         gpt->beta1, gpt->beta2, gpt->epsilon, learning_rate, gpt->weight_decay,
-        alpha_t, output_weight_size, effective_batch_size
+        alpha_t, output_weight_size, batch_size
     );
     
     // Update transformer weights
-    update_weights_transformer(gpt->transformer, learning_rate, effective_batch_size);
+    update_weights_transformer(gpt->transformer, learning_rate, batch_size);
 }
 
 // Serialize GPT to a file

@@ -26,7 +26,7 @@ void generate_text(GPT* gpt, float temperature, unsigned short* d_input_tokens, 
     
     // Set beginning of sequence (prompt)
     for (int i = 0; i < (int)(strlen(bos) + 1) / 2; i++) {
-        h_tokens[i] = (unsigned short)((unsigned char)bos[i * 2] << 8) | (i * 2 + 1 < strlen(bos) ? (unsigned char)bos[i * 2 + 1] : ' ');
+        h_tokens[i] = (unsigned short)((unsigned char)bos[i * 2] << 8) | ((unsigned long)(i * 2 + 1) < strlen(bos) ? (unsigned char)bos[i * 2 + 1] : ' ');
     }
     
     printf("\"%s%s", bos, (strlen(bos) % 2) ? " " : "");
