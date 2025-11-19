@@ -99,7 +99,7 @@ int main(int argc, char* argv[]) {
     const int batch_size = 30;
     const int d_model = num_layers * 64;
     const int hidden_dim = d_model * 4;
-    const float learning_rate = 0.00003f;
+    const float learning_rate = 0.00004f;
     
     // Initialize or load model
     if (argc > 1) {
@@ -158,7 +158,8 @@ int main(int argc, char* argv[]) {
                    loss, lr, ((end.tv_sec - start.tv_sec) * 1000.0 + (end.tv_nsec - start.tv_nsec) / 1e6),
                    (batch_size * seq_len) / ((end.tv_sec - start.tv_sec) + (end.tv_nsec - start.tv_nsec) / 1e9),
                    loss / log(2.0) / 2.0,
-                   ((double)total_sequences / batch_size - (chunk_idx * (sequences_per_chunk / batch_size) + batch) - 1) * ((end.tv_sec - start.tv_sec) + (end.tv_nsec - start.tv_nsec) / 1e9) / 3600.0);        }
+                   ((double)total_sequences / batch_size - (chunk_idx * (sequences_per_chunk / batch_size) + batch) - 1) * ((end.tv_sec - start.tv_sec) + (end.tv_nsec - start.tv_nsec) / 1e9) / 3600.0);
+        }
         
         // Generate sample text
         printf("\n--- Sample ---\n");
