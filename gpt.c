@@ -263,7 +263,6 @@ void update_weights_gpt(GPT* gpt, float learning_rate, int effective_batch_size)
 // Serialize GPT to a file
 static void serialize_gpt(GPT* gpt, FILE* file) {
     // Write dimensions
-    fwrite(&gpt->seq_len, sizeof(int), 1, file);
     fwrite(&gpt->d_model, sizeof(int), 1, file);
     fwrite(&gpt->hidden_dim, sizeof(int), 1, file);
     fwrite(&gpt->num_layers, sizeof(int), 1, file);
@@ -288,10 +287,9 @@ static void serialize_gpt(GPT* gpt, FILE* file) {
 }
 
 // Deserialize GPT from a file
-static GPT* deserialize_gpt(FILE* file, int batch_size) {
+static GPT* deserialize_gpt(FILE* file, int batch_size, int seq_len) {
     // Read dimensions
-    int seq_len, d_model, hidden_dim, num_layers, vocab_size;
-    fread(&seq_len, sizeof(int), 1, file);
+    int d_model, hidden_dim, num_layers, vocab_size;
     fread(&d_model, sizeof(int), 1, file);
     fread(&hidden_dim, sizeof(int), 1, file);
     fread(&num_layers, sizeof(int), 1, file);
@@ -318,7 +316,7 @@ static GPT* deserialize_gpt(FILE* file, int batch_size) {
     free_transformer(gpt->transformer);
     
     // Deserialize transformer
-    gpt->transformer = deserialize_transformer(file, batch_size);
+    gpt->transformer = deserialize_transformer(file, batch_size, seq_len);
     
     return gpt;
 }
@@ -338,14 +336,14 @@ void save_gpt(GPT* gpt, const char* filename) {
 }
 
 // Load GPT from a file
-GPT* load_gpt(const char* filename, int batch_size) {
+GPT* load_gpt(const char* filename, int batch_size, int seq_len) {
     FILE* file = fopen(filename, "rb");
     if (!file) {
         printf("Error opening file for reading: %s\n", filename);
         return NULL;
     }
     
-    GPT* gpt = deserialize_gpt(file, batch_size);
+    GPT* gpt = deserialize_gpt(file, batch_size, seq_len);
     
     fclose(file);
     printf("Model loaded from %s\n", filename);

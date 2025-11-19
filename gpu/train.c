@@ -105,7 +105,7 @@ int main(int argc, char* argv[]) {
     
     // Initialize or load model
     if (argc > 1) {
-        gpt = load_gpt(argv[1], batch_size, cublaslt_handle);
+        gpt = load_gpt(argv[1], batch_size, seq_len, cublaslt_handle);
     } else {
         gpt = init_gpt(seq_len, d_model, hidden_dim, num_layers, batch_size, cublaslt_handle);
     }

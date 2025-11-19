@@ -109,6 +109,6 @@ void zero_gradients_gpt(GPT* gpt);
 void backward_pass_gpt(GPT* gpt, unsigned short* d_input_tokens);
 void update_weights_gpt(GPT* gpt, float learning_rate, int effective_batch_size);
 void save_gpt(GPT* gpt, const char* filename);
-GPT* load_gpt(const char* filename, int batch_size, cublasLtHandle_t cublaslt_handle);
+GPT* load_gpt(const char* filename, int batch_size, int seq_len, cublasLtHandle_t cublaslt_handle);
 
 #endif
