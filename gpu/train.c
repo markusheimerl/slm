@@ -155,7 +155,13 @@ int main(int argc, char* argv[]) {
         
         // Generate sample text
         printf("\n--- Sample ---\n");
-        generate_text(gpt, 0.9f, d_input_tokens, "The opposite of hot is", gpt->seq_len);
+        generate_text(gpt, 0.001f, d_input_tokens, "<|bos|>The capital of France is", 64);
+        generate_text(gpt, 0.001f, d_input_tokens, "<|bos|>The chemical symbol of gold is", 64);
+        generate_text(gpt, 0.001f, d_input_tokens, "<|bos|>If yesterday was Friday, then tomorrow will be", 64);
+        generate_text(gpt, 0.001f, d_input_tokens, "<|bos|>The opposite of hot is", 64);
+        generate_text(gpt, 0.001f, d_input_tokens, "<|bos|>The planets of the solar system are:", 64);
+        generate_text(gpt, 0.001f, d_input_tokens, "<|bos|>My favorite color is", 64);
+        generate_text(gpt, 0.001f, d_input_tokens, "<|bos|>If 5*x + 3 = 13, then x is", 64);
         printf("--- End ---\n\n");
         
         // Save checkpoint
