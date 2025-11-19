@@ -21,23 +21,21 @@ void handle_sigint(int signum) {
 
 // Generate text autoregressively from a prompt
 void generate_text(GPT* gpt, float temperature, unsigned short* d_input_tokens, const char* bos, int gen_len) {
-    if (strlen(bos) % 2 == 1) return;
-    
     // Start with zero-initialized sequence
     unsigned short* h_tokens = (unsigned short*)calloc(gpt->seq_len, sizeof(unsigned short));
     
     // Set beginning of sequence (prompt)
-    for (int i = 0; i < (int)strlen(bos) / 2; i++) {
-        h_tokens[i] = (unsigned short)((unsigned char)bos[i * 2] << 8) | (unsigned char)bos[i * 2 + 1];
+    for (int i = 0; i < (int)(strlen(bos) + 1) / 2; i++) {
+        h_tokens[i] = (unsigned short)((unsigned char)bos[i * 2] << 8) | (i * 2 + 1 < strlen(bos) ? (unsigned char)bos[i * 2 + 1] : ' ');
     }
     
-    printf("\"%s", bos);
+    printf("\"%s%s", bos, (strlen(bos) % 2) ? " " : "");
     fflush(stdout);
     
     float* h_logits = (float*)malloc(gpt->vocab_size * sizeof(float));
     
     // Generate tokens one at a time
-    for (int pos = strlen(bos) / 2 - 1; pos < gen_len; pos++) {
+    for (int pos = (strlen(bos) + 1) / 2 - 1; pos < gen_len; pos++) {
         // Copy current sequence to device
         CHECK_CUDA(cudaMemcpy(d_input_tokens, h_tokens, gpt->seq_len * sizeof(unsigned short), cudaMemcpyHostToDevice));
         
