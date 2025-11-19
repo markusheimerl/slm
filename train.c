@@ -119,6 +119,8 @@ int main(int argc, char* argv[]) {
         
         // Train on all batches in this chunk
         for (int batch = 0; batch < (int)(sequences_per_chunk / batch_size); batch++) {
+            struct timespec start; clock_gettime(CLOCK_MONOTONIC, &start);
+            
             // Forward pass
             forward_pass_gpt(gpt, &input_tokens[batch * batch_size * seq_len]);
             
@@ -134,7 +136,8 @@ int main(int argc, char* argv[]) {
             float lr = learning_rate * (0.5f * (1.0f + cosf(M_PI * ((float)((chunk_idx * (sequences_per_chunk / batch_size) + batch)) / (float)(total_sequences / batch_size)))));
             update_weights_gpt(gpt, lr, batch_size);
             
-            printf("Chunk [%zu/%zu], Batch [%d/%d], Loss: %.6f, LR: %.7f\n", chunk_idx, total_sequences / sequences_per_chunk, batch, (int)(sequences_per_chunk / batch_size), loss, lr);
+            struct timespec end; clock_gettime(CLOCK_MONOTONIC, &end);
+            printf("Chunk [%zu/%zu], Batch [%d/%d], Loss: %.6f, LR: %.7f, dt: %.2fms\n", chunk_idx, total_sequences / sequences_per_chunk, batch, (int)(sequences_per_chunk / batch_size), loss, lr, ((end.tv_sec - start.tv_sec) * 1000.0 + (end.tv_nsec - start.tv_nsec) / 1e6));
         }
         
         // Generate sample text
