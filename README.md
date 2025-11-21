@@ -19,6 +19,6 @@ sudo apt update
 sudo apt install clang time libopenblas-dev nvidia-cuda-toolkit
 git clone --recurse-submodules https://github.com/markusheimerl/gpt
 cd gpt/
-wget "https://drive.usercontent.google.com/download?confirm=t&id=1Q6R0D7ZV4xbaeLAcPGQYhnq7_CHDKHs0" -O - | gzip -d > corpus.txt
+wget "https://drive.usercontent.google.com/download?confirm=t&id=1JAf_dsVqccdZkhrL0iQihN8vH1nSrXaS" -O - | gzip -d > corpus.txt
 make run -C gpu -j 4
 ```
