@@ -4,9 +4,11 @@
 #include <time.h>
 #include <signal.h>
 #include "../data.h"
+#include "../bpe/bpe.h"
 #include "gpt.h"
 
 GPT* gpt = NULL;
+Tokenizer* tokenizer = NULL;
 
 // Signal handler to save model on Ctrl+C
 void handle_sigint(int signum) {
@@ -20,45 +22,59 @@ void handle_sigint(int signum) {
 }
 
 // Generate text autoregressively from a prompt
-void generate_text(GPT* gpt, float temperature, unsigned short* d_input_tokens, const char* bos, int gen_len) {
-    // Start with zero-initialized sequence
-    unsigned short* h_tokens = (unsigned short*)calloc(gpt->seq_len, sizeof(unsigned short));
+void generate_text(GPT* gpt, Tokenizer* tok, float temperature, const char* prompt, int gen_len) {
+    // Encode prompt
+    GArray* prompt_tokens = encode_tokenizer(tok, prompt);
     
-    // Set beginning of sequence (prompt)
-    for (int i = 0; i < (int)(strlen(bos) + 1) / 2; i++) {
-        h_tokens[i] = (unsigned short)((unsigned char)bos[i * 2] << 8) | ((unsigned long)(i * 2 + 1) < strlen(bos) ? (unsigned char)bos[i * 2 + 1] : ' ');
+    // Start with zero-initialized sequence
+    unsigned short* tokens = (unsigned short*)calloc(gpt->seq_len, sizeof(unsigned short));
+    
+    // Copy prompt tokens
+    for (guint i = 0; i < prompt_tokens->len && i < (guint)gpt->seq_len; i++) {
+        tokens[i] = (unsigned short)g_array_index(prompt_tokens, uint32_t, i);
     }
     
-    printf("\"%s%s", bos, (strlen(bos) % 2) ? " " : "");
+    int start_pos = (int)prompt_tokens->len;
+    g_array_free(prompt_tokens, TRUE);
+    
+    printf("\"%s", prompt);
     fflush(stdout);
     
+    // Allocate device memory for single sequence
+    unsigned short *d_tokens;
+    CHECK_CUDA(cudaMalloc(&d_tokens, gpt->seq_len * sizeof(unsigned short)));
     float* h_logits = (float*)malloc(gpt->vocab_size * sizeof(float));
     
     // Generate tokens one at a time
-    for (int pos = (strlen(bos) + 1) / 2 - 1; pos < gen_len; pos++) {
+    for (int pos = start_pos - 1; pos < gen_len && pos + 1 < gpt->seq_len; pos++) {
         // Copy current sequence to device
-        CHECK_CUDA(cudaMemcpy(d_input_tokens, h_tokens, gpt->seq_len * sizeof(unsigned short), cudaMemcpyHostToDevice));
+        CHECK_CUDA(cudaMemcpy(d_tokens, tokens, gpt->seq_len * sizeof(unsigned short), cudaMemcpyHostToDevice));
         
-        // Forward pass to get logits
-        forward_pass_gpt(gpt, d_input_tokens);
+        // Forward pass to get logits (batch_size=1 for generation)
+        GPT* gen_gpt = gpt;  // Use existing model but with batch_size context
+        int saved_batch = gen_gpt->batch_size;
+        gen_gpt->batch_size = 1;  // Temporarily set to 1 for generation
+        forward_pass_gpt(gen_gpt, d_tokens);
+        gen_gpt->batch_size = saved_batch;  // Restore
         
         // Copy logits for current position back to host
-        CHECK_CUDA(cudaMemcpy(h_logits, &gpt->d_output[pos * gpt->vocab_size], gpt->vocab_size * sizeof(float), cudaMemcpyDeviceToHost));
+        CHECK_CUDA(cudaMemcpy(h_logits, &gen_gpt->d_output[pos * gen_gpt->vocab_size], 
+                              gen_gpt->vocab_size * sizeof(float), cudaMemcpyDeviceToHost));
         
         // Apply temperature scaling and find max for numerical stability
         float max_logit = -1e30f;
-        for (int v = 0; v < gpt->vocab_size; v++) {
+        for (int v = 0; v < gen_gpt->vocab_size; v++) {
             h_logits[v] /= temperature;
             if (h_logits[v] > max_logit) max_logit = h_logits[v];
         }
         
         // Compute softmax probabilities
         float sum_exp = 0.0f;
-        for (int v = 0; v < gpt->vocab_size; v++) {
+        for (int v = 0; v < gen_gpt->vocab_size; v++) {
             h_logits[v] = expf(h_logits[v] - max_logit);
             sum_exp += h_logits[v];
         }
-        for (int v = 0; v < gpt->vocab_size; v++) {
+        for (int v = 0; v < gen_gpt->vocab_size; v++) {
             h_logits[v] /= sum_exp;
         }
         
@@ -66,7 +82,7 @@ void generate_text(GPT* gpt, float temperature, unsigned short* d_input_tokens, 
         float r = (float)rand() / (float)RAND_MAX;
         unsigned short next_token = 0;
         float cumsum = 0.0f;
-        for (int v = 0; v < gpt->vocab_size; v++) {
+        for (int v = 0; v < gen_gpt->vocab_size; v++) {
             cumsum += h_logits[v];
             if (r <= cumsum) {
                 next_token = v;
@@ -75,14 +91,78 @@ void generate_text(GPT* gpt, float temperature, unsigned short* d_input_tokens, 
         }
         
         // Add sampled token to sequence
-        h_tokens[pos + 1] = next_token;
-        printf("%c%c", (char)(next_token >> 8), (char)(next_token & 0xFF));
+        tokens[pos + 1] = next_token;
+        
+        // Decode and print just this token
+        GArray* single_token = g_array_new(FALSE, FALSE, sizeof(uint32_t));
+        uint32_t tok_val = (uint32_t)next_token;
+        g_array_append_val(single_token, tok_val);
+        gchar* decoded = decode_tokenizer(tok, single_token);
+        printf("%s", decoded);
         fflush(stdout);
+        g_free(decoded);
+        g_array_free(single_token, TRUE);
     }
     
     printf("\"\n");
-    free(h_tokens);
+    CHECK_CUDA(cudaFree(d_tokens));
     free(h_logits);
+    free(tokens);
+}
+
+// Tokenize corpus and save to binary file
+void tokenize_corpus(Tokenizer* tok, const char* input_file, const char* output_file) {
+    printf("Tokenizing corpus...\n");
+    
+    FILE* in = fopen(input_file, "r");
+    if (!in) {
+        g_error("Cannot open input file: %s", input_file);
+    }
+    
+    FILE* out = fopen(output_file, "wb");
+    if (!out) {
+        fclose(in);
+        g_error("Cannot open output file: %s", output_file);
+    }
+    
+    char* line = NULL;
+    size_t line_cap = 0;
+    ssize_t line_len;
+    size_t total_tokens = 0;
+    size_t line_count = 0;
+    
+    while ((line_len = getline(&line, &line_cap, in)) != -1) {
+        if (line_len > 0 && line[line_len-1] == '\n') {
+            line[line_len-1] = '\0';
+            line_len--;
+        }
+        
+        if (line_len == 0) continue;
+        
+        GArray* tokens = encode_tokenizer(tok, line);
+        
+        // Write tokens as unsigned short
+        for (guint i = 0; i < tokens->len; i++) {
+            uint32_t token = g_array_index(tokens, uint32_t, i);
+            unsigned short token_short = (unsigned short)token;
+            fwrite(&token_short, sizeof(unsigned short), 1, out);
+        }
+        
+        total_tokens += tokens->len;
+        line_count++;
+        
+        if (line_count % 10000 == 0) {
+            printf("  Processed %zu lines, %zu tokens\n", line_count, total_tokens);
+        }
+        
+        g_array_free(tokens, TRUE);
+    }
+    
+    free(line);
+    fclose(in);
+    fclose(out);
+    
+    printf("Tokenization complete: %zu lines, %zu tokens\n", line_count, total_tokens);
 }
 
 int main(int argc, char* argv[]) {
@@ -101,21 +181,53 @@ int main(int argc, char* argv[]) {
     const int hidden_dim = d_model * 4;
     const float learning_rate = 0.00004f;
     
+    // Initialize tokenizer
+    const char* tokenizer_file = "../bpe/tokenizer.bin";
+    const char* corpus_file = "../corpus.txt";
+    const char* tokenized_corpus = "tokenized_corpus.bin";
+    
+    tokenizer = init_tokenizer();
+    
+    // Load or train tokenizer
+    FILE* tok_check = fopen(tokenizer_file, "rb");
+    if (tok_check) {
+        fclose(tok_check);
+        load_tokenizer(tokenizer, tokenizer_file);
+    } else {
+        printf("Training tokenizer...\n");
+        train_tokenizer(tokenizer, corpus_file, 65536, 1ULL * 1024 * 1024 * 1024);
+        save_tokenizer(tokenizer, tokenizer_file);
+    }
+    
+    // Get vocab size from tokenizer
+    int vocab_size = 256 + g_hash_table_size(tokenizer->merges);
+    printf("Vocabulary size: %d\n", vocab_size);
+    
+    // Tokenize corpus if needed
+    FILE* corpus_check = fopen(tokenized_corpus, "rb");
+    if (!corpus_check) {
+        tokenize_corpus(tokenizer, corpus_file, tokenized_corpus);
+    } else {
+        fclose(corpus_check);
+        printf("Using existing tokenized corpus\n");
+    }
+    
     // Initialize or load model
     if (argc > 1) {
         gpt = load_gpt(argv[1], batch_size, seq_len, cublaslt_handle);
     } else {
-        gpt = init_gpt(seq_len, d_model, hidden_dim, num_layers, batch_size, cublaslt_handle);
+        gpt = init_gpt(seq_len, d_model, hidden_dim, num_layers, batch_size, vocab_size, cublaslt_handle);
     }
     
-    printf("Parameters: ~%.1fM\n", (float)(gpt->vocab_size * d_model + d_model * gpt->vocab_size + num_layers * (4 * d_model * d_model + d_model * hidden_dim + hidden_dim * d_model)) / 1e6f);
+    printf("Parameters: ~%.1fM\n", (float)(vocab_size * d_model + d_model * vocab_size + num_layers * (4 * d_model * d_model + d_model * hidden_dim + hidden_dim * d_model)) / 1e6f);
     
     // Create shuffled indices for random sampling without replacement
-    size_t total_sequences = (get_file_size("../corpus.txt") - 2) / (2 * seq_len);
+    size_t total_tokens = get_file_size(tokenized_corpus) / sizeof(unsigned short);
+    size_t total_sequences = (total_tokens - 1) / seq_len;
     size_t* shuffled_indices = create_shuffled_indices(total_sequences);
     
     // Allocate host buffers for sequences
-    size_t sequences_per_chunk = (128 * 1024 * 1024) / (seq_len * 2);
+    size_t sequences_per_chunk = (128 * 1024 * 1024) / (seq_len * sizeof(unsigned short));
     unsigned short* input_tokens = (unsigned short*)malloc(sequences_per_chunk * seq_len * sizeof(unsigned short));
     unsigned short* target_tokens = (unsigned short*)malloc(sequences_per_chunk * seq_len * sizeof(unsigned short));
     
@@ -127,7 +239,7 @@ int main(int argc, char* argv[]) {
     // Training loop: process corpus in chunks with random sampling
     for (size_t chunk_idx = 0; chunk_idx < total_sequences / sequences_per_chunk; chunk_idx++) {
         // Sample next chunk of sequences from shuffled corpus
-        sample_sequences("../corpus.txt", &shuffled_indices[chunk_idx * sequences_per_chunk], seq_len, input_tokens, target_tokens, sequences_per_chunk);
+        sample_sequences(tokenized_corpus, &shuffled_indices[chunk_idx * sequences_per_chunk], seq_len, input_tokens, target_tokens, sequences_per_chunk);
         
         // Train on all batches in this chunk
         for (int batch = 0; batch < (int)(sequences_per_chunk / batch_size); batch++) {
@@ -163,13 +275,13 @@ int main(int argc, char* argv[]) {
         
         // Generate sample text
         printf("\n--- Sample ---\n");
-        generate_text(gpt, 0.001f, d_input_tokens, "<|bos|>The capital of France is", 64);
-        generate_text(gpt, 0.001f, d_input_tokens, "<|bos|>The chemical symbol of gold is", 64);
-        generate_text(gpt, 0.001f, d_input_tokens, "<|bos|>If yesterday was Friday, then tomorrow will be", 64);
-        generate_text(gpt, 0.001f, d_input_tokens, "<|bos|>The opposite of hot is", 64);
-        generate_text(gpt, 0.001f, d_input_tokens, "<|bos|>The planets of the solar system are:", 64);
-        generate_text(gpt, 0.001f, d_input_tokens, "<|bos|>My favorite color is", 64);
-        generate_text(gpt, 0.001f, d_input_tokens, "<|bos|>If 5*x + 3 = 13, then x is", 64);
+        generate_text(gpt, tokenizer, 0.7f, "<|bos|>The capital of France is", 64);
+        generate_text(gpt, tokenizer, 0.7f, "<|bos|>The chemical symbol of gold is", 64);
+        generate_text(gpt, tokenizer, 0.7f, "<|bos|>If yesterday was Friday, then tomorrow will be", 64);
+        generate_text(gpt, tokenizer, 0.7f, "<|bos|>The opposite of hot is", 64);
+        generate_text(gpt, tokenizer, 0.7f, "<|bos|>The planets of the solar system are:", 64);
+        generate_text(gpt, tokenizer, 0.7f, "<|bos|>My favorite color is", 64);
+        generate_text(gpt, tokenizer, 0.7f, "<|bos|>If 5*x + 3 = 13, then x is", 64);
         printf("--- End ---\n\n");
         
         // Save checkpoint
@@ -189,6 +301,7 @@ int main(int argc, char* argv[]) {
     CHECK_CUDA(cudaFree(d_target_tokens));
     free(shuffled_indices);
     free_gpt(gpt);
+    free_tokenizer(tokenizer);
     CHECK_CUBLASLT(cublasLtDestroy(cublaslt_handle));
     
     return 0;

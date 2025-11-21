@@ -35,16 +35,16 @@ void sample_sequences(const char* filename, size_t* indices, int seq_len, unsign
     FILE* f = fopen(filename, "rb");
     if (!f) return;
     
-    unsigned char* buffer = (unsigned char*)malloc((seq_len + 1) * 2 * sizeof(unsigned char));
+    unsigned short* buffer = (unsigned short*)malloc((seq_len + 1) * sizeof(unsigned short));
     
     for (size_t i = 0; i < num_sequences; i++) {
-        fseek(f, indices[i] * seq_len * 2, SEEK_SET);
+        fseek(f, indices[i] * seq_len * sizeof(unsigned short), SEEK_SET);
         
-        if (fread(buffer, 1, (seq_len + 1) * 2, f) < (size_t)((seq_len + 1) * 2)) break;
+        if (fread(buffer, sizeof(unsigned short), seq_len + 1, f) < (size_t)(seq_len + 1)) break;
         
         for (int j = 0; j < seq_len; j++) {
-            input_tokens[i * seq_len + j] = (unsigned short)((buffer[j * 2] << 8) | buffer[j * 2 + 1]);
-            target_tokens[i * seq_len + j] = (unsigned short)((buffer[(j + 1) * 2] << 8) | buffer[(j + 1) * 2 + 1]);
+            input_tokens[i * seq_len + j] = buffer[j];
+            target_tokens[i * seq_len + j] = buffer[j + 1];
         }
     }
     

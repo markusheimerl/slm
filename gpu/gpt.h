@@ -101,7 +101,7 @@ typedef struct {
 } GPT;
 
 // Function prototypes
-GPT* init_gpt(int seq_len, int d_model, int hidden_dim, int num_layers, int batch_size, cublasLtHandle_t cublaslt_handle);
+GPT* init_gpt(int seq_len, int d_model, int hidden_dim, int num_layers, int batch_size, int vocab_size, cublasLtHandle_t cublaslt_handle);
 void free_gpt(GPT* gpt);
 void forward_pass_gpt(GPT* gpt, unsigned short* d_input_tokens);
 float calculate_loss_gpt(GPT* gpt, unsigned short* d_target_tokens);

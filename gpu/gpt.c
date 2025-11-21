@@ -1,7 +1,7 @@
 #include "gpt.h"
 
 // Initialize the GPT
-GPT* init_gpt(int seq_len, int d_model, int hidden_dim, int num_layers, int batch_size, cublasLtHandle_t cublaslt_handle) {
+GPT* init_gpt(int seq_len, int d_model, int hidden_dim, int num_layers, int batch_size, int vocab_size, cublasLtHandle_t cublaslt_handle) {
     GPT* gpt = (GPT*)malloc(sizeof(GPT));
     
     // Store dimensions
@@ -10,7 +10,7 @@ GPT* init_gpt(int seq_len, int d_model, int hidden_dim, int num_layers, int batc
     gpt->batch_size = batch_size;
     gpt->hidden_dim = hidden_dim;
     gpt->num_layers = num_layers;
-    gpt->vocab_size = 65536;
+    gpt->vocab_size = vocab_size;
     gpt->cublaslt_handle = cublaslt_handle;
     
     // Initialize Adam parameters
@@ -415,7 +415,7 @@ static GPT* deserialize_gpt(FILE* file, int batch_size, int seq_len, cublasLtHan
     fread(&vocab_size, sizeof(int), 1, file);
     
     // Initialize GPT
-    GPT* gpt = init_gpt(seq_len, d_model, hidden_dim, num_layers, batch_size, cublaslt_handle);
+    GPT* gpt = init_gpt(seq_len, d_model, hidden_dim, num_layers, batch_size, vocab_size, cublaslt_handle);
     
     int token_emb_size = vocab_size * d_model;
     int output_weight_size = d_model * vocab_size;
