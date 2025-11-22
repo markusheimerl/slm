@@ -111,7 +111,7 @@ int main(int argc, char* argv[]) {
     printf("Parameters: ~%.1fM\n", (float)(gpt->vocab_size * d_model + d_model * gpt->vocab_size + num_layers * (4 * d_model * d_model + d_model * hidden_dim + hidden_dim * d_model)) / 1e6f);
     
     // Create shuffled indices for random sampling without replacement
-    size_t total_sequences = (get_file_size("../corpus.txt") - 2) / (2 * seq_len);
+    size_t total_sequences = (get_file_size("../bpe/corpus_tokenized.bin") - 2) / (2 * seq_len);
     size_t* shuffled_indices = create_shuffled_indices(total_sequences);
     
     // Allocate host buffers for sequences
@@ -127,7 +127,7 @@ int main(int argc, char* argv[]) {
     // Training loop: process corpus in chunks with random sampling
     for (size_t chunk_idx = 0; chunk_idx < total_sequences / sequences_per_chunk; chunk_idx++) {
         // Sample next chunk of sequences from shuffled corpus
-        sample_sequences("../corpus.txt", &shuffled_indices[chunk_idx * sequences_per_chunk], seq_len, input_tokens, target_tokens, sequences_per_chunk);
+        sample_sequences("../bpe/corpus_tokenized.bin", &shuffled_indices[chunk_idx * sequences_per_chunk], seq_len, input_tokens, target_tokens, sequences_per_chunk);
         
         // Train on all batches in this chunk
         for (int batch = 0; batch < (int)(sequences_per_chunk / batch_size); batch++) {
@@ -157,7 +157,7 @@ int main(int argc, char* argv[]) {
                    chunk_idx, total_sequences / sequences_per_chunk, batch, (int)(sequences_per_chunk / batch_size),
                    loss, lr, ((end.tv_sec - start.tv_sec) * 1000.0 + (end.tv_nsec - start.tv_nsec) / 1e6),
                    (batch_size * seq_len) / ((end.tv_sec - start.tv_sec) + (end.tv_nsec - start.tv_nsec) / 1e9),
-                   loss / log(2.0) / 2.0,
+                   loss / log(2.0) / 4.8,
                    ((double)total_sequences / batch_size - (chunk_idx * (sequences_per_chunk / batch_size) + batch) - 1) * ((end.tv_sec - start.tv_sec) + (end.tv_nsec - start.tv_nsec) / 1e9) / 3600.0);
         }
         
