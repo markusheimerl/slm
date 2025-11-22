@@ -8,6 +8,17 @@
 
 GPT* gpt = NULL;
 
+// Pre-tokenized samples from encode_samples
+unsigned short sample_0[] = {440, 659, 439, 456, 3389, 281, 4351, 308}; // "<|bos|>The capital of France is"
+unsigned short sample_1[] = {440, 659, 439, 456, 2739, 3775, 281, 3864, 308}; // "<|bos|>The chemical symbol of gold is"
+unsigned short sample_2[] = {440, 659, 439, 1611, 15740, 427, 9282, 44, 934, 14093, 512, 307}; // "<|bos|>If yesterday was Friday, then tomorrow will be"
+unsigned short sample_3[] = {440, 659, 439, 456, 6228, 281, 3251, 308}; // "<|bos|>The opposite of hot is"
+unsigned short sample_4[] = {440, 659, 439, 456, 8694, 281, 261, 3218, 800, 355, 58}; // "<|bos|>The planets of the solar system are:"
+unsigned short sample_5[] = {440, 659, 439, 5936, 6969, 2640, 308}; // "<|bos|>My favorite color is"
+unsigned short sample_6[] = {440, 659, 439, 1611, 32, 53, 49203, 1110, 32, 51, 686, 32, 1633, 44, 934, 1601, 308}; // "<|bos|>If 5*x + 3 = 13, then x is"
+
+int sample_lengths[] = {8, 9, 12, 8, 11, 7, 17};
+
 // Signal handler to save model on Ctrl+C
 void handle_sigint(int signum) {
     if (gpt) {
@@ -19,23 +30,20 @@ void handle_sigint(int signum) {
     exit(128 + signum);
 }
 
-// Generate text autoregressively from a prompt
-void generate_text(GPT* gpt, float temperature, unsigned short* d_input_tokens, const char* bos, int gen_len) {
+// Generate text autoregressively from pre-tokenized prompt and save to file
+void generate_and_save_tokens(GPT* gpt, float temperature, unsigned short* d_input_tokens, unsigned short* prompt_tokens, int prompt_len, int gen_len, const char* output_file) {
     // Start with zero-initialized sequence
     unsigned short* h_tokens = (unsigned short*)calloc(gpt->seq_len, sizeof(unsigned short));
     
-    // Set beginning of sequence (prompt)
-    for (int i = 0; i < (int)(strlen(bos) + 1) / 2; i++) {
-        h_tokens[i] = (unsigned short)((unsigned char)bos[i * 2] << 8) | ((unsigned long)(i * 2 + 1) < strlen(bos) ? (unsigned char)bos[i * 2 + 1] : ' ');
+    // Copy prompt tokens
+    for (int i = 0; i < prompt_len; i++) {
+        h_tokens[i] = prompt_tokens[i];
     }
-    
-    printf("\"%s%s", bos, (strlen(bos) % 2) ? " " : "");
-    fflush(stdout);
     
     float* h_logits = (float*)malloc(gpt->vocab_size * sizeof(float));
     
     // Generate tokens one at a time
-    for (int pos = (strlen(bos) + 1) / 2 - 1; pos < gen_len; pos++) {
+    for (int pos = prompt_len - 1; pos < gen_len; pos++) {
         // Copy current sequence to device
         CHECK_CUDA(cudaMemcpy(d_input_tokens, h_tokens, gpt->seq_len * sizeof(unsigned short), cudaMemcpyHostToDevice));
         
@@ -76,11 +84,16 @@ void generate_text(GPT* gpt, float temperature, unsigned short* d_input_tokens, 
         
         // Add sampled token to sequence
         h_tokens[pos + 1] = next_token;
-        printf("%c%c", (char)(next_token >> 8), (char)(next_token & 0xFF));
-        fflush(stdout);
     }
     
-    printf("\"\n");
+    // Save the complete sequence to file (append mode)
+    FILE* f = fopen(output_file, "ab");
+    if (f) {
+        // Write the complete sequence (prompt + generated tokens)
+        fwrite(h_tokens, sizeof(unsigned short), gen_len + 1, f);
+        fclose(f);
+    }
+    
     free(h_tokens);
     free(h_logits);
 }
@@ -124,6 +137,10 @@ int main(int argc, char* argv[]) {
     CHECK_CUDA(cudaMalloc(&d_input_tokens, batch_size * seq_len * sizeof(unsigned short)));
     CHECK_CUDA(cudaMalloc(&d_target_tokens, batch_size * seq_len * sizeof(unsigned short)));
     
+    // Array of sample pointers for easy iteration
+    unsigned short* samples[] = {sample_0, sample_1, sample_2, sample_3, sample_4, sample_5, sample_6};
+    int num_samples = 7;
+    
     // Training loop: process corpus in chunks with random sampling
     for (size_t chunk_idx = 0; chunk_idx < total_sequences / sequences_per_chunk; chunk_idx++) {
         // Sample next chunk of sequences from shuffled corpus
@@ -161,16 +178,13 @@ int main(int argc, char* argv[]) {
                    ((double)total_sequences / batch_size - (chunk_idx * (sequences_per_chunk / batch_size) + batch) - 1) * ((end.tv_sec - start.tv_sec) + (end.tv_nsec - start.tv_nsec) / 1e9) / 3600.0);
         }
         
-        // Generate sample text
-        printf("\n--- Sample ---\n");
-        generate_text(gpt, 0.001f, d_input_tokens, "<|bos|>The capital of France is", 64);
-        generate_text(gpt, 0.001f, d_input_tokens, "<|bos|>The chemical symbol of gold is", 64);
-        generate_text(gpt, 0.001f, d_input_tokens, "<|bos|>If yesterday was Friday, then tomorrow will be", 64);
-        generate_text(gpt, 0.001f, d_input_tokens, "<|bos|>The opposite of hot is", 64);
-        generate_text(gpt, 0.001f, d_input_tokens, "<|bos|>The planets of the solar system are:", 64);
-        generate_text(gpt, 0.001f, d_input_tokens, "<|bos|>My favorite color is", 64);
-        generate_text(gpt, 0.001f, d_input_tokens, "<|bos|>If 5*x + 3 = 13, then x is", 64);
-        printf("--- End ---\n\n");
+        // Generate sample sequences and save tokens to file
+        printf("\n--- Generating samples ---\n");
+        for (int i = 0; i < num_samples; i++) {
+            generate_and_save_tokens(gpt, 0.001f, d_input_tokens, samples[i], sample_lengths[i], 32, "generated_samples_tokenized.bin");
+            printf("Sample %d generated\n", i);
+        }
+        printf("--- Samples saved to generated_samples_tokenized.bin ---\n\n");
         
         // Save checkpoint
         save_gpt(gpt, "checkpoint_gpt.bin");
