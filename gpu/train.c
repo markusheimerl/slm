@@ -14,7 +14,7 @@ void handle_sigint(int signum) {
         char filename[64];
         time_t now = time(NULL);
         strftime(filename, sizeof(filename), "%Y%m%d_%H%M%S_gpt.bin", localtime(&now));
-        //save_gpt(gpt, filename);
+        save_gpt(gpt, filename);
     }
     exit(128 + signum);
 }
