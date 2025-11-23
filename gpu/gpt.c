@@ -135,7 +135,7 @@ void free_gpt(GPT* gpt) {
 __global__ static void token_embedding_lookup_kernel(float* embedded, float* token_embedding, unsigned short* tokens, int batch_size, int seq_len, int d_model) {
     int b = blockIdx.x;
     int t = blockIdx.y;
-    int d = threadIdx.x;
+    int d = blockIdx.z * blockDim.x + threadIdx.x;
     
     if (b >= batch_size || t >= seq_len || d >= d_model) return;
     
@@ -191,7 +191,7 @@ __global__ static void softmax_cross_entropy_kernel(float* loss_result, float* g
 __global__ static void token_embedding_grad_kernel(float* token_embedding_grad, float* grad_embedded, unsigned short* tokens, int batch_size, int seq_len, int d_model) {
     int b = blockIdx.x;
     int t = blockIdx.y;
-    int d = threadIdx.x;
+    int d = blockIdx.z * blockDim.x + threadIdx.x;
     
     if (b >= batch_size || t >= seq_len || d >= d_model) return;
     
@@ -208,8 +208,10 @@ void forward_pass_gpt(GPT* gpt, unsigned short* d_input_tokens) {
     const float beta = 0.0f;
     
     // Step 1: Token embedding lookup
-    dim3 grid_emb(gpt->batch_size, gpt->seq_len);
-    dim3 block_emb(gpt->d_model);
+    int threads = (gpt->d_model < 1024) ? gpt->d_model : 1024;
+    int blocks_d = (gpt->d_model + threads - 1) / threads;
+    dim3 grid_emb(gpt->batch_size, gpt->seq_len, blocks_d);
+    dim3 block_emb(threads);
     token_embedding_lookup_kernel<<<grid_emb, block_emb>>>(
         gpt->d_embedded_input, gpt->d_token_embedding, d_input_tokens,
         gpt->batch_size, gpt->seq_len, gpt->d_model
@@ -277,8 +279,10 @@ void backward_pass_gpt(GPT* gpt, unsigned short* d_input_tokens) {
     backward_pass_transformer(gpt->transformer, gpt->d_embedded_input, gpt->d_embedded_input);
     
     // Step 1 (backward): Token embedding gradients
-    dim3 grid_emb(gpt->batch_size, gpt->seq_len);
-    dim3 block_emb(gpt->d_model);
+    int threads = (gpt->d_model < 1024) ? gpt->d_model : 1024;
+    int blocks_d = (gpt->d_model + threads - 1) / threads;
+    dim3 grid_emb(gpt->batch_size, gpt->seq_len, blocks_d);
+    dim3 block_emb(threads);
     
     token_embedding_grad_kernel<<<grid_emb, block_emb>>>(
         gpt->d_token_embedding_grad, gpt->d_embedded_input, d_input_tokens,
