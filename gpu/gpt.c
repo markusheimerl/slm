@@ -45,21 +45,21 @@ GPT* init_gpt(int seq_len, int d_model, int hidden_dim, int num_layers, int batc
         h_W_output[i] = __float2half(h_W_output_float[i]);
     }
     
-    // Allocate device memory for embeddings and gradients
+    // Allocate device memory for embeddings and gradients (FP16)
     CHECK_CUDA(cudaMalloc(&gpt->d_token_embedding, token_emb_size * sizeof(half)));
     CHECK_CUDA(cudaMalloc(&gpt->d_token_embedding_grad, token_emb_size * sizeof(half)));
     
-    // Allocate device memory for output weights and gradients
+    // Allocate device memory for output weights and gradients (FP16)
     CHECK_CUDA(cudaMalloc(&gpt->d_W_output, output_weight_size * sizeof(half)));
     CHECK_CUDA(cudaMalloc(&gpt->d_W_output_grad, output_weight_size * sizeof(half)));
     
-    // Allocate device memory for Adam parameters
-    CHECK_CUDA(cudaMalloc(&gpt->d_token_embedding_m, token_emb_size * sizeof(half)));
-    CHECK_CUDA(cudaMalloc(&gpt->d_token_embedding_v, token_emb_size * sizeof(half)));
-    CHECK_CUDA(cudaMalloc(&gpt->d_W_output_m, output_weight_size * sizeof(half)));
-    CHECK_CUDA(cudaMalloc(&gpt->d_W_output_v, output_weight_size * sizeof(half)));
+    // Allocate device memory for Adam parameters (FP32)
+    CHECK_CUDA(cudaMalloc(&gpt->d_token_embedding_m, token_emb_size * sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&gpt->d_token_embedding_v, token_emb_size * sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&gpt->d_W_output_m, output_weight_size * sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&gpt->d_W_output_v, output_weight_size * sizeof(float)));
     
-    // Allocate device memory for forward pass buffers
+    // Allocate device memory for forward pass buffers (FP16)
     CHECK_CUDA(cudaMalloc(&gpt->d_embedded_input, embedded_size * sizeof(half)));
     CHECK_CUDA(cudaMalloc(&gpt->d_output, output_size * sizeof(half)));
     
@@ -74,10 +74,10 @@ GPT* init_gpt(int seq_len, int d_model, int hidden_dim, int num_layers, int batc
     CHECK_CUDA(cudaMemcpy(gpt->d_W_output, h_W_output, output_weight_size * sizeof(half), cudaMemcpyHostToDevice));
     
     // Initialize Adam parameters to zero
-    CHECK_CUDA(cudaMemset(gpt->d_token_embedding_m, 0, token_emb_size * sizeof(half)));
-    CHECK_CUDA(cudaMemset(gpt->d_token_embedding_v, 0, token_emb_size * sizeof(half)));
-    CHECK_CUDA(cudaMemset(gpt->d_W_output_m, 0, output_weight_size * sizeof(half)));
-    CHECK_CUDA(cudaMemset(gpt->d_W_output_v, 0, output_weight_size * sizeof(half)));
+    CHECK_CUDA(cudaMemset(gpt->d_token_embedding_m, 0, token_emb_size * sizeof(float)));
+    CHECK_CUDA(cudaMemset(gpt->d_token_embedding_v, 0, token_emb_size * sizeof(float)));
+    CHECK_CUDA(cudaMemset(gpt->d_W_output_m, 0, output_weight_size * sizeof(float)));
+    CHECK_CUDA(cudaMemset(gpt->d_W_output_v, 0, output_weight_size * sizeof(float)));
     
     // Initialize transformer
     gpt->transformer = init_transformer(seq_len, d_model, hidden_dim, num_layers, batch_size, true, true, cublaslt_handle);
@@ -320,16 +320,16 @@ void backward_pass_gpt(GPT* gpt, unsigned short* d_input_tokens) {
     );
 }
 
-// CUDA kernel for AdamW update (FP16)
-__global__ static void adamw_update_kernel_gpt(half* weight, half* grad, half* m, half* v,
+// CUDA kernel for AdamW update (FP16 weights, FP32 optimizer state)
+__global__ static void adamw_update_kernel_gpt(half* weight, half* grad, float* m, float* v,
                                                float beta1, float beta2, float epsilon, float learning_rate,
                                                float weight_decay, float alpha_t, int size, int batch_size) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < size) {
         float w = __half2float(weight[idx]);
         float g = __half2float(grad[idx]) / batch_size;
-        float m_val = __half2float(m[idx]);
-        float v_val = __half2float(v[idx]);
+        float m_val = m[idx];
+        float v_val = v[idx];
         
         // m = β₁m + (1-β₁)(∂L/∂W)
         m_val = beta1 * m_val + (1.0f - beta1) * g;
@@ -341,8 +341,8 @@ __global__ static void adamw_update_kernel_gpt(half* weight, half* grad, half* m
         w = w * (1.0f - learning_rate * weight_decay) - update;
         
         weight[idx] = __float2half(w);
-        m[idx] = __float2half(m_val);
-        v[idx] = __float2half(v_val);
+        m[idx] = m_val;
+        v[idx] = v_val;
     }
 }
 
@@ -384,10 +384,10 @@ void reset_optimizer_gpt(GPT* gpt) {
     int output_weight_size = gpt->d_model * gpt->vocab_size;
     
     // Reset Adam moment estimates to zero on device
-    CHECK_CUDA(cudaMemset(gpt->d_token_embedding_m, 0, token_emb_size * sizeof(half)));
-    CHECK_CUDA(cudaMemset(gpt->d_token_embedding_v, 0, token_emb_size * sizeof(half)));
-    CHECK_CUDA(cudaMemset(gpt->d_W_output_m, 0, output_weight_size * sizeof(half)));
-    CHECK_CUDA(cudaMemset(gpt->d_W_output_v, 0, output_weight_size * sizeof(half)));
+    CHECK_CUDA(cudaMemset(gpt->d_token_embedding_m, 0, token_emb_size * sizeof(float)));
+    CHECK_CUDA(cudaMemset(gpt->d_token_embedding_v, 0, token_emb_size * sizeof(float)));
+    CHECK_CUDA(cudaMemset(gpt->d_W_output_m, 0, output_weight_size * sizeof(float)));
+    CHECK_CUDA(cudaMemset(gpt->d_W_output_v, 0, output_weight_size * sizeof(float)));
     
     // Reset time step
     gpt->t = 0;
@@ -424,20 +424,20 @@ static void serialize_gpt(GPT* gpt, FILE* file) {
     // Write optimizer state
     fwrite(&gpt->t, sizeof(int), 1, file);
     
-    half* h_token_embedding_m = (half*)malloc(token_emb_size * sizeof(half));
-    half* h_token_embedding_v = (half*)malloc(token_emb_size * sizeof(half));
-    half* h_W_output_m = (half*)malloc(output_weight_size * sizeof(half));
-    half* h_W_output_v = (half*)malloc(output_weight_size * sizeof(half));
+    float* h_token_embedding_m = (float*)malloc(token_emb_size * sizeof(float));
+    float* h_token_embedding_v = (float*)malloc(token_emb_size * sizeof(float));
+    float* h_W_output_m = (float*)malloc(output_weight_size * sizeof(float));
+    float* h_W_output_v = (float*)malloc(output_weight_size * sizeof(float));
     
-    CHECK_CUDA(cudaMemcpy(h_token_embedding_m, gpt->d_token_embedding_m, token_emb_size * sizeof(half), cudaMemcpyDeviceToHost));
-    CHECK_CUDA(cudaMemcpy(h_token_embedding_v, gpt->d_token_embedding_v, token_emb_size * sizeof(half), cudaMemcpyDeviceToHost));
-    CHECK_CUDA(cudaMemcpy(h_W_output_m, gpt->d_W_output_m, output_weight_size * sizeof(half), cudaMemcpyDeviceToHost));
-    CHECK_CUDA(cudaMemcpy(h_W_output_v, gpt->d_W_output_v, output_weight_size * sizeof(half), cudaMemcpyDeviceToHost));
+    CHECK_CUDA(cudaMemcpy(h_token_embedding_m, gpt->d_token_embedding_m, token_emb_size * sizeof(float), cudaMemcpyDeviceToHost));
+    CHECK_CUDA(cudaMemcpy(h_token_embedding_v, gpt->d_token_embedding_v, token_emb_size * sizeof(float), cudaMemcpyDeviceToHost));
+    CHECK_CUDA(cudaMemcpy(h_W_output_m, gpt->d_W_output_m, output_weight_size * sizeof(float), cudaMemcpyDeviceToHost));
+    CHECK_CUDA(cudaMemcpy(h_W_output_v, gpt->d_W_output_v, output_weight_size * sizeof(float), cudaMemcpyDeviceToHost));
     
-    fwrite(h_token_embedding_m, sizeof(half), token_emb_size, file);
-    fwrite(h_token_embedding_v, sizeof(half), token_emb_size, file);
-    fwrite(h_W_output_m, sizeof(half), output_weight_size, file);
-    fwrite(h_W_output_v, sizeof(half), output_weight_size, file);
+    fwrite(h_token_embedding_m, sizeof(float), token_emb_size, file);
+    fwrite(h_token_embedding_v, sizeof(float), token_emb_size, file);
+    fwrite(h_W_output_m, sizeof(float), output_weight_size, file);
+    fwrite(h_W_output_v, sizeof(float), output_weight_size, file);
     
     free(h_token_embedding_m); free(h_token_embedding_v);
     free(h_W_output_m); free(h_W_output_v);
@@ -477,20 +477,20 @@ static GPT* deserialize_gpt(FILE* file, int batch_size, int seq_len, cublasLtHan
     // Load optimizer state
     fread(&gpt->t, sizeof(int), 1, file);
     
-    half* h_token_embedding_m = (half*)malloc(token_emb_size * sizeof(half));
-    half* h_token_embedding_v = (half*)malloc(token_emb_size * sizeof(half));
-    half* h_W_output_m = (half*)malloc(output_weight_size * sizeof(half));
-    half* h_W_output_v = (half*)malloc(output_weight_size * sizeof(half));
+    float* h_token_embedding_m = (float*)malloc(token_emb_size * sizeof(float));
+    float* h_token_embedding_v = (float*)malloc(token_emb_size * sizeof(float));
+    float* h_W_output_m = (float*)malloc(output_weight_size * sizeof(float));
+    float* h_W_output_v = (float*)malloc(output_weight_size * sizeof(float));
     
-    fread(h_token_embedding_m, sizeof(half), token_emb_size, file);
-    fread(h_token_embedding_v, sizeof(half), token_emb_size, file);
-    fread(h_W_output_m, sizeof(half), output_weight_size, file);
-    fread(h_W_output_v, sizeof(half), output_weight_size, file);
+    fread(h_token_embedding_m, sizeof(float), token_emb_size, file);
+    fread(h_token_embedding_v, sizeof(float), token_emb_size, file);
+    fread(h_W_output_m, sizeof(float), output_weight_size, file);
+    fread(h_W_output_v, sizeof(float), output_weight_size, file);
     
-    CHECK_CUDA(cudaMemcpy(gpt->d_token_embedding_m, h_token_embedding_m, token_emb_size * sizeof(half), cudaMemcpyHostToDevice));
-    CHECK_CUDA(cudaMemcpy(gpt->d_token_embedding_v, h_token_embedding_v, token_emb_size * sizeof(half), cudaMemcpyHostToDevice));
-    CHECK_CUDA(cudaMemcpy(gpt->d_W_output_m, h_W_output_m, output_weight_size * sizeof(half), cudaMemcpyHostToDevice));
-    CHECK_CUDA(cudaMemcpy(gpt->d_W_output_v, h_W_output_v, output_weight_size * sizeof(half), cudaMemcpyHostToDevice));
+    CHECK_CUDA(cudaMemcpy(gpt->d_token_embedding_m, h_token_embedding_m, token_emb_size * sizeof(float), cudaMemcpyHostToDevice));
+    CHECK_CUDA(cudaMemcpy(gpt->d_token_embedding_v, h_token_embedding_v, token_emb_size * sizeof(float), cudaMemcpyHostToDevice));
+    CHECK_CUDA(cudaMemcpy(gpt->d_W_output_m, h_W_output_m, output_weight_size * sizeof(float), cudaMemcpyHostToDevice));
+    CHECK_CUDA(cudaMemcpy(gpt->d_W_output_v, h_W_output_v, output_weight_size * sizeof(float), cudaMemcpyHostToDevice));
     
     free(h_token_embedding_m); free(h_token_embedding_v);
     free(h_W_output_m); free(h_W_output_v);
