@@ -32,6 +32,8 @@ void generate_text(GPT* gpt, float temperature, unsigned short* d_input_tokens, 
     printf("\"%s%s", bos, (strlen(bos) % 2) ? " " : "");
     fflush(stdout);
     
+    // Allocate buffer for logits (FP16 -> FP32 for sampling)
+    half* h_logits_half = (half*)malloc(gpt->vocab_size * sizeof(half));
     float* h_logits = (float*)malloc(gpt->vocab_size * sizeof(float));
     
     // Generate tokens one at a time
@@ -43,7 +45,12 @@ void generate_text(GPT* gpt, float temperature, unsigned short* d_input_tokens, 
         forward_pass_gpt(gpt, d_input_tokens);
         
         // Copy logits for current position back to host
-        CHECK_CUDA(cudaMemcpy(h_logits, &gpt->d_output[pos * gpt->vocab_size], gpt->vocab_size * sizeof(float), cudaMemcpyDeviceToHost));
+        CHECK_CUDA(cudaMemcpy(h_logits_half, &gpt->d_output[pos * gpt->vocab_size], gpt->vocab_size * sizeof(half), cudaMemcpyDeviceToHost));
+        
+        // Convert to FP32 for sampling
+        for (int v = 0; v < gpt->vocab_size; v++) {
+            h_logits[v] = __half2float(h_logits_half[v]);
+        }
         
         // Apply temperature scaling and find max for numerical stability
         float max_logit = -1e30f;
@@ -82,6 +89,7 @@ void generate_text(GPT* gpt, float temperature, unsigned short* d_input_tokens, 
     
     printf("\"\n");
     free(h_tokens);
+    free(h_logits_half);
     free(h_logits);
 }
 
@@ -96,10 +104,10 @@ int main(int argc, char* argv[]) {
     // Model hyperparameters
     const int seq_len = 512;
     const int num_layers = 16;
-    const int batch_size = 27;
+    const int batch_size = 2;
     const int d_model = num_layers * 64;
     const int hidden_dim = d_model * 4;
-    const float learning_rate = 0.0001f;
+    const float learning_rate = 0.00001f;
     
     // Initialize or load model
     if (argc > 1) {

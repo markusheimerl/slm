@@ -8,6 +8,7 @@
 #include <stdbool.h>
 #include <cublasLt.h>
 #include <cuda_runtime.h>
+#include <cuda_fp16.h>
 #include "../transformer/gpu/transformer.h"
 
 // CUDA Error checking macro
@@ -51,18 +52,18 @@
 
 typedef struct {
     // Token embedding layer
-    float* d_token_embedding;      // [vocab_size x d_model]
-    float* d_token_embedding_grad; // [vocab_size x d_model]
+    half* d_token_embedding;      // [vocab_size x d_model]
+    half* d_token_embedding_grad; // [vocab_size x d_model]
     
     // Output projection weights
-    float* d_W_output;             // [d_model x vocab_size]
-    float* d_W_output_grad;        // [d_model x vocab_size]
+    half* d_W_output;             // [d_model x vocab_size]
+    half* d_W_output_grad;        // [d_model x vocab_size]
     
     // Adam parameters
-    float* d_token_embedding_m;    // First moment for token embeddings
-    float* d_token_embedding_v;    // Second moment for token embeddings
-    float* d_W_output_m;           // First moment for output weights
-    float* d_W_output_v;           // Second moment for output weights
+    half* d_token_embedding_m;    // First moment for token embeddings
+    half* d_token_embedding_v;    // Second moment for token embeddings
+    half* d_W_output_m;           // First moment for output weights
+    half* d_W_output_v;           // Second moment for output weights
     float beta1;                   // Exponential decay rate for first moment
     float beta2;                   // Exponential decay rate for second moment
     float epsilon;                 // Small constant for numerical stability
@@ -70,14 +71,14 @@ typedef struct {
     float weight_decay;            // Weight decay parameter for AdamW
     
     // Forward pass buffers
-    float* d_embedded_input;       // [batch_size x seq_len x d_model]
-    float* d_output;               // [batch_size x seq_len x vocab_size]
+    half* d_embedded_input;       // [batch_size x seq_len x d_model]
+    half* d_output;               // [batch_size x seq_len x vocab_size]
     
     // Backward pass buffers
-    float* d_grad_output;          // [batch_size x seq_len x vocab_size]
+    half* d_grad_output;          // [batch_size x seq_len x vocab_size]
 
     // Loss computation buffer
-    float* d_loss_result;          // [1]
+    float* d_loss_result;          // [1] - FP32 for accumulation
     
     // Transformer core
     Transformer* transformer;
