@@ -25,29 +25,29 @@ GPT* init_gpt(int seq_len, int d_model, int hidden_dim, int num_layers, int batc
     size_t embedded_size = batch_size * seq_len * d_model;
     size_t output_size = batch_size * seq_len * gpt->vocab_size;
     
-    // Allocate host memory for embedding initialization
-    float* h_token_embedding = (float*)malloc(token_emb_size * sizeof(float));
-    float* h_W_output = (float*)malloc(output_weight_size * sizeof(float));
+    // Allocate host memory for weight initialization
+    half* h_token_embedding = (half*)malloc(token_emb_size * sizeof(half));
+    half* h_W_output = (half*)malloc(output_weight_size * sizeof(half));
     
     // Initialize token embeddings on host
     float token_scale = 1.0f / sqrtf(d_model);
     
     for (size_t i = 0; i < token_emb_size; i++) {
-        h_token_embedding[i] = ((float)rand() / (float)RAND_MAX * 2.0f - 1.0f) * token_scale;
+        h_token_embedding[i] = __float2half(((float)rand() / (float)RAND_MAX * 2.0f - 1.0f) * token_scale);
     }
     
     // Initialize output weights on host
     for (size_t i = 0; i < output_weight_size; i++) {
-        h_W_output[i] = ((float)rand() / (float)RAND_MAX * 2.0f - 1.0f) * token_scale;
+        h_W_output[i] = __float2half(((float)rand() / (float)RAND_MAX * 2.0f - 1.0f) * token_scale);
     }
     
     // Allocate device memory for embeddings and gradients
-    CHECK_CUDA(cudaMalloc(&gpt->d_token_embedding, token_emb_size * sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&gpt->d_token_embedding_grad, token_emb_size * sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&gpt->d_token_embedding, token_emb_size * sizeof(half)));
+    CHECK_CUDA(cudaMalloc(&gpt->d_token_embedding_grad, token_emb_size * sizeof(half)));
     
     // Allocate device memory for output weights and gradients
-    CHECK_CUDA(cudaMalloc(&gpt->d_W_output, output_weight_size * sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&gpt->d_W_output_grad, output_weight_size * sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&gpt->d_W_output, output_weight_size * sizeof(half)));
+    CHECK_CUDA(cudaMalloc(&gpt->d_W_output_grad, output_weight_size * sizeof(half)));
     
     // Allocate device memory for Adam parameters
     CHECK_CUDA(cudaMalloc(&gpt->d_token_embedding_m, token_emb_size * sizeof(float)));
@@ -56,8 +56,8 @@ GPT* init_gpt(int seq_len, int d_model, int hidden_dim, int num_layers, int batc
     CHECK_CUDA(cudaMalloc(&gpt->d_W_output_v, output_weight_size * sizeof(float)));
     
     // Allocate device memory for forward pass buffers
-    CHECK_CUDA(cudaMalloc(&gpt->d_embedded_input, embedded_size * sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&gpt->d_output, output_size * sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&gpt->d_embedded_input, embedded_size * sizeof(half)));
+    CHECK_CUDA(cudaMalloc(&gpt->d_output, output_size * sizeof(half)));
     
     // Alias device memory for backward pass buffers
     gpt->d_grad_output = gpt->d_output;
@@ -66,8 +66,8 @@ GPT* init_gpt(int seq_len, int d_model, int hidden_dim, int num_layers, int batc
     CHECK_CUDA(cudaMalloc(&gpt->d_loss_result, sizeof(float)));
     
     // Copy embeddings and weights to device
-    CHECK_CUDA(cudaMemcpy(gpt->d_token_embedding, h_token_embedding, token_emb_size * sizeof(float), cudaMemcpyHostToDevice));
-    CHECK_CUDA(cudaMemcpy(gpt->d_W_output, h_W_output, output_weight_size * sizeof(float), cudaMemcpyHostToDevice));
+    CHECK_CUDA(cudaMemcpy(gpt->d_token_embedding, h_token_embedding, token_emb_size * sizeof(half), cudaMemcpyHostToDevice));
+    CHECK_CUDA(cudaMemcpy(gpt->d_W_output, h_W_output, output_weight_size * sizeof(half), cudaMemcpyHostToDevice));
     
     // Initialize Adam parameters to zero
     CHECK_CUDA(cudaMemset(gpt->d_token_embedding_m, 0, token_emb_size * sizeof(float)));
@@ -86,15 +86,15 @@ GPT* init_gpt(int seq_len, int d_model, int hidden_dim, int num_layers, int batc
     
     // Create matrix layout descriptors
     // Output weight: [d_model x vocab_size]
-    CHECK_CUBLASLT(cublasLtMatrixLayoutCreate(&gpt->output_weight_layout, CUDA_R_32F, d_model, gpt->vocab_size, gpt->vocab_size));
+    CHECK_CUBLASLT(cublasLtMatrixLayoutCreate(&gpt->output_weight_layout, CUDA_R_16F, d_model, gpt->vocab_size, gpt->vocab_size));
     CHECK_CUBLASLT(cublasLtMatrixLayoutSetAttribute(gpt->output_weight_layout, CUBLASLT_MATRIX_LAYOUT_ORDER, &order, sizeof(order)));
     
     // Flattened sequence data (d_model): [batch_size * seq_len x d_model]
-    CHECK_CUBLASLT(cublasLtMatrixLayoutCreate(&gpt->seq_flat_d_model_layout, CUDA_R_32F, batch_size * seq_len, d_model, d_model));
+    CHECK_CUBLASLT(cublasLtMatrixLayoutCreate(&gpt->seq_flat_d_model_layout, CUDA_R_16F, batch_size * seq_len, d_model, d_model));
     CHECK_CUBLASLT(cublasLtMatrixLayoutSetAttribute(gpt->seq_flat_d_model_layout, CUBLASLT_MATRIX_LAYOUT_ORDER, &order, sizeof(order)));
     
     // Flattened sequence data (vocab): [batch_size * seq_len x vocab_size]
-    CHECK_CUBLASLT(cublasLtMatrixLayoutCreate(&gpt->seq_flat_vocab_layout, CUDA_R_32F, batch_size * seq_len, gpt->vocab_size, gpt->vocab_size));
+    CHECK_CUBLASLT(cublasLtMatrixLayoutCreate(&gpt->seq_flat_vocab_layout, CUDA_R_16F, batch_size * seq_len, gpt->vocab_size, gpt->vocab_size));
     CHECK_CUBLASLT(cublasLtMatrixLayoutSetAttribute(gpt->seq_flat_vocab_layout, CUBLASLT_MATRIX_LAYOUT_ORDER, &order, sizeof(order)));
     
     // Free host memory
@@ -132,7 +132,7 @@ void free_gpt(GPT* gpt) {
 }
 
 // CUDA kernel for token embedding lookup
-__global__ static void token_embedding_lookup_kernel(float* embedded, float* token_embedding, unsigned short* tokens, int batch_size, int seq_len, int d_model) {
+__global__ static void token_embedding_lookup_kernel(half* embedded, half* token_embedding, unsigned short* tokens, int batch_size, int seq_len, int d_model) {
     int b = blockIdx.x;
     int t = blockIdx.y;
     
@@ -148,7 +148,7 @@ __global__ static void token_embedding_lookup_kernel(float* embedded, float* tok
 }
 
 // CUDA kernel for token embedding gradient accumulation
-__global__ static void token_embedding_grad_kernel(float* token_embedding_grad, float* grad_embedded, unsigned short* tokens, int batch_size, int seq_len, int d_model) {
+__global__ static void token_embedding_grad_kernel(half* token_embedding_grad, half* grad_embedded, unsigned short* tokens, int batch_size, int seq_len, int d_model) {
     int b = blockIdx.x;
     int t = blockIdx.y;
     
@@ -159,49 +159,51 @@ __global__ static void token_embedding_grad_kernel(float* token_embedding_grad, 
     int token_base = token * d_model;
     
     for (int d = threadIdx.x; d < d_model; d += blockDim.x) {
-        atomicAdd(&token_embedding_grad[token_base + d], grad_embedded[emb_base + d]);
+        float grad = __half2float(grad_embedded[emb_base + d]);
+        atomicAdd(&token_embedding_grad[token_base + d], __float2half(grad));
     }
 }
 
 // CUDA kernel for softmax and cross-entropy loss computation
-__global__ static void softmax_cross_entropy_kernel(float* loss_result, float* grad_logits, float* logits, unsigned short* targets, int batch_size, int seq_len, int vocab_size) {
+__global__ static void softmax_cross_entropy_kernel(float* loss_result, half* grad_logits, half* logits, unsigned short* targets, int batch_size, int seq_len, int vocab_size) {
     int b = blockIdx.x;
     int t = blockIdx.y;
     
     if (b >= batch_size || t >= seq_len) return;
     
     int logits_offset = b * seq_len * vocab_size + t * vocab_size;
-    float* logits_bt = &logits[logits_offset];
-    float* grad_logits_bt = &grad_logits[logits_offset];
+    half* logits_bt = &logits[logits_offset];
+    half* grad_logits_bt = &grad_logits[logits_offset];
     
     // Find max for numerical stability
     float max_logit = -1e30f;
     for (int v = 0; v < vocab_size; v++) {
-        if (logits_bt[v] > max_logit) max_logit = logits_bt[v];
+        float val = __half2float(logits_bt[v]);
+        if (val > max_logit) max_logit = val;
     }
     
     // Compute softmax probabilities
     float sum_exp = 0.0f;
     for (int v = 0; v < vocab_size; v++) {
-        float exp_val = expf(logits_bt[v] - max_logit);
-        grad_logits_bt[v] = exp_val;
+        float exp_val = expf(__half2float(logits_bt[v]) - max_logit);
+        grad_logits_bt[v] = __float2half(exp_val);
         sum_exp += exp_val;
     }
     
     // Normalize to get probabilities
     for (int v = 0; v < vocab_size; v++) {
-        grad_logits_bt[v] /= sum_exp;
+        grad_logits_bt[v] = __float2half(__half2float(grad_logits_bt[v]) / sum_exp);
     }
     
     // Compute cross-entropy loss and gradient
     int target_token = targets[b * seq_len + t];
-    float target_prob = grad_logits_bt[target_token];
+    float target_prob = __half2float(grad_logits_bt[target_token]);
     
     // Add cross-entropy loss
     atomicAdd(loss_result, -logf(target_prob + 1e-10f));
     
     // Set gradient: softmax - one_hot
-    grad_logits_bt[target_token] -= 1.0f;
+    grad_logits_bt[target_token] = __float2half(__half2float(grad_logits_bt[target_token]) - 1.0f);
 }
 
 // Forward pass
@@ -250,8 +252,8 @@ void zero_gradients_gpt(GPT* gpt) {
     int token_emb_size = gpt->vocab_size * gpt->d_model;
     int output_weight_size = gpt->d_model * gpt->vocab_size;
     
-    CHECK_CUDA(cudaMemset(gpt->d_token_embedding_grad, 0, token_emb_size * sizeof(float)));
-    CHECK_CUDA(cudaMemset(gpt->d_W_output_grad, 0, output_weight_size * sizeof(float)));
+    CHECK_CUDA(cudaMemset(gpt->d_token_embedding_grad, 0, token_emb_size * sizeof(half)));
+    CHECK_CUDA(cudaMemset(gpt->d_W_output_grad, 0, output_weight_size * sizeof(half)));
     
     zero_gradients_transformer(gpt->transformer);
 }
@@ -286,12 +288,12 @@ void backward_pass_gpt(GPT* gpt, unsigned short* d_input_tokens) {
 }
 
 // CUDA kernel for AdamW update
-__global__ static void adamw_update_kernel_gpt(float* weight, float* grad, float* m, float* v,
+__global__ static void adamw_update_kernel_gpt(half* weight, half* grad, float* m, float* v,
                                                float beta1, float beta2, float epsilon, float learning_rate,
                                                float weight_decay, float alpha_t, int size, int batch_size) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < size) {
-        float g = grad[idx] / batch_size;
+        float g = __half2float(grad[idx]) / batch_size;
         
         // m = β₁m + (1-β₁)(∂L/∂W)
         m[idx] = beta1 * m[idx] + (1.0f - beta1) * g;
@@ -300,7 +302,8 @@ __global__ static void adamw_update_kernel_gpt(float* weight, float* grad, float
         
         float update = alpha_t * m[idx] / (sqrtf(v[idx]) + epsilon);
         // W = (1-λη)W - η(m/(1-β₁ᵗ))/√(v/(1-β₂ᵗ) + ε)
-        weight[idx] = weight[idx] * (1.0f - learning_rate * weight_decay) - update;
+        float w = __half2float(weight[idx]);
+        weight[idx] = __float2half(w * (1.0f - learning_rate * weight_decay) - update);
     }
 }
 
@@ -366,15 +369,15 @@ static void serialize_gpt(GPT* gpt, FILE* file) {
     int output_weight_size = gpt->d_model * gpt->vocab_size;
     
     // Allocate host memory and copy embeddings
-    float* h_token_embedding = (float*)malloc(token_emb_size * sizeof(float));
-    float* h_W_output = (float*)malloc(output_weight_size * sizeof(float));
+    half* h_token_embedding = (half*)malloc(token_emb_size * sizeof(half));
+    half* h_W_output = (half*)malloc(output_weight_size * sizeof(half));
     
-    CHECK_CUDA(cudaMemcpy(h_token_embedding, gpt->d_token_embedding, token_emb_size * sizeof(float), cudaMemcpyDeviceToHost));
-    CHECK_CUDA(cudaMemcpy(h_W_output, gpt->d_W_output, output_weight_size * sizeof(float), cudaMemcpyDeviceToHost));
+    CHECK_CUDA(cudaMemcpy(h_token_embedding, gpt->d_token_embedding, token_emb_size * sizeof(half), cudaMemcpyDeviceToHost));
+    CHECK_CUDA(cudaMemcpy(h_W_output, gpt->d_W_output, output_weight_size * sizeof(half), cudaMemcpyDeviceToHost));
     
     // Write embeddings and weights
-    fwrite(h_token_embedding, sizeof(float), token_emb_size, file);
-    fwrite(h_W_output, sizeof(float), output_weight_size, file);
+    fwrite(h_token_embedding, sizeof(half), token_emb_size, file);
+    fwrite(h_W_output, sizeof(half), output_weight_size, file);
     
     free(h_token_embedding);
     free(h_W_output);
@@ -420,14 +423,14 @@ static GPT* deserialize_gpt(FILE* file, int batch_size, int seq_len, cublasLtHan
     int output_weight_size = d_model * vocab_size;
     
     // Load embeddings and weights
-    float* h_token_embedding = (float*)malloc(token_emb_size * sizeof(float));
-    float* h_W_output = (float*)malloc(output_weight_size * sizeof(float));
+    half* h_token_embedding = (half*)malloc(token_emb_size * sizeof(half));
+    half* h_W_output = (half*)malloc(output_weight_size * sizeof(half));
     
-    fread(h_token_embedding, sizeof(float), token_emb_size, file);
-    fread(h_W_output, sizeof(float), output_weight_size, file);
+    fread(h_token_embedding, sizeof(half), token_emb_size, file);
+    fread(h_W_output, sizeof(half), output_weight_size, file);
     
-    CHECK_CUDA(cudaMemcpy(gpt->d_token_embedding, h_token_embedding, token_emb_size * sizeof(float), cudaMemcpyHostToDevice));
-    CHECK_CUDA(cudaMemcpy(gpt->d_W_output, h_W_output, output_weight_size * sizeof(float), cudaMemcpyHostToDevice));
+    CHECK_CUDA(cudaMemcpy(gpt->d_token_embedding, h_token_embedding, token_emb_size * sizeof(half), cudaMemcpyHostToDevice));
+    CHECK_CUDA(cudaMemcpy(gpt->d_W_output, h_W_output, output_weight_size * sizeof(half), cudaMemcpyHostToDevice));
     
     free(h_token_embedding);
     free(h_W_output);

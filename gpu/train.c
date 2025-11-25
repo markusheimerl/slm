@@ -3,6 +3,7 @@
 #include <math.h>
 #include <time.h>
 #include <signal.h>
+#include <cuda_fp16.h>
 #include "../data.h"
 #include "gpt.h"
 
@@ -33,6 +34,7 @@ void generate_text(GPT* gpt, float temperature, unsigned short* d_input_tokens, 
     fflush(stdout);
     
     float* h_logits = (float*)malloc(gpt->vocab_size * sizeof(float));
+    half* h_logits_half = (half*)malloc(gpt->vocab_size * sizeof(half));
     
     // Generate tokens one at a time
     for (int pos = (strlen(bos) + 1) / 2 - 1; pos < gen_len; pos++) {
@@ -43,7 +45,12 @@ void generate_text(GPT* gpt, float temperature, unsigned short* d_input_tokens, 
         forward_pass_gpt(gpt, d_input_tokens);
         
         // Copy logits for current position back to host
-        CHECK_CUDA(cudaMemcpy(h_logits, &gpt->d_output[pos * gpt->vocab_size], gpt->vocab_size * sizeof(float), cudaMemcpyDeviceToHost));
+        CHECK_CUDA(cudaMemcpy(h_logits_half, &gpt->d_output[pos * gpt->vocab_size], gpt->vocab_size * sizeof(half), cudaMemcpyDeviceToHost));
+        
+        // Convert to float
+        for (int v = 0; v < gpt->vocab_size; v++) {
+            h_logits[v] = __half2float(h_logits_half[v]);
+        }
         
         // Apply temperature scaling and find max for numerical stability
         float max_logit = -1e30f;
@@ -83,6 +90,7 @@ void generate_text(GPT* gpt, float temperature, unsigned short* d_input_tokens, 
     printf("\"\n");
     free(h_tokens);
     free(h_logits);
+    free(h_logits_half);
 }
 
 int main(int argc, char* argv[]) {

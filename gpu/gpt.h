@@ -8,6 +8,7 @@
 #include <stdbool.h>
 #include <cublasLt.h>
 #include <cuda_runtime.h>
+#include <cuda_fp16.h>
 #include "../transformer/gpu/transformer.h"
 
 // CUDA Error checking macro
@@ -51,12 +52,12 @@
 
 typedef struct {
     // Token embedding layer
-    float* d_token_embedding;      // [vocab_size x d_model]
-    float* d_token_embedding_grad; // [vocab_size x d_model]
+    half* d_token_embedding;       // [vocab_size x d_model]
+    half* d_token_embedding_grad;  // [vocab_size x d_model]
     
     // Output projection weights
-    float* d_W_output;             // [d_model x vocab_size]
-    float* d_W_output_grad;        // [d_model x vocab_size]
+    half* d_W_output;              // [d_model x vocab_size]
+    half* d_W_output_grad;         // [d_model x vocab_size]
     
     // Adam parameters
     float* d_token_embedding_m;    // First moment for token embeddings
@@ -70,11 +71,11 @@ typedef struct {
     float weight_decay;            // Weight decay parameter for AdamW
     
     // Forward pass buffers
-    float* d_embedded_input;       // [batch_size x seq_len x d_model]
-    float* d_output;               // [batch_size x seq_len x vocab_size]
+    half* d_embedded_input;        // [batch_size x seq_len x d_model]
+    half* d_output;                // [batch_size x seq_len x vocab_size]
     
     // Backward pass buffers
-    float* d_grad_output;          // [batch_size x seq_len x vocab_size]
+    half* d_grad_output;           // [batch_size x seq_len x vocab_size]
 
     // Loss computation buffer
     float* d_loss_result;          // [1]
@@ -87,9 +88,9 @@ typedef struct {
     cublasLtMatmulDesc_t matmul_desc;
     
     // Matrix layouts
-    cublasLtMatrixLayout_t output_weight_layout;  // [d_model x vocab_size]
+    cublasLtMatrixLayout_t output_weight_layout;      // [d_model x vocab_size]
     cublasLtMatrixLayout_t seq_flat_d_model_layout;   // [batch_size * seq_len x d_model]
-    cublasLtMatrixLayout_t seq_flat_vocab_layout; // [batch_size * seq_len x vocab_size]
+    cublasLtMatrixLayout_t seq_flat_vocab_layout;     // [batch_size * seq_len x vocab_size]
     
     // Dimensions
     int seq_len;
