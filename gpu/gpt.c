@@ -135,15 +135,16 @@ void free_gpt(GPT* gpt) {
 __global__ static void token_embedding_lookup_kernel(float* embedded, float* token_embedding, unsigned short* tokens, int batch_size, int seq_len, int d_model) {
     int b = blockIdx.x;
     int t = blockIdx.y;
-    int d = threadIdx.x;
     
-    if (b >= batch_size || t >= seq_len || d >= d_model) return;
+    if (b >= batch_size || t >= seq_len) return;
     
     int token_idx = b * seq_len + t;
     int token = tokens[token_idx];
-    int emb_idx = b * seq_len * d_model + t * d_model + d;
+    int emb_base = b * seq_len * d_model + t * d_model;
+    int token_emb_base = token * d_model;
     
-    embedded[emb_idx] = token_embedding[token * d_model + d];
+    for (int d = threadIdx.x; d < d_model; d += blockDim.x) 
+        embedded[emb_base + d] = token_embedding[token_emb_base + d];
 }
 
 // CUDA kernel for softmax and cross-entropy loss computation
@@ -191,15 +192,16 @@ __global__ static void softmax_cross_entropy_kernel(float* loss_result, float* g
 __global__ static void token_embedding_grad_kernel(float* token_embedding_grad, float* grad_embedded, unsigned short* tokens, int batch_size, int seq_len, int d_model) {
     int b = blockIdx.x;
     int t = blockIdx.y;
-    int d = threadIdx.x;
     
-    if (b >= batch_size || t >= seq_len || d >= d_model) return;
+    if (b >= batch_size || t >= seq_len) return;
     
     int token_idx = b * seq_len + t;
     int token = tokens[token_idx];
-    int emb_idx = b * seq_len * d_model + t * d_model + d;
+    int emb_base = b * seq_len * d_model + t * d_model;
+    int token_emb_base = token * d_model;
     
-    atomicAdd(&token_embedding_grad[token * d_model + d], grad_embedded[emb_idx]);
+    for (int d = threadIdx.x; d < d_model; d += blockDim.x) 
+        atomicAdd(&token_embedding_grad[token_emb_base + d], grad_embedded[emb_base + d]);
 }
 
 // Forward pass
@@ -209,8 +211,7 @@ void forward_pass_gpt(GPT* gpt, unsigned short* d_input_tokens) {
     
     // Step 1: Token embedding lookup
     dim3 grid_emb(gpt->batch_size, gpt->seq_len);
-    dim3 block_emb(gpt->d_model);
-    token_embedding_lookup_kernel<<<grid_emb, block_emb>>>(
+    token_embedding_lookup_kernel<<<grid_emb, 256>>>(
         gpt->d_embedded_input, gpt->d_token_embedding, d_input_tokens,
         gpt->batch_size, gpt->seq_len, gpt->d_model
     );
@@ -278,9 +279,7 @@ void backward_pass_gpt(GPT* gpt, unsigned short* d_input_tokens) {
     
     // Step 1 (backward): Token embedding gradients
     dim3 grid_emb(gpt->batch_size, gpt->seq_len);
-    dim3 block_emb(gpt->d_model);
-    
-    token_embedding_grad_kernel<<<grid_emb, block_emb>>>(
+    token_embedding_grad_kernel<<<grid_emb, 256>>>(
         gpt->d_token_embedding_grad, gpt->d_embedded_input, d_input_tokens,
         gpt->batch_size, gpt->seq_len, gpt->d_model
     );
