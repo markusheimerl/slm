@@ -92,7 +92,7 @@ int main(int argc, char* argv[]) {
     const int batch_size = 16;
     const int d_model = num_layers * 64;
     const int hidden_dim = d_model * 4;
-    const float learning_rate = 0.00004f;
+    const float learning_rate = 0.0001f;
     
     // Initialize or load model
     if (argc > 1) {
