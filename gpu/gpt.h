@@ -55,15 +55,9 @@ typedef struct {
     half* d_token_embedding;       // [vocab_size x d_model]
     half* d_token_embedding_grad;  // [vocab_size x d_model]
     
-    // Output projection weights
-    half* d_W_output;              // [d_model x vocab_size]
-    half* d_W_output_grad;         // [d_model x vocab_size]
-    
-    // Adam parameters
+    // Adam parameters for embeddings
     float* d_token_embedding_m;    // First moment for token embeddings
     float* d_token_embedding_v;    // Second moment for token embeddings
-    float* d_W_output_m;           // First moment for output weights
-    float* d_W_output_v;           // Second moment for output weights
     float beta1;                   // Exponential decay rate for first moment
     float beta2;                   // Exponential decay rate for second moment
     float epsilon;                 // Small constant for numerical stability
@@ -72,10 +66,12 @@ typedef struct {
     
     // Forward pass buffers
     half* d_embedded_input;        // [batch_size x seq_len x d_model]
+    half* d_norm_output;           // [batch_size x seq_len x d_model]
     half* d_output;                // [batch_size x seq_len x vocab_size]
     
     // Backward pass buffers
     half* d_grad_output;           // [batch_size x seq_len x vocab_size]
+    half* d_grad_norm_output;      // [batch_size x seq_len x d_model]
 
     // Loss computation buffer
     float* d_loss_result;          // [1]
@@ -88,7 +84,7 @@ typedef struct {
     cublasLtMatmulDesc_t matmul_desc;
     
     // Matrix layouts
-    cublasLtMatrixLayout_t output_weight_layout;      // [d_model x vocab_size]
+    cublasLtMatrixLayout_t embedding_layout;          // [vocab_size x d_model]
     cublasLtMatrixLayout_t seq_flat_d_model_layout;   // [batch_size * seq_len x d_model]
     cublasLtMatrixLayout_t seq_flat_vocab_layout;     // [batch_size * seq_len x vocab_size]
     
