@@ -415,13 +415,17 @@ static void serialize_gpt(GPT* gpt, FILE* file) {
     
     int token_emb_size = gpt->vocab_size * gpt->d_model;
     
-    // Allocate host memory and copy embeddings
-    half* h_token_embedding = (half*)malloc(token_emb_size * sizeof(half));
+    // Allocate host memory for embeddings
+    float* h_token_embedding = (float*)malloc(token_emb_size * sizeof(float));
     
+    // Copy embeddings from device
     CHECK_CUDA(cudaMemcpy(h_token_embedding, gpt->d_token_embedding, token_emb_size * sizeof(half), cudaMemcpyDeviceToHost));
     
+    // Convert half to float
+    for (int i = token_emb_size - 1; i >= 0; i--) h_token_embedding[i] = __half2float(((half*)h_token_embedding)[i]);
+    
     // Write embeddings
-    fwrite(h_token_embedding, sizeof(half), token_emb_size, file);
+    fwrite(h_token_embedding, sizeof(float), token_emb_size, file);
     
     free(h_token_embedding);
     
@@ -457,16 +461,21 @@ static GPT* deserialize_gpt(FILE* file, int batch_size, int seq_len, cublasLtHan
     
     int token_emb_size = vocab_size * d_model;
     
-    // Load embeddings
-    half* h_token_embedding = (half*)malloc(token_emb_size * sizeof(half));
+    // Allocate host memory for embeddings
+    float* h_token_embedding = (float*)malloc(token_emb_size * sizeof(float));
     
-    fread(h_token_embedding, sizeof(half), token_emb_size, file);
+    // Read embeddings
+    fread(h_token_embedding, sizeof(float), token_emb_size, file);
     
+    // Convert float to half
+    for (int i = 0; i < token_emb_size; i++) ((half*)h_token_embedding)[i] = __float2half(h_token_embedding[i]);
+    
+    // Copy embeddings to device
     CHECK_CUDA(cudaMemcpy(gpt->d_token_embedding, h_token_embedding, token_emb_size * sizeof(half), cudaMemcpyHostToDevice));
     
     free(h_token_embedding);
     
-    // Load optimizer state
+    // Read optimizer state
     fread(&gpt->t, sizeof(int), 1, file);
     
     float* h_token_embedding_m = (float*)malloc(token_emb_size * sizeof(float));
