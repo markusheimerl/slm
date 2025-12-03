@@ -101,7 +101,7 @@ int main(int argc, char* argv[]) {
         gpt = init_gpt(seq_len, d_model, hidden_dim, num_layers, batch_size);
     }
     
-    printf("Parameters: ~%.1fM\n", (float)(gpt->vocab_size * d_model + d_model * gpt->vocab_size + num_layers * (4 * d_model * d_model + d_model * hidden_dim + hidden_dim * d_model)) / 1e6f);
+    printf("Parameters: ~%.1fM\n", (float)(gpt->vocab_size * d_model + num_layers * (4 * d_model * d_model + d_model * hidden_dim + hidden_dim * d_model)) / 1e6f);
     
     // Create shuffled indices for random sampling without replacement
     size_t total_sequences = (get_file_size("corpus.txt") - 2) / (2 * seq_len);
