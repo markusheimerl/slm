@@ -101,7 +101,7 @@ int main(int argc, char* argv[]) {
         gpt = init_gpt(seq_len, d_model, hidden_dim, num_layers, batch_size);
     }
     
-    printf("Parameters: ~%.1fM\n", (float)(gpt->vocab_size * d_model + d_model * gpt->vocab_size + num_layers * (4 * d_model * d_model + d_model * hidden_dim + hidden_dim * d_model)) / 1e6f);
+    printf("Parameters: ~%.1fM\n", (float)(gpt->vocab_size * d_model + num_layers * (4 * d_model * d_model + d_model * hidden_dim + hidden_dim * d_model)) / 1e6f);
     
     // Create shuffled indices for random sampling without replacement
     size_t total_sequences = (get_file_size("corpus.txt") - 2) / (2 * seq_len);
@@ -133,7 +133,7 @@ int main(int argc, char* argv[]) {
             backward_pass_gpt(gpt, &input_tokens[batch * batch_size * seq_len]);
             
             // Update weights with cosine learning rate schedule
-            float lr = learning_rate * fminf(1.0f, (float)(chunk_idx * (sequences_per_chunk / batch_size) + batch) / 100.0f) * (0.5f * (1.0f + cosf(M_PI * ((float)(chunk_idx * (sequences_per_chunk / batch_size) + batch) / (float)(total_sequences / batch_size)))));
+            float lr = learning_rate * fminf(1.0f, (float)(chunk_idx * (sequences_per_chunk / batch_size) + batch) / 1000.0f) * (0.5f * (1.0f + cosf(M_PI * ((float)(chunk_idx * (sequences_per_chunk / batch_size) + batch) / (float)(total_sequences / batch_size)))));
             update_weights_gpt(gpt, lr, batch_size);
             
             struct timespec end; clock_gettime(CLOCK_MONOTONIC, &end);

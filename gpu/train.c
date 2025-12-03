@@ -3,6 +3,7 @@
 #include <math.h>
 #include <time.h>
 #include <signal.h>
+#include <cuda_fp16.h>
 #include "../data.h"
 #include "gpt.h"
 
@@ -33,6 +34,7 @@ void generate_text(GPT* gpt, float temperature, unsigned short* d_input_tokens, 
     fflush(stdout);
     
     float* h_logits = (float*)malloc(gpt->vocab_size * sizeof(float));
+    half* h_logits_half = (half*)malloc(gpt->vocab_size * sizeof(half));
     
     // Generate tokens one at a time
     for (int pos = (strlen(bos) + 1) / 2 - 1; pos < gen_len; pos++) {
@@ -43,7 +45,12 @@ void generate_text(GPT* gpt, float temperature, unsigned short* d_input_tokens, 
         forward_pass_gpt(gpt, d_input_tokens);
         
         // Copy logits for current position back to host
-        CHECK_CUDA(cudaMemcpy(h_logits, &gpt->d_output[pos * gpt->vocab_size], gpt->vocab_size * sizeof(float), cudaMemcpyDeviceToHost));
+        CHECK_CUDA(cudaMemcpy(h_logits_half, &gpt->d_output[pos * gpt->vocab_size], gpt->vocab_size * sizeof(half), cudaMemcpyDeviceToHost));
+        
+        // Convert to float
+        for (int v = 0; v < gpt->vocab_size; v++) {
+            h_logits[v] = __half2float(h_logits_half[v]);
+        }
         
         // Apply temperature scaling and find max for numerical stability
         float max_logit = -1e30f;
@@ -83,6 +90,7 @@ void generate_text(GPT* gpt, float temperature, unsigned short* d_input_tokens, 
     printf("\"\n");
     free(h_tokens);
     free(h_logits);
+    free(h_logits_half);
 }
 
 int main(int argc, char* argv[]) {
@@ -95,8 +103,8 @@ int main(int argc, char* argv[]) {
 
     // Model hyperparameters
     const int seq_len = 512;
-    const int num_layers = 16;
-    const int batch_size = 27;
+    const int num_layers = 21;
+    const int batch_size = 32;
     const int d_model = num_layers * 64;
     const int hidden_dim = d_model * 4;
     const float learning_rate = 0.0001f;
@@ -108,7 +116,7 @@ int main(int argc, char* argv[]) {
         gpt = init_gpt(seq_len, d_model, hidden_dim, num_layers, batch_size, cublaslt_handle);
     }
     
-    printf("Parameters: ~%.1fM\n", (float)(gpt->vocab_size * d_model + d_model * gpt->vocab_size + num_layers * (4 * d_model * d_model + d_model * hidden_dim + hidden_dim * d_model)) / 1e6f);
+    printf("Parameters: ~%.1fM\n", (float)(gpt->vocab_size * d_model + num_layers * (4 * d_model * d_model + d_model * hidden_dim + hidden_dim * d_model)) / 1e6f);
     
     // Create shuffled indices for random sampling without replacement
     size_t total_sequences = (get_file_size("../corpus.txt") - 2) / (2 * seq_len);
@@ -149,7 +157,7 @@ int main(int argc, char* argv[]) {
             backward_pass_gpt(gpt, d_input_tokens);
             
             // Update weights with cosine learning rate schedule
-            float lr = learning_rate * fminf(1.0f, (float)(chunk_idx * (sequences_per_chunk / batch_size) + batch) / 100.0f) * (0.5f * (1.0f + cosf(M_PI * ((float)(chunk_idx * (sequences_per_chunk / batch_size) + batch) / (float)(total_sequences / batch_size)))));
+            float lr = learning_rate * fminf(1.0f, (float)(chunk_idx * (sequences_per_chunk / batch_size) + batch) / 1000.0f) * (0.5f * (1.0f + cosf(M_PI * ((float)(chunk_idx * (sequences_per_chunk / batch_size) + batch) / (float)(total_sequences / batch_size)))));
             update_weights_gpt(gpt, lr, batch_size);
             
             CHECK_CUDA(cudaDeviceSynchronize()); struct timespec end; clock_gettime(CLOCK_MONOTONIC, &end);
