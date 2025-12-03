@@ -21,45 +21,59 @@ GPT* init_gpt(int seq_len, int d_model, int hidden_dim, int num_layers, int batc
     gpt->weight_decay = 0.01f;
     
     size_t token_emb_size = gpt->vocab_size * d_model;
+    size_t output_weight_size = d_model * gpt->vocab_size;
     size_t embedded_size = batch_size * seq_len * d_model;
     size_t output_size = batch_size * seq_len * gpt->vocab_size;
     
-    // Allocate host memory for weight initialization
-    half* h_token_embedding = (half*)malloc(token_emb_size * sizeof(half));
+    // Allocate host memory for embedding initialization
+    float* h_token_embedding = (float*)malloc(token_emb_size * sizeof(float));
+    float* h_W_output = (float*)malloc(output_weight_size * sizeof(float));
     
     // Initialize token embeddings on host
     float token_scale = 1.0f / sqrtf(d_model);
     
     for (size_t i = 0; i < token_emb_size; i++) {
-        h_token_embedding[i] = __float2half(((float)rand() / (float)RAND_MAX * 2.0f - 1.0f) * token_scale);
+        h_token_embedding[i] = ((float)rand() / (float)RAND_MAX * 2.0f - 1.0f) * token_scale;
+    }
+    
+    // Initialize output weights on host
+    for (size_t i = 0; i < output_weight_size; i++) {
+        h_W_output[i] = ((float)rand() / (float)RAND_MAX * 2.0f - 1.0f) * token_scale;
     }
     
     // Allocate device memory for embeddings and gradients
-    CHECK_CUDA(cudaMalloc(&gpt->d_token_embedding, token_emb_size * sizeof(half)));
-    CHECK_CUDA(cudaMalloc(&gpt->d_token_embedding_grad, token_emb_size * sizeof(half)));
+    CHECK_CUDA(cudaMalloc(&gpt->d_token_embedding, token_emb_size * sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&gpt->d_token_embedding_grad, token_emb_size * sizeof(float)));
+    
+    // Allocate device memory for output weights and gradients
+    CHECK_CUDA(cudaMalloc(&gpt->d_W_output, output_weight_size * sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&gpt->d_W_output_grad, output_weight_size * sizeof(float)));
     
     // Allocate device memory for Adam parameters
     CHECK_CUDA(cudaMalloc(&gpt->d_token_embedding_m, token_emb_size * sizeof(float)));
     CHECK_CUDA(cudaMalloc(&gpt->d_token_embedding_v, token_emb_size * sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&gpt->d_W_output_m, output_weight_size * sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&gpt->d_W_output_v, output_weight_size * sizeof(float)));
     
     // Allocate device memory for forward pass buffers
-    CHECK_CUDA(cudaMalloc(&gpt->d_embedded_input, embedded_size * sizeof(half)));
-    CHECK_CUDA(cudaMalloc(&gpt->d_norm_output, embedded_size * sizeof(half)));
-    CHECK_CUDA(cudaMalloc(&gpt->d_output, output_size * sizeof(half)));
+    CHECK_CUDA(cudaMalloc(&gpt->d_embedded_input, embedded_size * sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&gpt->d_output, output_size * sizeof(float)));
     
-    // Alias/Allocate device memory for backward pass buffers
+    // Alias device memory for backward pass buffers
     gpt->d_grad_output = gpt->d_output;
-    CHECK_CUDA(cudaMalloc(&gpt->d_grad_norm_output, embedded_size * sizeof(half)));
     
     // Allocate single device float for loss computation
     CHECK_CUDA(cudaMalloc(&gpt->d_loss_result, sizeof(float)));
     
-    // Copy embeddings to device
-    CHECK_CUDA(cudaMemcpy(gpt->d_token_embedding, h_token_embedding, token_emb_size * sizeof(half), cudaMemcpyHostToDevice));
+    // Copy embeddings and weights to device
+    CHECK_CUDA(cudaMemcpy(gpt->d_token_embedding, h_token_embedding, token_emb_size * sizeof(float), cudaMemcpyHostToDevice));
+    CHECK_CUDA(cudaMemcpy(gpt->d_W_output, h_W_output, output_weight_size * sizeof(float), cudaMemcpyHostToDevice));
     
     // Initialize Adam parameters to zero
     CHECK_CUDA(cudaMemset(gpt->d_token_embedding_m, 0, token_emb_size * sizeof(float)));
     CHECK_CUDA(cudaMemset(gpt->d_token_embedding_v, 0, token_emb_size * sizeof(float)));
+    CHECK_CUDA(cudaMemset(gpt->d_W_output_m, 0, output_weight_size * sizeof(float)));
+    CHECK_CUDA(cudaMemset(gpt->d_W_output_v, 0, output_weight_size * sizeof(float)));
     
     // Initialize transformer
     gpt->transformer = init_transformer(seq_len, d_model, hidden_dim, num_layers, batch_size, true, true, cublaslt_handle);
@@ -71,20 +85,21 @@ GPT* init_gpt(int seq_len, int d_model, int hidden_dim, int num_layers, int batc
     cublasLtOrder_t order = CUBLASLT_ORDER_ROW;
     
     // Create matrix layout descriptors
-    // Embedding matrix: [vocab_size x d_model]
-    CHECK_CUBLASLT(cublasLtMatrixLayoutCreate(&gpt->embedding_layout, CUDA_R_16F, gpt->vocab_size, d_model, d_model));
-    CHECK_CUBLASLT(cublasLtMatrixLayoutSetAttribute(gpt->embedding_layout, CUBLASLT_MATRIX_LAYOUT_ORDER, &order, sizeof(order)));
+    // Output weight: [d_model x vocab_size]
+    CHECK_CUBLASLT(cublasLtMatrixLayoutCreate(&gpt->output_weight_layout, CUDA_R_32F, d_model, gpt->vocab_size, gpt->vocab_size));
+    CHECK_CUBLASLT(cublasLtMatrixLayoutSetAttribute(gpt->output_weight_layout, CUBLASLT_MATRIX_LAYOUT_ORDER, &order, sizeof(order)));
     
     // Flattened sequence data (d_model): [batch_size * seq_len x d_model]
-    CHECK_CUBLASLT(cublasLtMatrixLayoutCreate(&gpt->seq_flat_d_model_layout, CUDA_R_16F, batch_size * seq_len, d_model, d_model));
+    CHECK_CUBLASLT(cublasLtMatrixLayoutCreate(&gpt->seq_flat_d_model_layout, CUDA_R_32F, batch_size * seq_len, d_model, d_model));
     CHECK_CUBLASLT(cublasLtMatrixLayoutSetAttribute(gpt->seq_flat_d_model_layout, CUBLASLT_MATRIX_LAYOUT_ORDER, &order, sizeof(order)));
     
     // Flattened sequence data (vocab): [batch_size * seq_len x vocab_size]
-    CHECK_CUBLASLT(cublasLtMatrixLayoutCreate(&gpt->seq_flat_vocab_layout, CUDA_R_16F, batch_size * seq_len, gpt->vocab_size, gpt->vocab_size));
+    CHECK_CUBLASLT(cublasLtMatrixLayoutCreate(&gpt->seq_flat_vocab_layout, CUDA_R_32F, batch_size * seq_len, gpt->vocab_size, gpt->vocab_size));
     CHECK_CUBLASLT(cublasLtMatrixLayoutSetAttribute(gpt->seq_flat_vocab_layout, CUBLASLT_MATRIX_LAYOUT_ORDER, &order, sizeof(order)));
     
     // Free host memory
     free(h_token_embedding);
+    free(h_W_output);
     
     return gpt;
 }
@@ -98,17 +113,17 @@ void free_gpt(GPT* gpt) {
     cublasLtMatmulDescDestroy(gpt->matmul_desc);
     
     // Destroy matrix layouts
-    cublasLtMatrixLayoutDestroy(gpt->embedding_layout);
+    cublasLtMatrixLayoutDestroy(gpt->output_weight_layout);
     cublasLtMatrixLayoutDestroy(gpt->seq_flat_d_model_layout);
     cublasLtMatrixLayoutDestroy(gpt->seq_flat_vocab_layout);
     
     // Free device memory
     cudaFree(gpt->d_token_embedding); cudaFree(gpt->d_token_embedding_grad);
     cudaFree(gpt->d_token_embedding_m); cudaFree(gpt->d_token_embedding_v);
+    cudaFree(gpt->d_W_output); cudaFree(gpt->d_W_output_grad);
+    cudaFree(gpt->d_W_output_m); cudaFree(gpt->d_W_output_v);
     cudaFree(gpt->d_embedded_input);
-    cudaFree(gpt->d_norm_output);
     cudaFree(gpt->d_output);
-    cudaFree(gpt->d_grad_norm_output);
     
     // Free loss computation buffer
     cudaFree(gpt->d_loss_result);
@@ -117,7 +132,7 @@ void free_gpt(GPT* gpt) {
 }
 
 // CUDA kernel for token embedding lookup
-__global__ static void token_embedding_lookup_kernel(half* embedded, half* token_embedding, unsigned short* tokens, int batch_size, int seq_len, int d_model) {
+__global__ static void token_embedding_lookup_kernel(float* embedded, float* token_embedding, unsigned short* tokens, int batch_size, int seq_len, int d_model) {
     int b = blockIdx.x;
     int t = blockIdx.y;
     
@@ -132,66 +147,8 @@ __global__ static void token_embedding_lookup_kernel(half* embedded, half* token
     }
 }
 
-// CUDA kernel for RMSNorm forward: y = x / sqrt(mean(x^2) + eps)
-__global__ static void rmsnorm_forward_kernel_gpt(half* output, const half* input, int batch_size, int seq_len, int d_model) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int total = batch_size * seq_len;
-    if (idx >= total) return;
-    
-    const half* x = &input[idx * d_model];
-    half* y = &output[idx * d_model];
-    
-    // Compute RMS
-    float sum_sq = 0.0f;
-    for (int d = 0; d < d_model; d++) {
-        float val = __half2float(x[d]);
-        sum_sq += val * val;
-    }
-    float rms = sqrtf(sum_sq / d_model + 1e-6f);
-    
-    // y = x / RMS(x)
-    for (int d = 0; d < d_model; d++) {
-        float val = __half2float(x[d]);
-        y[d] = __float2half(val / rms);
-    }
-}
-
-// CUDA kernel for RMSNorm backward pass: ∂L/∂x = (∂L/∂y)/(x / sqrt(mean(x^2) + eps)) - x⊙(Σ_d (∂L/∂y_d)⊙x_d)/(d_model⊙(x / sqrt(mean(x^2) + eps))³)
-__global__ static void rmsnorm_backward_kernel_gpt(half* grad_input, const half* grad_output, const half* input, int batch_size, int seq_len, int d_model) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int total = batch_size * seq_len;
-    if (idx >= total) return;
-    
-    const half* x = &input[idx * d_model];
-    const half* dy = &grad_output[idx * d_model];
-    half* dx = &grad_input[idx * d_model];
-    
-    // Compute RMS
-    float sum_sq = 0.0f;
-    for (int d = 0; d < d_model; d++) {
-        float val = __half2float(x[d]);
-        sum_sq += val * val;
-    }
-    float rms = sqrtf(sum_sq / d_model + 1e-6f);
-    
-    // Compute Σ_d (∂L/∂y_d)⊙x_d
-    float sum_dy_x = 0.0f;
-    for (int d = 0; d < d_model; d++) {
-        sum_dy_x += __half2float(dy[d]) * __half2float(x[d]);
-    }
-    
-    float rms3 = rms * rms * rms;
-    // ∂L/∂x = (∂L/∂y)/RMS - x⊙(Σ_d (∂L/∂y_d)⊙x_d)/(d_model⊙RMS³)
-    for (int d = 0; d < d_model; d++) {
-        float x_val = __half2float(x[d]);
-        float dy_val = __half2float(dy[d]);
-        float result = (dy_val / rms) - (x_val * sum_dy_x) / (d_model * rms3);
-        dx[d] = __float2half(result);
-    }
-}
-
 // CUDA kernel for token embedding gradient accumulation
-__global__ static void token_embedding_grad_kernel(half* token_embedding_grad, half* grad_embedded, unsigned short* tokens, int batch_size, int seq_len, int d_model) {
+__global__ static void token_embedding_grad_kernel(float* token_embedding_grad, float* grad_embedded, unsigned short* tokens, int batch_size, int seq_len, int d_model) {
     int b = blockIdx.x;
     int t = blockIdx.y;
     
@@ -202,51 +159,49 @@ __global__ static void token_embedding_grad_kernel(half* token_embedding_grad, h
     int token_base = token * d_model;
     
     for (int d = threadIdx.x; d < d_model; d += blockDim.x) {
-        float grad = __half2float(grad_embedded[emb_base + d]);
-        atomicAdd(&token_embedding_grad[token_base + d], __float2half(grad));
+        atomicAdd(&token_embedding_grad[token_base + d], grad_embedded[emb_base + d]);
     }
 }
 
 // CUDA kernel for softmax and cross-entropy loss computation
-__global__ static void softmax_cross_entropy_kernel(float* loss_result, half* grad_logits, half* logits, unsigned short* targets, int batch_size, int seq_len, int vocab_size) {
+__global__ static void softmax_cross_entropy_kernel(float* loss_result, float* grad_logits, float* logits, unsigned short* targets, int batch_size, int seq_len, int vocab_size) {
     int b = blockIdx.x;
     int t = blockIdx.y;
     
     if (b >= batch_size || t >= seq_len) return;
     
     int logits_offset = b * seq_len * vocab_size + t * vocab_size;
-    half* logits_bt = &logits[logits_offset];
-    half* grad_logits_bt = &grad_logits[logits_offset];
+    float* logits_bt = &logits[logits_offset];
+    float* grad_logits_bt = &grad_logits[logits_offset];
     
     // Find max for numerical stability
     float max_logit = -1e30f;
     for (int v = 0; v < vocab_size; v++) {
-        float val = __half2float(logits_bt[v]);
-        if (val > max_logit) max_logit = val;
+        if (logits_bt[v] > max_logit) max_logit = logits_bt[v];
     }
     
     // Compute softmax probabilities
     float sum_exp = 0.0f;
     for (int v = 0; v < vocab_size; v++) {
-        float exp_val = expf(__half2float(logits_bt[v]) - max_logit);
-        grad_logits_bt[v] = __float2half(exp_val);
+        float exp_val = expf(logits_bt[v] - max_logit);
+        grad_logits_bt[v] = exp_val;
         sum_exp += exp_val;
     }
     
     // Normalize to get probabilities
     for (int v = 0; v < vocab_size; v++) {
-        grad_logits_bt[v] = __float2half(__half2float(grad_logits_bt[v]) / sum_exp);
+        grad_logits_bt[v] /= sum_exp;
     }
     
     // Compute cross-entropy loss and gradient
     int target_token = targets[b * seq_len + t];
-    float target_prob = __half2float(grad_logits_bt[target_token]);
+    float target_prob = grad_logits_bt[target_token];
     
     // Add cross-entropy loss
     atomicAdd(loss_result, -logf(target_prob + 1e-10f));
     
     // Set gradient: softmax - one_hot
-    grad_logits_bt[target_token] = __float2half(__half2float(grad_logits_bt[target_token]) - 1.0f);
+    grad_logits_bt[target_token] -= 1.0f;
 }
 
 // Forward pass
@@ -264,19 +219,10 @@ void forward_pass_gpt(GPT* gpt, unsigned short* d_input_tokens) {
     // Step 2: Forward pass through transformer
     forward_pass_transformer(gpt->transformer, gpt->d_embedded_input);
     
-    // Step 3: RMSNorm on transformer output
-    rmsnorm_forward_kernel_gpt<<<(gpt->batch_size * gpt->seq_len + 255) / 256, 256>>>(
-        gpt->d_norm_output,
-        gpt->transformer->mlp_layers[gpt->num_layers-1]->d_output,
-        gpt->batch_size,
-        gpt->seq_len,
-        gpt->d_model
-    );
-    
-    // Step 4: Output projection: output = norm_output * token_embedding^T
-    LT_MATMUL(gpt, CUBLAS_OP_N, CUBLAS_OP_T, &alpha,
-              gpt->d_norm_output, gpt->seq_flat_d_model_layout,
-              gpt->d_token_embedding, gpt->embedding_layout,
+    // Step 3: Output projection: output = transformer_output * W_output
+    LT_MATMUL(gpt, CUBLAS_OP_N, CUBLAS_OP_N, &alpha,
+              gpt->transformer->mlp_layers[gpt->num_layers-1]->d_output, gpt->seq_flat_d_model_layout,
+              gpt->d_W_output, gpt->output_weight_layout,
               &beta, gpt->d_output, gpt->seq_flat_vocab_layout);
 }
 
@@ -302,8 +248,10 @@ float calculate_loss_gpt(GPT* gpt, unsigned short* d_target_tokens) {
 // Zero gradients
 void zero_gradients_gpt(GPT* gpt) {
     int token_emb_size = gpt->vocab_size * gpt->d_model;
+    int output_weight_size = gpt->d_model * gpt->vocab_size;
     
-    CHECK_CUDA(cudaMemset(gpt->d_token_embedding_grad, 0, token_emb_size * sizeof(half)));
+    CHECK_CUDA(cudaMemset(gpt->d_token_embedding_grad, 0, token_emb_size * sizeof(float)));
+    CHECK_CUDA(cudaMemset(gpt->d_W_output_grad, 0, output_weight_size * sizeof(float)));
     
     zero_gradients_transformer(gpt->transformer);
 }
@@ -313,28 +261,18 @@ void backward_pass_gpt(GPT* gpt, unsigned short* d_input_tokens) {
     const float alpha = 1.0f;
     const float beta = 0.0f;
     
-    // Step 4 (backward): Backward pass through output projection
-    // grad_token_embedding += grad_output^T * norm_output
+    // Step 3 (backward): Backward pass through output projection
+    // grad_W_output = transformer_output^T * grad_output
     LT_MATMUL(gpt, CUBLAS_OP_T, CUBLAS_OP_N, &alpha,
+              gpt->transformer->mlp_layers[gpt->num_layers-1]->d_output, gpt->seq_flat_d_model_layout,
               gpt->d_grad_output, gpt->seq_flat_vocab_layout,
-              gpt->d_norm_output, gpt->seq_flat_d_model_layout,
-              &alpha, gpt->d_token_embedding_grad, gpt->embedding_layout);
+              &alpha, gpt->d_W_output_grad, gpt->output_weight_layout);
     
-    // grad_norm_output = grad_output * token_embedding
-    LT_MATMUL(gpt, CUBLAS_OP_N, CUBLAS_OP_N, &alpha,
+    // grad_transformer_output = grad_output * W_output^T
+    LT_MATMUL(gpt, CUBLAS_OP_N, CUBLAS_OP_T, &alpha,
               gpt->d_grad_output, gpt->seq_flat_vocab_layout,
-              gpt->d_token_embedding, gpt->embedding_layout,
-              &beta, gpt->d_grad_norm_output, gpt->seq_flat_d_model_layout);
-    
-    // Step 3 (backward): Backward pass through RMSNorm
-    rmsnorm_backward_kernel_gpt<<<(gpt->batch_size * gpt->seq_len + 255) / 256, 256>>>(
-        gpt->transformer->mlp_layers[gpt->num_layers-1]->d_grad_output,
-        gpt->d_grad_norm_output,
-        gpt->transformer->mlp_layers[gpt->num_layers-1]->d_output,
-        gpt->batch_size,
-        gpt->seq_len,
-        gpt->d_model
-    );
+              gpt->d_W_output, gpt->output_weight_layout,
+              &beta, gpt->transformer->mlp_layers[gpt->num_layers-1]->d_grad_output, gpt->seq_flat_d_model_layout);
     
     // Step 2 (backward): Backward pass through transformer
     backward_pass_transformer(gpt->transformer, gpt->d_embedded_input, gpt->d_embedded_input);
@@ -348,12 +286,12 @@ void backward_pass_gpt(GPT* gpt, unsigned short* d_input_tokens) {
 }
 
 // CUDA kernel for AdamW update
-__global__ static void adamw_update_kernel_gpt(half* weight, half* grad, float* m, float* v,
+__global__ static void adamw_update_kernel_gpt(float* weight, float* grad, float* m, float* v,
                                                float beta1, float beta2, float epsilon, float learning_rate,
                                                float weight_decay, float alpha_t, int size, int batch_size) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < size) {
-        float g = __half2float(grad[idx]) / batch_size;
+        float g = grad[idx] / batch_size;
         
         // m = β₁m + (1-β₁)(∂L/∂W)
         m[idx] = beta1 * m[idx] + (1.0f - beta1) * g;
@@ -362,8 +300,7 @@ __global__ static void adamw_update_kernel_gpt(half* weight, half* grad, float* 
         
         float update = alpha_t * m[idx] / (sqrtf(v[idx]) + epsilon);
         // W = (1-λη)W - η(m/(1-β₁ᵗ))/√(v/(1-β₂ᵗ) + ε)
-        float w = __half2float(weight[idx]);
-        weight[idx] = __float2half(w * (1.0f - learning_rate * weight_decay) - update);
+        weight[idx] = weight[idx] * (1.0f - learning_rate * weight_decay) - update;
     }
 }
 
@@ -386,6 +323,15 @@ void update_weights_gpt(GPT* gpt, float learning_rate, int batch_size) {
         alpha_t, token_emb_size, batch_size
     );
     
+    // Update output weights
+    int output_weight_size = gpt->d_model * gpt->vocab_size;
+    int output_blocks = (output_weight_size + block_size - 1) / block_size;
+    adamw_update_kernel_gpt<<<output_blocks, block_size>>>(
+        gpt->d_W_output, gpt->d_W_output_grad, gpt->d_W_output_m, gpt->d_W_output_v,
+        gpt->beta1, gpt->beta2, gpt->epsilon, learning_rate, gpt->weight_decay,
+        alpha_t, output_weight_size, batch_size
+    );
+    
     // Update transformer weights
     update_weights_transformer(gpt->transformer, learning_rate, batch_size);
 }
@@ -393,10 +339,13 @@ void update_weights_gpt(GPT* gpt, float learning_rate, int batch_size) {
 // Reset optimizer state
 void reset_optimizer_gpt(GPT* gpt) {
     int token_emb_size = gpt->vocab_size * gpt->d_model;
+    int output_weight_size = gpt->d_model * gpt->vocab_size;
     
     // Reset Adam moment estimates to zero on device
     CHECK_CUDA(cudaMemset(gpt->d_token_embedding_m, 0, token_emb_size * sizeof(float)));
     CHECK_CUDA(cudaMemset(gpt->d_token_embedding_v, 0, token_emb_size * sizeof(float)));
+    CHECK_CUDA(cudaMemset(gpt->d_W_output_m, 0, output_weight_size * sizeof(float)));
+    CHECK_CUDA(cudaMemset(gpt->d_W_output_v, 0, output_weight_size * sizeof(float)));
     
     // Reset time step
     gpt->t = 0;
@@ -414,30 +363,42 @@ static void serialize_gpt(GPT* gpt, FILE* file) {
     fwrite(&gpt->vocab_size, sizeof(int), 1, file);
     
     int token_emb_size = gpt->vocab_size * gpt->d_model;
+    int output_weight_size = gpt->d_model * gpt->vocab_size;
     
     // Allocate host memory and copy embeddings
-    half* h_token_embedding = (half*)malloc(token_emb_size * sizeof(half));
+    float* h_token_embedding = (float*)malloc(token_emb_size * sizeof(float));
+    float* h_W_output = (float*)malloc(output_weight_size * sizeof(float));
     
-    CHECK_CUDA(cudaMemcpy(h_token_embedding, gpt->d_token_embedding, token_emb_size * sizeof(half), cudaMemcpyDeviceToHost));
+    CHECK_CUDA(cudaMemcpy(h_token_embedding, gpt->d_token_embedding, token_emb_size * sizeof(float), cudaMemcpyDeviceToHost));
+    CHECK_CUDA(cudaMemcpy(h_W_output, gpt->d_W_output, output_weight_size * sizeof(float), cudaMemcpyDeviceToHost));
     
-    // Write embeddings
-    fwrite(h_token_embedding, sizeof(half), token_emb_size, file);
+    // Write embeddings and weights
+    fwrite(h_token_embedding, sizeof(float), token_emb_size, file);
+    fwrite(h_W_output, sizeof(float), output_weight_size, file);
     
     free(h_token_embedding);
+    free(h_W_output);
     
     // Write optimizer state
     fwrite(&gpt->t, sizeof(int), 1, file);
     
     float* h_token_embedding_m = (float*)malloc(token_emb_size * sizeof(float));
     float* h_token_embedding_v = (float*)malloc(token_emb_size * sizeof(float));
+    float* h_W_output_m = (float*)malloc(output_weight_size * sizeof(float));
+    float* h_W_output_v = (float*)malloc(output_weight_size * sizeof(float));
     
     CHECK_CUDA(cudaMemcpy(h_token_embedding_m, gpt->d_token_embedding_m, token_emb_size * sizeof(float), cudaMemcpyDeviceToHost));
     CHECK_CUDA(cudaMemcpy(h_token_embedding_v, gpt->d_token_embedding_v, token_emb_size * sizeof(float), cudaMemcpyDeviceToHost));
+    CHECK_CUDA(cudaMemcpy(h_W_output_m, gpt->d_W_output_m, output_weight_size * sizeof(float), cudaMemcpyDeviceToHost));
+    CHECK_CUDA(cudaMemcpy(h_W_output_v, gpt->d_W_output_v, output_weight_size * sizeof(float), cudaMemcpyDeviceToHost));
     
     fwrite(h_token_embedding_m, sizeof(float), token_emb_size, file);
     fwrite(h_token_embedding_v, sizeof(float), token_emb_size, file);
+    fwrite(h_W_output_m, sizeof(float), output_weight_size, file);
+    fwrite(h_W_output_v, sizeof(float), output_weight_size, file);
     
     free(h_token_embedding_m); free(h_token_embedding_v);
+    free(h_W_output_m); free(h_W_output_v);
     
     // Serialize transformer
     serialize_transformer(gpt->transformer, file);
@@ -456,29 +417,41 @@ static GPT* deserialize_gpt(FILE* file, int batch_size, int seq_len, cublasLtHan
     GPT* gpt = init_gpt(seq_len, d_model, hidden_dim, num_layers, batch_size, cublaslt_handle);
     
     int token_emb_size = vocab_size * d_model;
+    int output_weight_size = d_model * vocab_size;
     
-    // Load embeddings
-    half* h_token_embedding = (half*)malloc(token_emb_size * sizeof(half));
+    // Load embeddings and weights
+    float* h_token_embedding = (float*)malloc(token_emb_size * sizeof(float));
+    float* h_W_output = (float*)malloc(output_weight_size * sizeof(float));
     
-    fread(h_token_embedding, sizeof(half), token_emb_size, file);
+    fread(h_token_embedding, sizeof(float), token_emb_size, file);
+    fread(h_W_output, sizeof(float), output_weight_size, file);
     
-    CHECK_CUDA(cudaMemcpy(gpt->d_token_embedding, h_token_embedding, token_emb_size * sizeof(half), cudaMemcpyHostToDevice));
+    CHECK_CUDA(cudaMemcpy(gpt->d_token_embedding, h_token_embedding, token_emb_size * sizeof(float), cudaMemcpyHostToDevice));
+    CHECK_CUDA(cudaMemcpy(gpt->d_W_output, h_W_output, output_weight_size * sizeof(float), cudaMemcpyHostToDevice));
     
     free(h_token_embedding);
+    free(h_W_output);
     
     // Load optimizer state
     fread(&gpt->t, sizeof(int), 1, file);
     
     float* h_token_embedding_m = (float*)malloc(token_emb_size * sizeof(float));
     float* h_token_embedding_v = (float*)malloc(token_emb_size * sizeof(float));
+    float* h_W_output_m = (float*)malloc(output_weight_size * sizeof(float));
+    float* h_W_output_v = (float*)malloc(output_weight_size * sizeof(float));
     
     fread(h_token_embedding_m, sizeof(float), token_emb_size, file);
     fread(h_token_embedding_v, sizeof(float), token_emb_size, file);
+    fread(h_W_output_m, sizeof(float), output_weight_size, file);
+    fread(h_W_output_v, sizeof(float), output_weight_size, file);
     
     CHECK_CUDA(cudaMemcpy(gpt->d_token_embedding_m, h_token_embedding_m, token_emb_size * sizeof(float), cudaMemcpyHostToDevice));
     CHECK_CUDA(cudaMemcpy(gpt->d_token_embedding_v, h_token_embedding_v, token_emb_size * sizeof(float), cudaMemcpyHostToDevice));
+    CHECK_CUDA(cudaMemcpy(gpt->d_W_output_m, h_W_output_m, output_weight_size * sizeof(float), cudaMemcpyHostToDevice));
+    CHECK_CUDA(cudaMemcpy(gpt->d_W_output_v, h_W_output_v, output_weight_size * sizeof(float), cudaMemcpyHostToDevice));
     
     free(h_token_embedding_m); free(h_token_embedding_v);
+    free(h_W_output_m); free(h_W_output_v);
     
     // Free the initialized transformer
     free_transformer(gpt->transformer);

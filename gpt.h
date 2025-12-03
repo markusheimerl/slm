@@ -14,9 +14,15 @@ typedef struct {
     float* token_embedding;        // [vocab_size x d_model]
     float* token_embedding_grad;   // [vocab_size x d_model]
     
-    // Adam parameters for embeddings
+    // Output projection weights
+    float* W_output;               // [d_model x vocab_size]
+    float* W_output_grad;          // [d_model x vocab_size]
+    
+    // Adam parameters
     float* token_embedding_m;      // First moment for token embeddings
     float* token_embedding_v;      // Second moment for token embeddings
+    float* W_output_m;             // First moment for output weights
+    float* W_output_v;             // Second moment for output weights
     float beta1;                   // Exponential decay rate for first moment
     float beta2;                   // Exponential decay rate for second moment
     float epsilon;                 // Small constant for numerical stability
@@ -25,12 +31,10 @@ typedef struct {
     
     // Forward pass buffers
     float* embedded_input;         // [batch_size x seq_len x d_model]
-    float* norm_output;            // [batch_size x seq_len x d_model]
     float* output;                 // [batch_size x seq_len x vocab_size]
     
     // Backward pass buffers
     float* grad_output;            // [batch_size x seq_len x vocab_size]
-    float* grad_norm_output;       // [batch_size x seq_len x d_model]
     
     // Transformer core
     Transformer* transformer;

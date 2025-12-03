@@ -20,6 +20,7 @@ GPT* init_gpt(int seq_len, int d_model, int hidden_dim, int num_layers, int batc
     gpt->weight_decay = 0.01f;
     
     size_t token_emb_size = gpt->vocab_size * d_model;
+    size_t output_weight_size = d_model * gpt->vocab_size;
     size_t embedded_size = batch_size * seq_len * d_model;
     size_t output_size = batch_size * seq_len * gpt->vocab_size;
     
@@ -27,24 +28,33 @@ GPT* init_gpt(int seq_len, int d_model, int hidden_dim, int num_layers, int batc
     gpt->token_embedding = (float*)malloc(token_emb_size * sizeof(float));
     gpt->token_embedding_grad = (float*)malloc(token_emb_size * sizeof(float));
     
+    // Allocate memory for output weights and gradients
+    gpt->W_output = (float*)malloc(output_weight_size * sizeof(float));
+    gpt->W_output_grad = (float*)malloc(output_weight_size * sizeof(float));
+    
     // Allocate memory for Adam parameters
     gpt->token_embedding_m = (float*)calloc(token_emb_size, sizeof(float));
     gpt->token_embedding_v = (float*)calloc(token_emb_size, sizeof(float));
+    gpt->W_output_m = (float*)calloc(output_weight_size, sizeof(float));
+    gpt->W_output_v = (float*)calloc(output_weight_size, sizeof(float));
     
     // Allocate memory for forward pass buffers
     gpt->embedded_input = (float*)malloc(embedded_size * sizeof(float));
-    gpt->norm_output = (float*)malloc(embedded_size * sizeof(float));
     gpt->output = (float*)malloc(output_size * sizeof(float));
     
-    // Alias/Allocate memory for backward pass buffers
+    // Alias memory for backward pass buffers
     gpt->grad_output = gpt->output;
-    gpt->grad_norm_output = (float*)malloc(embedded_size * sizeof(float));
     
     // Initialize token embeddings
     float token_scale = 1.0f / sqrtf(d_model);
     
     for (size_t i = 0; i < token_emb_size; i++) {
         gpt->token_embedding[i] = ((float)rand() / (float)RAND_MAX * 2.0f - 1.0f) * token_scale;
+    }
+    
+    // Initialize output weights
+    for (size_t i = 0; i < output_weight_size; i++) {
+        gpt->W_output[i] = ((float)rand() / (float)RAND_MAX * 2.0f - 1.0f) * token_scale;
     }
     
     // Initialize transformer
@@ -61,10 +71,10 @@ void free_gpt(GPT* gpt) {
     // Free memory
     free(gpt->token_embedding); free(gpt->token_embedding_grad);
     free(gpt->token_embedding_m); free(gpt->token_embedding_v);
+    free(gpt->W_output); free(gpt->W_output_grad);
+    free(gpt->W_output_m); free(gpt->W_output_v);
     free(gpt->embedded_input);
-    free(gpt->norm_output);
     free(gpt->output);
-    free(gpt->grad_norm_output);
     
     free(gpt);
 }
@@ -81,58 +91,6 @@ static void token_embedding_lookup(float* embedded, float* token_embedding, unsi
             for (int d = 0; d < d_model; d++) {
                 embedded[emb_offset + d] = token_embedding[token_emb_offset + d];
             }
-        }
-    }
-}
-
-// RMSNorm forward: y = x / sqrt(mean(x^2) + eps)
-static void rmsnorm_forward_gpt(float* output, const float* input, int batch_size, int seq_len, int d_model) {
-    int total = batch_size * seq_len;
-    
-    for (int idx = 0; idx < total; idx++) {
-        const float* x = &input[idx * d_model];
-        float* y = &output[idx * d_model];
-        
-        // Compute RMS
-        float sum_sq = 0.0f;
-        for (int d = 0; d < d_model; d++) {
-            sum_sq += x[d] * x[d];
-        }
-        float rms = sqrtf(sum_sq / d_model + 1e-6f);
-        
-        // y = x / RMS(x)
-        for (int d = 0; d < d_model; d++) {
-            y[d] = x[d] / rms;
-        }
-    }
-}
-
-// RMSNorm backward: ∂L/∂x = (∂L/∂y)/(x / sqrt(mean(x^2) + eps)) - x⊙(Σ_d (∂L/∂y_d)⊙x_d)/(d_model⊙(x / sqrt(mean(x^2) + eps))³)
-static void rmsnorm_backward_gpt(float* grad_input, const float* grad_output, const float* input, int batch_size, int seq_len, int d_model) {
-    int total = batch_size * seq_len;
-    
-    for (int idx = 0; idx < total; idx++) {
-        const float* x = &input[idx * d_model];
-        const float* dy = &grad_output[idx * d_model];
-        float* dx = &grad_input[idx * d_model];
-        
-        // Compute RMS
-        float sum_sq = 0.0f;
-        for (int d = 0; d < d_model; d++) {
-            sum_sq += x[d] * x[d];
-        }
-        float rms = sqrtf(sum_sq / d_model + 1e-6f);
-        
-        // Compute Σ_d (∂L/∂y_d)⊙x_d
-        float sum_dy_x = 0.0f;
-        for (int d = 0; d < d_model; d++) {
-            sum_dy_x += dy[d] * x[d];
-        }
-        
-        float rms3 = rms * rms * rms;
-        // ∂L/∂x = (∂L/∂y)/RMS - x⊙(Σ_d (∂L/∂y_d)⊙x_d)/(d_model⊙RMS³)
-        for (int d = 0; d < d_model; d++) {
-            dx[d] = (dy[d] / rms) - (x[d] * sum_dy_x) / (d_model * rms3);
         }
     }
 }
@@ -206,18 +164,11 @@ void forward_pass_gpt(GPT* gpt, unsigned short* input_tokens) {
     // Step 2: Forward pass through transformer
     forward_pass_transformer(gpt->transformer, gpt->embedded_input);
     
-    // Step 3: RMSNorm on transformer output
-    rmsnorm_forward_gpt(gpt->norm_output,
-                        gpt->transformer->mlp_layers[gpt->num_layers-1]->output,
-                        gpt->batch_size,
-                        gpt->seq_len,
-                        gpt->d_model);
-    
-    // Step 4: Output projection: output = norm_output * token_embedding^T
-    cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
+    // Step 3: Output projection: output = transformer_output * W_output
+    cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
                 gpt->batch_size * gpt->seq_len, gpt->vocab_size, gpt->d_model,
-                1.0f, gpt->norm_output, gpt->d_model,
-                gpt->token_embedding, gpt->d_model,
+                1.0f, gpt->transformer->mlp_layers[gpt->num_layers-1]->output, gpt->d_model,
+                gpt->W_output, gpt->vocab_size,
                 0.0f, gpt->output, gpt->vocab_size);
 }
 
@@ -233,36 +184,30 @@ float calculate_loss_gpt(GPT* gpt, unsigned short* target_tokens) {
 // Zero gradients
 void zero_gradients_gpt(GPT* gpt) {
     int token_emb_size = gpt->vocab_size * gpt->d_model;
+    int output_weight_size = gpt->d_model * gpt->vocab_size;
     
     memset(gpt->token_embedding_grad, 0, token_emb_size * sizeof(float));
+    memset(gpt->W_output_grad, 0, output_weight_size * sizeof(float));
     
     zero_gradients_transformer(gpt->transformer);
 }
 
 // Backward pass
 void backward_pass_gpt(GPT* gpt, unsigned short* input_tokens) {
-    // Step 4 (backward): Backward pass through output projection
-    // grad_token_embedding += grad_output^T * norm_output
+    // Step 3 (backward): Backward pass through output projection
+    // grad_W_output = transformer_output^T * grad_output
     cblas_sgemm(CblasRowMajor, CblasTrans, CblasNoTrans,
-                gpt->vocab_size, gpt->d_model, gpt->batch_size * gpt->seq_len,
-                1.0f, gpt->grad_output, gpt->vocab_size,
-                gpt->norm_output, gpt->d_model,
-                1.0f, gpt->token_embedding_grad, gpt->d_model);
+                gpt->d_model, gpt->vocab_size, gpt->batch_size * gpt->seq_len,
+                1.0f, gpt->transformer->mlp_layers[gpt->num_layers-1]->output, gpt->d_model,
+                gpt->grad_output, gpt->vocab_size,
+                1.0f, gpt->W_output_grad, gpt->vocab_size);
     
-    // grad_norm_output = grad_output * token_embedding
-    cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+    // grad_transformer_output = grad_output * W_output^T
+    cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
                 gpt->batch_size * gpt->seq_len, gpt->d_model, gpt->vocab_size,
                 1.0f, gpt->grad_output, gpt->vocab_size,
-                gpt->token_embedding, gpt->d_model,
-                0.0f, gpt->grad_norm_output, gpt->d_model);
-    
-    // Step 3 (backward): Backward pass through RMSNorm
-    rmsnorm_backward_gpt(gpt->transformer->mlp_layers[gpt->num_layers-1]->grad_output,
-                         gpt->grad_norm_output,
-                         gpt->transformer->mlp_layers[gpt->num_layers-1]->output,
-                         gpt->batch_size,
-                         gpt->seq_len,
-                         gpt->d_model);
+                gpt->W_output, gpt->vocab_size,
+                0.0f, gpt->transformer->mlp_layers[gpt->num_layers-1]->grad_output, gpt->d_model);
     
     // Step 2 (backward): Backward pass through transformer
     backward_pass_transformer(gpt->transformer, gpt->embedded_input, gpt->embedded_input);
@@ -281,6 +226,7 @@ void update_weights_gpt(GPT* gpt, float learning_rate, int batch_size) {
     float alpha_t = learning_rate * sqrtf(1.0f - beta2_t) / (1.0f - beta1_t);
     
     int token_emb_size = gpt->vocab_size * gpt->d_model;
+    int output_weight_size = gpt->d_model * gpt->vocab_size;
     
     // Update token embeddings
     for (int i = 0; i < token_emb_size; i++) {
@@ -296,6 +242,20 @@ void update_weights_gpt(GPT* gpt, float learning_rate, int batch_size) {
         gpt->token_embedding[i] = gpt->token_embedding[i] * (1.0f - learning_rate * gpt->weight_decay) - update;
     }
     
+    // Update output weights
+    for (int i = 0; i < output_weight_size; i++) {
+        float grad = gpt->W_output_grad[i] / batch_size;
+        
+        // m = β₁m + (1-β₁)(∂L/∂W)
+        gpt->W_output_m[i] = gpt->beta1 * gpt->W_output_m[i] + (1.0f - gpt->beta1) * grad;
+        // v = β₂v + (1-β₂)(∂L/∂W)²
+        gpt->W_output_v[i] = gpt->beta2 * gpt->W_output_v[i] + (1.0f - gpt->beta2) * grad * grad;
+        
+        float update = alpha_t * gpt->W_output_m[i] / (sqrtf(gpt->W_output_v[i]) + gpt->epsilon);
+        // W = (1-λη)W - η(m/(1-β₁ᵗ))/√(v/(1-β₂ᵗ) + ε)
+        gpt->W_output[i] = gpt->W_output[i] * (1.0f - learning_rate * gpt->weight_decay) - update;
+    }
+    
     // Update transformer weights
     update_weights_transformer(gpt->transformer, learning_rate, batch_size);
 }
@@ -303,10 +263,13 @@ void update_weights_gpt(GPT* gpt, float learning_rate, int batch_size) {
 // Reset optimizer state
 void reset_optimizer_gpt(GPT* gpt) {
     int token_emb_size = gpt->vocab_size * gpt->d_model;
+    int output_weight_size = gpt->d_model * gpt->vocab_size;
     
     // Reset Adam moment estimates to zero
     memset(gpt->token_embedding_m, 0, token_emb_size * sizeof(float));
     memset(gpt->token_embedding_v, 0, token_emb_size * sizeof(float));
+    memset(gpt->W_output_m, 0, output_weight_size * sizeof(float));
+    memset(gpt->W_output_v, 0, output_weight_size * sizeof(float));
     
     // Reset time step
     gpt->t = 0;
@@ -324,14 +287,18 @@ static void serialize_gpt(GPT* gpt, FILE* file) {
     fwrite(&gpt->vocab_size, sizeof(int), 1, file);
     
     int token_emb_size = gpt->vocab_size * gpt->d_model;
+    int output_weight_size = gpt->d_model * gpt->vocab_size;
     
-    // Write embeddings
+    // Write embeddings and weights
     fwrite(gpt->token_embedding, sizeof(float), token_emb_size, file);
+    fwrite(gpt->W_output, sizeof(float), output_weight_size, file);
     
     // Write optimizer state
     fwrite(&gpt->t, sizeof(int), 1, file);
     fwrite(gpt->token_embedding_m, sizeof(float), token_emb_size, file);
     fwrite(gpt->token_embedding_v, sizeof(float), token_emb_size, file);
+    fwrite(gpt->W_output_m, sizeof(float), output_weight_size, file);
+    fwrite(gpt->W_output_v, sizeof(float), output_weight_size, file);
     
     // Serialize transformer
     serialize_transformer(gpt->transformer, file);
@@ -350,14 +317,18 @@ static GPT* deserialize_gpt(FILE* file, int batch_size, int seq_len) {
     GPT* gpt = init_gpt(seq_len, d_model, hidden_dim, num_layers, batch_size);
     
     int token_emb_size = vocab_size * d_model;
+    int output_weight_size = d_model * vocab_size;
     
-    // Read embeddings
+    // Read embeddings and weights
     fread(gpt->token_embedding, sizeof(float), token_emb_size, file);
+    fread(gpt->W_output, sizeof(float), output_weight_size, file);
     
     // Read optimizer state
     fread(&gpt->t, sizeof(int), 1, file);
     fread(gpt->token_embedding_m, sizeof(float), token_emb_size, file);
     fread(gpt->token_embedding_v, sizeof(float), token_emb_size, file);
+    fread(gpt->W_output_m, sizeof(float), output_weight_size, file);
+    fread(gpt->W_output_v, sizeof(float), output_weight_size, file);
     
     // Free the initialized transformer
     free_transformer(gpt->transformer);
